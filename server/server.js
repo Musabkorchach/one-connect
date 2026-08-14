@@ -38,14 +38,29 @@ app.get("/health", (req, res) => {
 
 // Auth: Verify Pi token and create session
 app.post("/api/auth/verify", express.json(), async (req, res) => {
-  const { accessToken, piUsername } = req.body;
+  const { accessToken } = req.body;
 
-  if (!accessToken || !piUsername) {
-    return res.status(400).json({ error: "Missing accessToken or piUsername" });
-  }
+  if (!accessToken) {
+  return res.status(400).json({ error: "Missing accessToken" });
+}
 
   try {
     // In production: verify token with Pi server
+    const piResponse = await fetch("https://api.minepi.com/v2/me", {
+  headers: {
+    Authorization: `Bearer ${accessToken}`,
+  },
+});
+
+if (!piResponse.ok) {
+  return res.status(401).json({ error: "Invalid Pi access token" });
+}
+
+const piUser = await piResponse.json();
+const piUsername = piUser.username;
+if (!piUsername) {
+  return res.status(401).json({ error: "Pi user identity not available" });
+}
     const userId = `pi_${piUsername}`;
     const sessionToken = Buffer.from(`${userId}:${Date.now()}`).toString("base64");
 
