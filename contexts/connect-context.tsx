@@ -423,6 +423,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
       color: person.color,
       messages: [],
       updatedAt: Date.now(),
+      isGroup: false,
       unread: 0,
     };
     commitChats([conv, ...chatsRef.current]);
@@ -611,6 +612,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
             commitEmails(updated);
           } else {
             pushToast("Failed to send email", "error");
+            
             const updated = emailsRef.current.map((e) =>
               e.id === email.id ? { ...e, deliveryStatus: "failed" as const } : e
             );
@@ -622,26 +624,29 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
           pushToast("Email delivery failed", "error");
         });
     } else {
-      // Simulate internal email reply
-      pushToast("Email sent", "success");
-      setTimeout(() => {
-        const reply: Email = {
-          id: uid(),
-          folder: "inbox",
-          threadId,
-          type: "internal",
-          fromMe: false,
-          recipient: `@${profile.username}`,
-          senderName: email.senderName,
-          color: email.color,
-          subject: `Re: ${email.subject}`,
-          body: "Thanks for your message! I'll get back to you soon.\n\nSent from One Connect.",
-          read: false,
-          at: Date.now(),
-        };
-        commitEmails([reply, ...emailsRef.current].slice(0, CAPS.emails));
-      }, 3000);
-    }
+  // Simulate internal email reply
+  pushToast("Email sent", "success");
+  return;
+  setTimeout(() => {
+    const reply: Email = {
+      id: uid(),
+      folder: "inbox",
+      threadId,
+      type: "internal",
+      fromMe: false,
+      recipient: `@${profile.username}`,
+      senderName: email.senderName,
+      color: email.color,
+      subject: `Re: ${email.subject}`,
+      body: "Thanks for your message! I'll get back to you soon.\n\nSent from One Connect.",
+      read: false,
+      at: Date.now(),
+    };
+    commitEmails([reply, ...emailsRef.current].slice(0, CAPS.emails));
+  }, 3000);
+}
+    
+      
   };
 
   const saveDraft = (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => {

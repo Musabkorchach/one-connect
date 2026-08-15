@@ -10,6 +10,7 @@ import React, {
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { PRODUCT_CONFIG } from "@/lib/product-config";
 import { buildPiSdk, createSdk } from "@/lib/pi";
+import { verifyPiAuth, initSocket } from "@/lib/api-client";
 import type {
   Product,
   SDKLiteInstance,
@@ -123,6 +124,7 @@ interface PiAuthContextType {
   authMessage: string;
   hasError: boolean;
   piUsername: string;
+  sessionToken: string | null;
   sdk: SDKLiteInstance | null;
   products: Product[] | null;
   restoredPurchases: UserPurchaseBalance[] | null;
@@ -196,6 +198,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [authMessage, setAuthMessage] = useState("Initializing Pi Network...");
   const [hasError, setHasError] = useState(false);
   const [piUsername, setPiUsername] = useState("");
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sdk, setSdk] = useState<SDKLiteInstance | null>(null);
   const [products, setProducts] = useState<Product[] | null>(null);
   const [restoredPurchases, setRestoredPurchases] = useState<
@@ -268,10 +271,14 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // cannot complete outside the Pi CDN wrapper and would hang indefinitely.
       const parentCredentials = await requestParentCredentials();
       if (parentCredentials) {
-        setIsAuthenticated(true);
-        return;
-      }
+  const authResult = await verifyPiAuth(parentCredentials.accessToken);
 
+  setSessionToken(authResult.sessionToken);
+  setPiUsername(authResult.piUsername || "");
+  setIsAuthenticated(true);
+  initSocket(authResult.userId, authResult.piUsername);
+  return;
+}
       setAuthMessage("Loading Pi SDK...");
       await loadPiSDK();
       setAuthMessage("Initializing Pi Network...");
@@ -292,6 +299,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       const pi = buildPiSdk();
       const authenticatedUser = await pi.auth.login();
       setPiUsername(authenticatedUser.username || "");
+      initSocket(authenticatedUser.uid, authenticatedUser.username);
       const success = await sdkLite.login();
       if (!success) {
         throw new Error("Login failed. Please try again.");
@@ -339,6 +347,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     authMessage,
     hasError,
     piUsername,
+    sessionToken,
     sdk,
     products,
     restoredPurchases,

@@ -31,6 +31,33 @@ const conversations = new Map();
 const contacts = new Map();
 const userSessions = new Map();
 
+function requireSession(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing session token" });
+  }
+
+  const sessionToken = authHeader.substring(7);
+  const session = userSessions.get(sessionToken);
+
+  if (!session) {
+    return res.status(401).json({ error: "Invalid session token" });
+  }
+
+  if (session.expiresAt < Date.now()) {
+    userSessions.delete(sessionToken);
+    return res.status(401).json({ error: "Session expired" });
+  }
+
+  req.user = {
+    userId: session.userId,
+    piUsername: session.piUsername,
+  };
+
+  next();
+}
+
 // Routes
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -75,7 +102,7 @@ if (!piUsername) {
 
     userSessions.set(sessionToken, { userId, piUsername, accessToken, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
 
-    res.json({ sessionToken, userId, message: "Authenticated" });
+    res.json({ sessionToken, userId, piUsername, message: "Authenticated" });
   } catch (error) {
     console.error("Auth error:", error);
     res.status(500).json({ error: "Authentication failed" });
@@ -83,7 +110,7 @@ if (!piUsername) {
 });
 
 // Profile endpoints
-app.get("/api/profile/:userId", (req, res) => {
+app.get("/api/profile/:userId", requireSession, (req, res) => {
   const user = users.get(req.params.userId);
   if (!user) return res.status(404).json({ error: "User not found" });
   res.json(user);

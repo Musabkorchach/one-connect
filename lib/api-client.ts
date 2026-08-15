@@ -1,7 +1,7 @@
 import io from "socket.io-client";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://localhost:3001";
-const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:3001";
+const API_URL = process.env.REACT_APP_API_URL || "https://bedford-here-salaries-framework.trycloudflare.com";
+const WS_URL = process.env.REACT_APP_WS_URL || "wss://bedford-here-salaries-framework.trycloudflare.com";
 
 let socket: ReturnType<typeof io> | null = null;
 
@@ -12,11 +12,11 @@ export function initSocket(userId: string, piUsername: string) {
   if (socket?.connected) return socket;
 
   socket = io(WS_URL, {
-    reconnection: true,
-    reconnectionDelay: 1000,
-    reconnectionDelayMax: 5000,
-    reconnectionAttempts: 5,
-  });
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  reconnectionAttempts: 5,
+});
 
   socket.on("connect", () => {
     console.log("WebSocket connected");
@@ -54,11 +54,11 @@ export function disconnectSocket() {
 /**
  * Verify Pi authentication with backend
  */
-export async function verifyPiAuth(accessToken: string, piUsername: string) {
+export async function verifyPiAuth(accessToken: string) {
   const response = await fetch(`${API_URL}/api/auth/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accessToken, piUsername }),
+    body: JSON.stringify({ accessToken }),
   });
 
   if (!response.ok) throw new Error("Auth verification failed");
