@@ -136,6 +136,14 @@ export function emitMessage(conversationId: string, kind: string, text: string, 
 
   socket.emit("message:send", { conversationId, kind, text, fileName });
 }
+export function joinConversation(conversationId: string) {
+  if (!socket?.connected) {
+    console.error("WebSocket not connected");
+    return;
+  }
+
+  socket.emit("conversation:join", conversationId);
+}
 
 /**
  * Listen for new messages
