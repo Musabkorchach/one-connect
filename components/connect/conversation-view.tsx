@@ -1,5 +1,6 @@
 "use client";
 
+import { joinConversation } from "@/lib/api-client";
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Button, IconButton, TextInput, cx } from "./ui";
@@ -42,9 +43,10 @@ export function ConversationView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout>();
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    joinConversation(conv?.id ?? username);
     markChatRead(username);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username, conv?.messages.length]);
@@ -91,14 +93,21 @@ export function ConversationView({
           </div>
           <IconButton
             className="h-9 w-9 text-turquoise"
-            onClick={() => onCall(conv.username, conv.name, conv.color, "voice")}
+            onClick={() =>
+  onCall(
+    conv.username ?? username,
+    conv.name ?? conv.username ?? username,
+    conv.color,
+    "voice"
+  )
+}
             aria-label={t.voiceCall}
           >
             <IconPhone className="h-5 w-5" />
           </IconButton>
           <IconButton
             className="h-9 w-9 text-turquoise"
-            onClick={() => onCall(conv.username, conv.name, conv.color, "video")}
+          onClick={() => onCall(conv.username ?? username, conv.name ?? conv.username ?? username, conv.color, "video")}
             aria-label={t.videoCall}
           >
             <IconVideo className="h-5 w-5" />
@@ -131,7 +140,9 @@ export function ConversationView({
               onChange={(e) => {
                 setText(e.target.value);
                 setTyping(true);
-                clearTimeout(typingTimeoutRef.current);
+                if (typingTimeoutRef.current !== null) {
+  clearTimeout(typingTimeoutRef.current);
+}
                 typingTimeoutRef.current = setTimeout(() => setTyping(false), 1200);
               }}
               placeholder={t.typeMessage}
@@ -140,7 +151,9 @@ export function ConversationView({
                 if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault();
                   setTyping(false);
-                  clearTimeout(typingTimeoutRef.current);
+                  if (typingTimeoutRef.current !== null) {
+  clearTimeout(typingTimeoutRef.current);
+}
                   submit();
                 }
               }}

@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { getDict, type Dict } from "@/lib/connect/i18n";
+import { emitMessage, joinConversation } from "@/lib/api-client";
 import {
   KEYS,
   CAPS,
@@ -471,6 +472,9 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
       status: "sent",
       at: Date.now(),
     };
+
+    emitMessage(conv.id, kind, msg.text, msg.fileName);
+
     conv = { ...conv, messages: [...conv.messages, msg].slice(-CAPS.messages), updatedAt: Date.now() };
     list = list.map((c) => (c.username === uname ? conv! : c));
     list = bumpChat(list, uname);

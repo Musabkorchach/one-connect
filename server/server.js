@@ -1,12 +1,24 @@
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import { MongoClient } from "mongodb";
 import cors from "cors";
 import { config } from "dotenv";
+import dns from "dns";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 
 config();
+
+dns.setServers(["8.8.8.8"]);
+
+const mongoClient = new MongoClient(process.env.MONGODB_URI);
+
+await mongoClient.connect();
+console.log("MongoDB connected successfully");
+
+const db = mongoClient.db("oneconnect");
+const messagesCollection = db.collection("messages");
 
 const app = express();
 const httpServer = createServer(app);
@@ -162,6 +174,17 @@ app.post("/api/messages/:userId", express.json(), (req, res) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
+  socket.on("conversation:join", async (conversationId) => {
+  socket.join(`conv:${conversationId}`);
+
+  const messages = await messagesCollection
+    .find({ conversationId })
+    .sort({ at: 1 })
+    .toArray();
+
+  socket.emit("conversation:messages", messages);
+});
+
   socket.on("user:login", (userId, piUsername) => {
     socket.userId = userId;
     socket.piUsername = piUsername;
@@ -169,7 +192,7 @@ io.on("connection", (socket) => {
     io.emit("user:online", { userId, piUsername });
   });
 
-  socket.on("message:send", (data) => {
+  socket.on("message:send", async (data) => {
     const { conversationId, kind, text, fileName } = data;
     const message = {
       id: Math.random().toString(36).slice(2),
@@ -180,6 +203,11 @@ io.on("connection", (socket) => {
       status: "delivered",
       at: Date.now(),
     };
+
+    await messagesCollection.insertOne({
+  conversationId,
+  ...message,
+});
 
     io.to(`conv:${conversationId}`).emit("message:new", message);
   });
