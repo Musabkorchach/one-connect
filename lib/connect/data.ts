@@ -485,6 +485,7 @@ export function sanitizeChats(blob: unknown): Conversation[] {
       username,
       name: cleanStr(c.name, NAME_MAX) || username,
       color: clampNum(c.color, 0, 360, hueFromString(username)),
+      isGroup: c.isGroup === true,
       messages: msgs,
       updatedAt: clampNum(c.updatedAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
       unread: clampNum(c.unread, 0, 999, 0),

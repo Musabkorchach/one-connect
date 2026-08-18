@@ -226,6 +226,12 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
 
         const loadedProfile = pRec ? sanitizeProfile(pRec.blob) : defaultProfile();
+        console.log("[PROFILE LOAD]", {
+  hasProfileRecord: !!pRec,
+  setupDone: loadedProfile.setupDone,
+  displayName: loadedProfile.displayName,
+  piUsername: loadedProfile.piUsername,
+});
         const canonicalIdentity = canonicalPiUsername(piUsername || loadedProfile.piUsername || loadedProfile.username);
         if (canonicalIdentity) {
           loadedProfile.username = canonicalIdentity;

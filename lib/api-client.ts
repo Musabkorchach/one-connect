@@ -1,7 +1,12 @@
 import io from "socket.io-client";
 
-const API_URL = process.env.REACT_APP_API_URL || "https://bedford-here-salaries-framework.trycloudflare.com";
-const WS_URL = process.env.REACT_APP_WS_URL || "wss://bedford-here-salaries-framework.trycloudflare.com";
+const API_URL =
+  process.env.REACT_APP_API_URL ||
+  "https://concepts-after-locked-bytes.trycloudflare.com";
+
+const WS_URL =
+  process.env.REACT_APP_WS_URL ||
+  "wss://concepts-after-locked-bytes.trycloudflare.com";
 
 let socket: ReturnType<typeof io> | null = null;
 
