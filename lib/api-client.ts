@@ -2,11 +2,11 @@ import io from "socket.io-client";
 
 const API_URL =
   process.env.REACT_APP_API_URL ||
-  "https://concepts-after-locked-bytes.trycloudflare.com";
+  "https://one-connect.onrender.com";
 
 const WS_URL =
   process.env.REACT_APP_WS_URL ||
-  "wss://concepts-after-locked-bytes.trycloudflare.com";
+  "https://one-connect.onrender.com";
 
 let socket: ReturnType<typeof io> | null = null;
 
