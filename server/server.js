@@ -36,6 +36,7 @@ const __dirname = dirname(__filename);
 app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb" }));
+app.use(express.static(new URL("../public", import.meta.url).pathname));
 
 // In-memory storage (replace with MongoDB in production)
 const users = new Map();
