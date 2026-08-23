@@ -20,11 +20,16 @@ console.log("MongoDB connected successfully");
 const db = mongoClient.db("oneconnect");
 const messagesCollection = db.collection("messages");
 
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  "https://one-connect-lake.vercel.app",
+  "http://localhost:3000",
+].filter(Boolean);
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: allowedOrigins,
     credentials: true,
   },
 });
@@ -33,7 +38,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb" }));
 app.use(express.static(new URL("../public", import.meta.url).pathname));
