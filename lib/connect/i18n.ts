@@ -101,6 +101,16 @@ export interface Dict {
   aboutBody: string;
   settings: string;
   enterName: string;
+
+  // profile status and actions
+  copied?: string;
+  status?: string;
+  logout?: string;
+  available?: string;
+  away?: string;
+  busy?: string;
+  statusMessage?: string;
+  statusMessagePh?: string;
 }
 
 const en: Dict = {

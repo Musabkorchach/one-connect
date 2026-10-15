@@ -15,7 +15,7 @@ export function ChatsView({ onOpen }: { onOpen: (username: string) => void }) {
     const q = query.trim().toLowerCase();
     if (!q) return chats;
     return chats.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.username.toLowerCase().includes(q),
+      (c) => c.name.toLowerCase().includes(q) || (c.username ?? "").toLowerCase().includes(q),
     );
   }, [chats, query]);
 
@@ -58,7 +58,7 @@ export function ChatsView({ onOpen }: { onOpen: (username: string) => void }) {
         <ul className="px-2 pt-2">
           {filtered.map((c, i) => (
             <li key={c.id} style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }} className="pc-fade-up">
-              <ChatRow conv={c} locale={lang} onOpen={() => onOpen(c.username)} t={t} />
+              <ChatRow conv={c} locale={lang} onOpen={() => { if (c.username) onOpen(c.username); }} t={t} />
             </li>
           ))}
         </ul>

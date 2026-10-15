@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 // Backend webhook for receiving incoming external emails
 // Receives webhook payloads from email providers (SendGrid, Mailgun, etc.)
 // Never expose credentials; all validation done server-side
@@ -12,7 +13,7 @@ export async function POST(request: Request) {
 
     if (!webhookSecret) {
       console.warn("[v0] Webhook secret not configured");
-      return Response.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // TODO: Implement signature verification based on provider
@@ -50,10 +51,10 @@ export async function POST(request: Request) {
 
     // In production, update email status in database/user state
     // For now, just acknowledge receipt
-    return Response.json({ success: true, status: eventType });
+    return NextResponse.json({ success: true, status: eventType });
   } catch (error) {
     console.error("[v0] Webhook error:", error);
-    return Response.json(
+    return NextResponse.json(
       { error: "Webhook processing failed" },
       { status: 500 }
     );
