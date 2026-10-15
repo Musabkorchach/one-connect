@@ -300,11 +300,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       const authenticatedUser = await pi.auth.login();
       setPiUsername(authenticatedUser.username || "");
       initSocket(authenticatedUser.uid, authenticatedUser.username);
-      const success = await sdkLite.login();
-      if (!success) {
-        throw new Error("Login failed. Please try again.");
-      }
-
       const sdkInstance = createSdk(sdkLite, pi);
       setSdk(sdkInstance);
       setIsAuthenticated(true);

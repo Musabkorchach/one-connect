@@ -69,7 +69,7 @@ export function ProfileView() {
       /* ignore */
     }
     setCopied(true);
-    pushToast(t.copied, "success");
+    pushToast(t.copied || "Copied to clipboard", "success");
     setTimeout(() => setCopied(false), 1600);
   };
 
@@ -117,12 +117,13 @@ export function ProfileView() {
           onClick={() => setStatusOpen(true)}
           className="pc-press flex w-full items-center gap-3 rounded-2xl pc-glass p-4 text-start"
         >
-          <span className={cx("flex h-4 w-4 items-center justify-center rounded-full", {
-            "bg-success": profile.status === "available",
-            "bg-yellow-500": profile.status === "away",
-            "bg-red-500": profile.status === "busy",
-            "bg-gray-500": profile.status === "offline",
-          })} />
+          <span className={cx(
+            "flex h-4 w-4 items-center justify-center rounded-full",
+            profile.status === "available" && "bg-success",
+            profile.status === "away" && "bg-yellow-500",
+            profile.status === "busy" && "bg-red-500",
+            profile.status === "offline" && "bg-gray-500",
+          )} />
           <div className="min-w-0 flex-1">
             <p className="font-semibold text-foreground capitalize">{profile.status}</p>
             {profile.statusText && <p className="text-xs text-muted-foreground truncate">{profile.statusText}</p>}
@@ -284,12 +285,13 @@ function StatusSheet({ open, onClose }: { open: boolean; onClose: () => void }) 
                   status === s ? "bg-primary/15 border border-primary" : "bg-card/50 border border-card",
                 )}
               >
-                <span className={cx("h-3 w-3 rounded-full", {
-                  "bg-success": s === "available",
-                  "bg-yellow-500": s === "away",
-                  "bg-red-500": s === "busy",
-                  "bg-gray-500": s === "offline",
-                })} />
+                <span className={cx(
+                  "h-3 w-3 rounded-full",
+                  s === "available" && "bg-success",
+                  s === "away" && "bg-yellow-500",
+                  s === "busy" && "bg-red-500",
+                  s === "offline" && "bg-gray-500",
+                )} />
                 <span className="text-sm font-semibold capitalize">{statusLabels[s]}</span>
               </button>
             ))}

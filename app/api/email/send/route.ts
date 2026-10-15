@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 // Backend API for sending external emails
 // Uses SMTP via secure environment variables (never exposed to frontend)
 
@@ -9,7 +10,7 @@ export async function POST(request: Request) {
     // Validate recipient is external email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(recipient)) {
-      return Response.json(
+      return NextResponse.json(
         { error: "Invalid email recipient" },
         { status: 400 }
       );
@@ -23,7 +24,7 @@ export async function POST(request: Request) {
 
     if (!emailApiKey || !fromAddress) {
       console.error("[v0] Email provider not configured");
-      return Response.json(
+      return NextResponse.json(
         { error: "Email service not configured" },
         { status: 500 }
       );
@@ -44,7 +45,7 @@ export async function POST(request: Request) {
     }
 
     // Return success with delivery tracking ID
-    return Response.json({
+    return NextResponse.json({
       success: true,
       messageId: `msg_${Date.now()}`,
       recipient,
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("[v0] Email send error:", error);
-    return Response.json(
+    return NextResponse.json(
       { error: "Failed to send email" },
       { status: 500 }
     );
