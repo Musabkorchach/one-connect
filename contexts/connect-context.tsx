@@ -148,8 +148,12 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
       await api.set(key, blob);
       const s = savers.current[key];
       if (s) s.delay = 1300;
-    } catch {
-      setStorageNotice(true);
+    } catch (error) {
+  console.error("[ONE CONNECT STORAGE ERROR]", {
+    key,
+    error,
+  });
+  setStorageNotice(true);
       setTimeout(() => setStorageNotice(false), 2600);
       const s = savers.current[key];
       if (s) {
@@ -485,46 +489,6 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     list = list.map((c) => (c.username === uname ? conv! : c));
     list = bumpChat(list, uname);
     commitChats(list, true);
-
-    // simulate delivery -> read -> reply
-    const msgId = msg.id;
-    const advance = (status: Message["status"], delay: number) => {
-      setTimeout(() => {
-        const cur = [...chatsRef.current];
-        const ci = cur.findIndex((c) => c.username === uname);
-        if (ci < 0) return;
-        const conv2 = cur[ci];
-        cur[ci] = {
-          ...conv2,
-          messages: conv2.messages.map((m) => (m.id === msgId ? { ...m, status } : m)),
-        };
-        commitChats(cur);
-      }, delay);
-    };
-    advance("delivered", 700);
-    advance("read", 1600);
-
-    setTimeout(() => {
-      const replyText = pickReply(uname);
-      const cur = [...chatsRef.current];
-      const ci = cur.findIndex((c) => c.username === uname);
-      if (ci < 0) return;
-      const conv2 = cur[ci];
-      const reply: Message = {
-        id: uid(),
-        fromMe: false,
-        kind: "text",
-        text: replyText,
-        status: "read",
-        at: Date.now(),
-      };
-      cur[ci] = {
-        ...conv2,
-        messages: [...conv2.messages, reply].slice(-CAPS.messages),
-        updatedAt: Date.now(),
-      };
-      commitChats(bumpChat(cur, uname));
-    }, 2600);
   };
 
   const markChatRead = (username: string) => {
@@ -742,21 +706,6 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   };
 
   return <ConnectContext.Provider value={value}>{children}</ConnectContext.Provider>;
-}
-
-// deterministic reply pool per contact
-const REPLIES = [
-  "Got it, thanks!",
-  "Sounds good 👍",
-  "Let me check and get back to you.",
-  "That works for me.",
-  "Perfect, talk soon!",
-  "Sure thing.",
-  "On it now.",
-  "Great, appreciate it!",
-];
-function pickReply(seed: string): string {
-  return REPLIES[hueFromString(seed + Date.now()) % REPLIES.length];
 }
 
 export function useConnect() {
