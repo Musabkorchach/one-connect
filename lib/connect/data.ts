@@ -5,7 +5,7 @@ export type LangId =
   | "en" | "zh" | "es" | "fr" | "ar" | "hi" | "ru" | "ja"
   | "ko" | "pt" | "de" | "it" | "tr" | "vi" | "id" | "am" | "ti";
 
-export type MsgStatus = "sent" | "delivered" | "read";
+export type MsgStatus = "pending" | "sent" | "delivered" | "read" | "failed";
 export type MsgKind = "text" | "image" | "file" | "video" | "voice";
 export type CallKind = "voice" | "video";
 export type CallDir = "incoming" | "outgoing" | "missed";
@@ -402,7 +402,7 @@ function sanitizeContact(v: unknown): Contact | null {
     online: c.online === true,
     status,
     statusText: cleanStr(c.statusText, 100),
-    addedAt: clampNum(c.addedAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+    addedAt: clampNum(typeof c.addedAt === "string" ? Date.parse(c.addedAt) : c.addedAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
   };
 }
 export function sanitizeContacts(blob: unknown): Contact[] {
@@ -449,7 +449,7 @@ export function requestsToBlob(items: ContactRequest[]): Record<string, unknown>
 }
 
 const MSG_KINDS: MsgKind[] = ["text", "image", "file", "video", "voice"];
-const MSG_STATUS: MsgStatus[] = ["sent", "delivered", "read"];
+const MSG_STATUS: MsgStatus[] = ["pending", "sent", "delivered", "read", "failed"];
 function sanitizeMessage(v: unknown): Message | null {
   if (!v || typeof v !== "object") return null;
   const m = v as Record<string, unknown>;

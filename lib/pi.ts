@@ -14,7 +14,10 @@ import { createPiSDK } from "@swetate/core";
 import { authPlugin } from "@swetate/auth";
 import { userStatePlugin } from "@swetate/user-state";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
+import { verifyPiAuth } from "@/lib/api-client";
 import type { RestoreOptions, SDKLiteInstance, UserStateRecord } from "@/lib/sdklite-types";
+
+type OneConnectAuthPlugin = ReturnType<typeof authPlugin>;
 
 interface PiUser {
   uid: string;
@@ -27,8 +30,12 @@ interface PiAuthApi {
   login: (scopes?: string[]) => Promise<PiUser>;
   getUser: () => PiUser | null;
   isLoggedIn: () => boolean;
+  getRenderSession: () => {
+    sessionToken: string;
+    userId: string;
+    piUsername: string;
+  } | null;
 }
-
 interface PiUserStateApi {
   get: (key: string) => Promise<UserStateRecord | null>;
   set: (key: string, blob: Record<string, unknown>) => Promise<void>;
@@ -41,6 +48,93 @@ export interface PiSdk {
   userState: PiUserStateApi;
 }
 
+function oneConnectAuthPlugin(): OneConnectAuthPlugin {
+  return {
+    name: "auth",
+    apiVersion: "v1",
+
+    install(ctx) {
+      let user: PiUser | null = null;
+      let appStudioToken: string | null = null;
+      let renderSession: {
+        sessionToken: string;
+        userId: string;
+        piUsername: string;
+      } | null = null;
+
+      let incompletePaymentHandler = (_payment: unknown) => {};
+
+      async function login(
+        scopes: string[] = ["username", "payments"],
+      ): Promise<PiUser> {
+        if (user) return user;
+
+        const result = await Pi.authenticate(
+          scopes,
+          incompletePaymentHandler,
+        );
+
+        const appStudioResponse = await ctx.backendClient.post(
+          "/login",
+          { accessToken: result.accessToken },
+        );
+
+        const verifiedRenderSession = await verifyPiAuth(
+          result.accessToken,
+        );
+
+        if (
+          !appStudioResponse.data?.sessionToken ||
+          !appStudioResponse.data?.user ||
+          !verifiedRenderSession?.sessionToken ||
+          !verifiedRenderSession?.userId ||
+          verifiedRenderSession.piUsername !== result.user.username
+        ) {
+          throw new Error("Pi authentication verification failed");
+        }
+
+        appStudioToken = appStudioResponse.data.sessionToken;
+        renderSession = {
+          sessionToken: verifiedRenderSession.sessionToken,
+          userId: verifiedRenderSession.userId,
+          piUsername: verifiedRenderSession.piUsername,
+        };
+        user = appStudioResponse.data.user;
+
+        return user!;
+      }
+
+      async function ensureLoggedIn(scopes?: string[]) {
+        if (!user) await login(scopes);
+      }
+
+      function getHeaders() {
+        return appStudioToken
+          ? { Authorization: `Bearer ${appStudioToken}` }
+          : {};
+      }
+
+      return {
+        internal: {
+          getHeaders,
+          ensureLoggedIn,
+          setIncompletePaymentHandler: (
+            handler: (payment: unknown) => void,
+          ) => {
+            incompletePaymentHandler = handler;
+          },
+        },
+        public: {
+          login,
+          getUser: () => user,
+          isLoggedIn: () => user !== null,
+          getRenderSession: () => renderSession,
+        },
+      };
+    },
+  };
+}
+
 /**
  * Construct the @pi-sdk instance with the auth and user-state plugins. The plugins mount
  * `auth` and `userState`, and core auto-namespaces their requests to /pi/{plugin}/{version}
@@ -48,7 +142,7 @@ export interface PiSdk {
  */
 export function buildPiSdk(): PiSdk {
   const pi = createPiSDK({ backendUrl: PI_NETWORK_CONFIG.BACKEND_URL });
-  pi.use(authPlugin());
+  pi.use(oneConnectAuthPlugin());
   pi.use(userStatePlugin());
   return pi as unknown as PiSdk;
 }

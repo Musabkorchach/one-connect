@@ -9,19 +9,38 @@ const WS_URL =
   "https://one-connect.onrender.com";
 
 let socket: ReturnType<typeof io> | null = null;
+const messageListeners = {
+  newMessage: new Set<(message: Record<string, unknown>) => void>(),
+  saved: new Set<(data: { id: string; status: "sent" }) => void>(),
+  error: new Set<(data: { id?: string; error: string }) => void>(),
+};
 
 /**
  * Initialize WebSocket connection
  */
-export function initSocket(userId: string, piUsername: string) {
-  if (socket?.connected) return socket;
+export function initSocket(userId: string, piUsername: string, sessionToken: string) {
+  if (socket?.connected && socket.auth && typeof socket.auth === "object" && "sessionToken" in socket.auth && socket.auth.sessionToken === sessionToken) return socket;
+if (socket) disconnectSocket();
 
   socket = io(WS_URL, {
+  auth: { sessionToken },
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
   reconnectionAttempts: 5,
 });
+
+  for (const callback of messageListeners.newMessage) {
+    socket.on("message:new", callback);
+  }
+
+  for (const callback of messageListeners.saved) {
+    socket.on("message:saved", callback);
+  }
+
+  for (const callback of messageListeners.error) {
+    socket.on("message:error", callback);
+  }
 
   socket.on("connect", () => {
     console.log("WebSocket connected");
@@ -34,6 +53,13 @@ export function initSocket(userId: string, piUsername: string) {
 
   socket.on("error", (error) => {
     console.error("WebSocket error:", error);
+  });
+
+    socket.on("connect_error", (error) => {
+    console.error("[ONE CONNECT SOCKET CONNECTION ERROR]", {
+      message: error.message,
+      cause: error.cause,
+    });
   });
 
   return socket;
@@ -51,11 +77,24 @@ export function getSocket() {
  */
 export function disconnectSocket() {
   if (socket) {
+    socket.removeAllListeners();
     socket.disconnect();
     socket = null;
   }
 }
 
+export async function revokeSession(sessionToken: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/auth/logout`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to revoke session");
+  }
+}
 /**
  * Verify Pi authentication with backend
  */
@@ -96,19 +135,23 @@ export async function updateUserProfile(userId: string, updates: Record<string, 
 /**
  * Get user contacts
  */
-export async function getUserContacts(userId: string) {
-  const response = await fetch(`${API_URL}/api/contacts/${userId}`);
+export async function getUserContacts(userId: string, sessionToken: string) {
+  const response = await fetch(`${API_URL}/api/contacts/${userId}`, {
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+  });
+
   if (!response.ok) throw new Error("Failed to fetch contacts");
   return response.json();
 }
-
 /**
  * Add contact
  */
-export async function addContact(userId: string, username: string, name: string) {
+export async function addContact(userId: string, username: string, name: string, sessionToken: string) {
   const response = await fetch(`${API_URL}/api/contacts/${userId}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
     body: JSON.stringify({ username, name }),
   });
 
@@ -133,13 +176,27 @@ export async function sendMessage(userId: string, conversationId: string, messag
 /**
  * Emit message via WebSocket (for real-time)
  */
-export function emitMessage(conversationId: string, kind: string, text: string, fileName?: string) {
+export function emitMessage(
+  conversationId: string,
+  kind: string,
+  text: string,
+  fileName?: string,
+  messageId?: string,
+): boolean {
   if (!socket?.connected) {
     console.error("WebSocket not connected");
-    return;
+    return false;
   }
 
-  socket.emit("message:send", { conversationId, kind, text, fileName });
+  socket.emit("message:send", {
+    conversationId,
+    kind,
+    text,
+    fileName,
+    messageId,
+  });
+
+  return true;
 }
 export function joinConversation(conversationId: string) {
   if (!socket?.connected) {
@@ -153,9 +210,64 @@ export function joinConversation(conversationId: string) {
 /**
  * Listen for new messages
  */
-export function onNewMessage(callback: (message: Record<string, unknown>) => void) {
-  if (!socket) return;
-  socket.on("message:new", callback);
+export function onNewMessage(
+  callback: (message: Record<string, unknown>) => void
+) {
+  messageListeners.newMessage.add(callback);
+
+  const currentSocket = socket;
+  currentSocket?.on("message:new", callback);
+
+  return () => {
+    messageListeners.newMessage.delete(callback);
+    currentSocket?.off("message:new", callback);
+
+    if (socket && socket !== currentSocket) {
+      socket.off("message:new", callback);
+    }
+  };
+}
+
+/**
+ * Listen for successful message persistence
+ */
+export function onMessageSaved(
+  callback: (data: { id: string; status: "sent" }) => void
+) {
+  messageListeners.saved.add(callback);
+
+  const currentSocket = socket;
+  currentSocket?.on("message:saved", callback);
+
+  return () => {
+    messageListeners.saved.delete(callback);
+    currentSocket?.off("message:saved", callback);
+
+    if (socket && socket !== currentSocket) {
+      socket.off("message:saved", callback);
+    }
+  };
+}
+
+/**
+ * Listen for message sending or persistence errors
+ */
+export function onMessageError(
+  callback: (data: { id?: string; error: string }) => void
+) {
+  messageListeners.error.add(callback);
+
+  const currentSocket = socket;
+  currentSocket?.on("message:error", callback);
+
+  return () => {
+    messageListeners.error.delete(callback);
+    currentSocket?.off("message:error", callback);
+
+    if (socket && socket !== currentSocket) {
+      socket.off("message:error", callback);
+    }
+  };
 }
 
 /**

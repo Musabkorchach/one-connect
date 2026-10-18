@@ -7,6 +7,7 @@ import { config } from "dotenv";
 import dns from "dns";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import crypto from "node:crypto";
 
 config();
 
@@ -19,6 +20,22 @@ console.log("MongoDB connected successfully");
 
 const db = mongoClient.db("oneconnect");
 const messagesCollection = db.collection("messages");
+await messagesCollection.createIndex(
+  { senderUsername: 1, id: 1 },
+  {
+    unique: true,
+    name: "unique_sender_message",
+    partialFilterExpression: {
+      senderUsername: { $type: "string" },
+      id: { $type: "string" },
+    },
+  }
+);
+const contactsCollection = db.collection("contacts");
+await contactsCollection.createIndex(
+  { ownerUserId: 1, username: 1 },
+  { unique: true, name: "unique_owner_contact" }
+);
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
@@ -110,7 +127,7 @@ if (!piUsername) {
   return res.status(401).json({ error: "Pi user identity not available" });
 }
     const userId = `pi_${piUsername}`;
-    const sessionToken = Buffer.from(`${userId}:${Date.now()}`).toString("base64");
+    const sessionToken = crypto.randomBytes(32).toString("hex");
 
     users.set(userId, {
       id: userId,
@@ -129,15 +146,35 @@ if (!piUsername) {
     res.status(500).json({ error: "Authentication failed" });
   }
 });
+// Revoke the current authenticated session
+app.post("/api/auth/logout", requireSession, (req, res) => {
+  const sessionToken = req.headers.authorization.substring(7);
 
+  userSessions.delete(sessionToken);
+  for (const socket of io.sockets.sockets.values()) {
+  if (socket.sessionToken === sessionToken) {
+    socket.disconnect(true);
+  }
+}
+
+  res.json({ success: true });
+});
 // Profile endpoints
 app.get("/api/profile/:userId", requireSession, (req, res) => {
+    if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+
   const user = users.get(req.params.userId);
   if (!user) return res.status(404).json({ error: "User not found" });
   res.json(user);
 });
 
-app.put("/api/profile/:userId", express.json(), (req, res) => {
+app.put("/api/profile/:userId", requireSession, express.json(), (req, res) => {
+    if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+
   const user = users.get(req.params.userId);
   if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -147,24 +184,71 @@ app.put("/api/profile/:userId", express.json(), (req, res) => {
 });
 
 // Contacts endpoints
-app.get("/api/contacts/:userId", (req, res) => {
-  const userContacts = contacts.get(req.params.userId) || [];
+app.get("/api/contacts/:userId", requireSession, async (req, res) => {
+  if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({
+      error: "Access denied",
+    });
+  }
+  const userContacts = await contactsCollection.find(
+  { ownerUserId: req.user.userId },
+  { projection: { _id: 0, ownerUserId: 0 } }
+).toArray();
   res.json(userContacts);
 });
 
-app.post("/api/contacts/:userId", express.json(), (req, res) => {
+app.post("/api/contacts/:userId", requireSession, express.json(), async (req, res) => {
+  if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({
+      error: "Access denied",
+    });
+  }
   const { username, name } = req.body;
+  if (
+  typeof username !== "string" ||
+  !/^[a-zA-Z0-9._-]{1,32}$/.test(username) ||
+  username !== username.toLowerCase() ||
+  username === req.user.piUsername?.toLowerCase()
+) {
+  return res.status(400).json({
+    error: "Invalid contact username",
+  });
+}
   const userId = req.params.userId;
   const contact = { username, name, addedAt: new Date() };
 
-  if (!contacts.has(userId)) contacts.set(userId, []);
-  contacts.get(userId).push(contact);
+  try {
+  await contactsCollection.updateOne(
+    {
+      ownerUserId: req.user.userId,
+      username,
+    },
+    {
+      $setOnInsert: {
+        ownerUserId: req.user.userId,
+        username,
+        name,
+        addedAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+} catch (error) {
+  console.error("[CONTACT SAVE ERROR]", error);
+  return res.status(500).json({
+    error: "Failed to save contact",
+  });
+}
 
   res.json(contact);
 });
 
 // Messages endpoint
-app.post("/api/messages/:userId", express.json(), (req, res) => {
+app.post("/api/messages/:userId", requireSession, express.json(), (req, res) => {
+    if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+
   const { conversationId, kind, text, fileName } = req.body;
   const message = {
     id: Math.random().toString(36).slice(2),
@@ -180,45 +264,125 @@ app.post("/api/messages/:userId", express.json(), (req, res) => {
 });
 
 // WebSocket handlers
+io.use((socket, next) => {
+  const sessionToken = socket.handshake.auth?.sessionToken;
+
+  if (typeof sessionToken !== "string" || !sessionToken) {
+    return next(new Error("Authentication required"));
+  }
+
+  const session = userSessions.get(sessionToken);
+
+  if (!session || session.expiresAt <= Date.now()) {
+    return next(new Error("Invalid or expired session"));
+  }
+
+  socket.userId = session.userId;
+  socket.piUsername = session.piUsername;
+  socket.sessionToken = sessionToken;
+
+  next();
+});
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
+  socket.join(`user:${socket.userId}`);
 
   socket.on("conversation:join", async (conversationId) => {
-  socket.join(`conv:${conversationId}`);
+  return socket.emit("conversation:error", { error: "Conversation access verification pending" });
 
   const messages = await messagesCollection
-    .find({ conversationId })
+    .find({
+  $or: [
+    {
+      senderUsername: socket.piUsername,
+      recipientUsername: conversationId,
+    },
+    {
+      senderUsername: conversationId,
+      recipientUsername: socket.piUsername,
+    },
+  ],
+})
     .sort({ at: 1 })
     .toArray();
 
   socket.emit("conversation:messages", messages);
 });
 
-  socket.on("user:login", (userId, piUsername) => {
-    socket.userId = userId;
-    socket.piUsername = piUsername;
-    socket.join(`user:${userId}`);
-    io.emit("user:online", { userId, piUsername });
-  });
+  socket.on("user:login", () => {
+  const userId = socket.userId;
+  const piUsername = socket.piUsername;
+
+  if (!userId || !piUsername) return;
+
+  socket.join(`user:${userId}`);
+  io.emit("user:online", { userId, piUsername });
+});
 
   socket.on("message:send", async (data) => {
-    const { conversationId, kind, text, fileName } = data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+  return socket.emit("message:error", {
+    error: "Invalid message data",
+  });
+}
+    const { conversationId, kind, text, fileName, messageId } = data;
+        if (
+      typeof messageId !== "string" ||
+      !/^[a-zA-Z0-9_-]{1,100}$/.test(messageId)
+    ) {
+      return socket.emit("message:error", {
+        error: "Invalid message ID",
+      });
+    }
+    if (
+  typeof kind !== "string" ||
+  !["text", "image", "file", "video", "voice"].includes(kind) ||
+  typeof text !== "string" ||
+  text.length > 10000 ||
+  (fileName !== undefined &&
+    (typeof fileName !== "string" || fileName.length > 255))
+) {
+  return socket.emit("message:error", {
+    error: "Invalid message content",
+  });
+}
+    if (
+  typeof conversationId !== "string" ||
+  !/^[a-zA-Z0-9_]{1,50}$/.test(conversationId) ||
+  conversationId === socket.piUsername
+) {
+  return socket.emit("message:error", {
+    error: "Invalid recipient",
+  });
+}
     const message = {
-      id: Math.random().toString(36).slice(2),
-      fromMe: true,
+      id: messageId,
+      senderUsername: socket.piUsername,
+      recipientUsername: conversationId,
       kind,
       text,
       fileName,
-      status: "delivered",
+      status: "sent",
       at: Date.now(),
     };
 
-    await messagesCollection.insertOne({
-  conversationId,
-  ...message,
-});
+        try {
+      await messagesCollection.insertOne({
+        conversationId,
+        ...message,
+      });
+    } catch (error) {
+      console.error("[MESSAGE SAVE ERROR]", error);
 
-    io.to(`conv:${conversationId}`).emit("message:new", message);
+      return socket.emit("message:error", {
+        id: message.id,
+        error: "Message could not be saved",
+      });
+    }
+
+    socket.emit("message:saved", { id: message.id, status: "sent" });
+
+    io.to(`user:pi_${conversationId}`).emit("message:new", message);
   });
 
   socket.on("status:update", (userId, status, statusText) => {

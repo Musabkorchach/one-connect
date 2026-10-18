@@ -10,7 +10,7 @@ import React, {
 } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { getDict, type Dict } from "@/lib/connect/i18n";
-import { emitMessage, joinConversation } from "@/lib/api-client";
+import { emitMessage, joinConversation, onNewMessage, onMessageSaved, onMessageError, addContact as saveContactToServer, getUserContacts, disconnectSocket } from "@/lib/api-client";
 import {
   KEYS,
   CAPS,
@@ -107,9 +107,10 @@ interface ConnectContextType {
 const ConnectContext = createContext<ConnectContextType | undefined>(undefined);
 
 export function ConnectProvider({ children }: { children: ReactNode }) {
-  const { sdk, isAuthenticated, piUsername } = usePiAuth();
+  const { sdk, isAuthenticated, piUsername, sessionToken, endLocalSession } = usePiAuth();
 
   const [ready, setReady] = useState(false);
+  const [chatsLoaded, setChatsLoaded] = useState(false);
   const [storageNotice, setStorageNotice] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -143,7 +144,12 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
 
   const writeNow = async (key: string, blob: Record<string, unknown>) => {
     const api = stateApi.current;
-    if (!api) return;
+
+    if (!api) {
+      console.error("[ONE CONNECT STORAGE NOT READY]", { key });
+      setStorageNotice(true);
+      return;
+   }
     try {
       await api.set(key, blob);
       const s = savers.current[key];
@@ -153,6 +159,8 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     key,
     error,
   });
+  if (stateApi.current !== api) return;
+
   setStorageNotice(true);
       setTimeout(() => setStorageNotice(false), 2600);
       const s = savers.current[key];
@@ -203,8 +211,9 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
 
   // ---- load ----
   useEffect(() => {
-    if (!isAuthenticated) return;
-    let cancelled = false;
+  if (!isAuthenticated) return;
+  let cancelled = false;
+  setChatsLoaded(false);
 
     const api: StateApi = sdk
       ? {
@@ -243,7 +252,62 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
         }
         const fresh = !pRec;
 
-        const loadedContacts = cRec ? sanitizeContacts(cRec.blob) : (fresh ? seedContacts() : []);
+        const localContacts = cRec
+  ? sanitizeContacts(cRec.blob)
+  : (fresh ? seedContacts() : []);
+
+let loadedContacts = localContacts;
+
+if (sessionToken && piUsername) {
+  try {
+    const serverContacts = await getUserContacts(
+      `pi_${piUsername}`,
+      sessionToken
+    );
+
+    if (cancelled) return;
+
+    if (Array.isArray(serverContacts)) {
+      loadedContacts = sanitizeContacts({
+        items: [...localContacts, ...serverContacts],
+      });
+      // Migrate previously saved contacts without duplicating them.
+if (cRec) {
+  const existingUsernames = new Set(
+    sanitizeContacts({ items: serverContacts }).map(
+      (contact) => contact.username
+    )
+  );
+
+  const missingContacts = localContacts.filter(
+    (contact) =>
+      !existingUsernames.has(contact.username) &&
+      contact.username !== canonicalIdentity
+  );
+
+  const results = await Promise.allSettled(
+    missingContacts.map((contact) =>
+      saveContactToServer(
+        `pi_${piUsername}`,
+        contact.username,
+        contact.name,
+        sessionToken
+      )
+    )
+  );
+
+  if (cancelled) return;
+
+  if (results.some((result) => result.status === "rejected")) {
+    console.error("[CONTACT MIGRATION ERROR]", results);
+    setStorageNotice(true);
+  }
+}
+    }
+  } catch (error) {
+    console.error("[CONTACT SERVER LOAD ERROR]", error);
+  }
+}
         const loadedRequests = rRec ? sanitizeRequests(rRec.blob) : (fresh ? seedRequests() : []);
         const loadedChats = chRec ? sanitizeChats(chRec.blob) : (fresh ? seedChats() : []);
         const loadedCalls = clRec ? sanitizeCalls(clRec.blob) : (fresh ? seedCalls() : []);
@@ -253,17 +317,20 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
         setContacts(loadedContacts); contactsRef.current = loadedContacts;
         setRequests(loadedRequests); requestsRef.current = loadedRequests;
         setChats(loadedChats); chatsRef.current = loadedChats;
+        setChatsLoaded(true);
         setCalls(loadedCalls); callsRef.current = loadedCalls;
         setEmails(loadedEmails); emailsRef.current = loadedEmails;
 
         setReady(true);
-      } catch {
+            } catch (error) {
+        console.error("[ONE CONNECT STORAGE LOAD ERROR]", error);
+        setStorageNotice(true);
         setReady(true);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [sdk, isAuthenticated, piUsername]);
+  }, [sdk, isAuthenticated, piUsername, sessionToken]);
 
   // flush on hide
   useEffect(() => {
@@ -313,6 +380,145 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     setEmails(next);
     scheduleSave(KEYS.emails, emailsToBlob(next), immediate);
   };
+  const receiveMessage = (incoming: Record<string, unknown>) => {
+  if (
+    typeof incoming.id !== "string" ||
+    typeof incoming.senderUsername !== "string" ||
+    typeof incoming.recipientUsername !== "string" ||
+    typeof incoming.text !== "string" ||
+    typeof incoming.kind !== "string" ||
+    typeof incoming.at !== "number"
+  ) return;
+
+  const me = normalizeUsername(piUsername || "");
+  const sender = normalizeUsername(incoming.senderUsername);
+  const recipient = normalizeUsername(incoming.recipientUsername);
+
+  if (!me || !sender || recipient !== me || sender === me) return;
+
+  if (
+    !["text", "image", "file", "video", "voice"].includes(incoming.kind)
+  ) return;
+
+  const message: Message = {
+    id: incoming.id,
+    fromMe: false,
+    kind: incoming.kind as MsgKind,
+    text: cleanStr(incoming.text, 2000),
+    status: "delivered",
+    at: incoming.at,
+  };
+
+  const list = [...chatsRef.current];
+  const index = list.findIndex((chat) => chat.username === sender);
+
+  if (index === -1) {
+  const contact = contactsRef.current.find(
+    (item) => item.username === sender
+  );
+
+  const newChat: Conversation = {
+    id: sender,
+    username: sender,
+    name: contact?.name || sender,
+    color: contact?.color ?? hueFromString(sender),
+    messages: [message],
+    updatedAt: Date.now(),
+    isGroup: false,
+    unread: 1,
+  };
+
+  commitChats([newChat, ...list], true);
+  return;
+}
+
+  const chat = list[index];
+
+  if (chat.messages.some((item) => item.id === message.id)) return;
+
+  list[index] = {
+    ...chat,
+    messages: [...chat.messages, message].slice(-CAPS.messages),
+    unread: chat.unread + 1,
+    updatedAt: Date.now(),
+  };
+  commitChats(bumpChat(list, sender), true);
+};
+
+  useEffect(() => {
+    if (!isAuthenticated || !chatsLoaded) return;
+
+    const unsubscribe = onNewMessage(receiveMessage);
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isAuthenticated, chatsLoaded, piUsername]);
+    useEffect(() => {
+    if (!isAuthenticated || !chatsLoaded) return;
+
+    const unsubscribe = onMessageSaved(({ id }) => {
+      const list = chatsRef.current;
+      let changed = false;
+
+      const updated = list.map((chat) => ({
+        ...chat,
+        messages: chat.messages.map((message) => {
+          if (message.id !== id || !message.fromMe || message.status !== "pending") {
+            return message;
+          }
+
+          changed = true;
+          return { ...message, status: "sent" as const };
+        }),
+      }));
+
+      if (changed) {
+        commitChats(updated, true);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isAuthenticated, chatsLoaded, piUsername]);
+
+    useEffect(() => {
+    if (!isAuthenticated || !chatsLoaded) return;
+
+    const unsubscribe = onMessageError(({ id, error }) => {
+      if (!id) {
+        console.error("[MESSAGE ERROR]", error);
+        return;
+      }
+
+      let changed = false;
+
+      const updated = chatsRef.current.map((chat) => ({
+        ...chat,
+        messages: chat.messages.map((message) => {
+          if (
+            message.id !== id ||
+            !message.fromMe ||
+            message.status !== "pending"
+          ) {
+            return message;
+          }
+
+          changed = true;
+          return { ...message, status: "failed" as const };
+        }),
+      }));
+
+      if (changed) {
+        commitChats(updated, true);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isAuthenticated, chatsLoaded, piUsername]);
 
   // ---- profile actions ----
   const finishSetup = (displayName: string, avatar: string | null, providedPiUsername?: string) => {
@@ -348,6 +554,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     commitProfile({ ...profileRef.current, language: lang }, true);
   };
   const logout = () => {
+    endLocalSession();
     setProfile(defaultProfile());
     setContacts([]);
     setRequests([]);
@@ -355,11 +562,16 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     setCalls([]);
     setEmails([]);
     setReady(false);
-    Object.keys(savers.current).forEach((key) => {
-      if (stateApi.current) {
-        void stateApi.current.set(key, {});
-      }
-    });
+    setChatsLoaded(false);
+    Object.values(savers.current).forEach((saver) => {
+  if (saver.timer) {
+    clearTimeout(saver.timer);
+    saver.timer = null;
+  }
+  saver.pending = null;
+});
+
+stateApi.current = null;
   };
 
   // ---- contacts ----
@@ -382,7 +594,20 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
       addedAt: Date.now(),
     };
     commitContacts([c, ...contactsRef.current], true);
-    return "added";
+
+if (sessionToken && piUsername) {
+  void saveContactToServer(
+    `pi_${piUsername}`,
+    username,
+    c.name,
+    sessionToken
+  ).catch((error) => {
+    console.error("[CONTACT SERVER SAVE ERROR]", error);
+    setStorageNotice(true);
+  });
+}
+
+return "added";
   };
 
   const acceptRequest = (id: string) => {
@@ -479,16 +704,35 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
       kind,
       text: cleanStr(text, 2000),
       fileName: fileName ? cleanStr(fileName, 40) : undefined,
-      status: "sent",
+      status: "pending",
       at: Date.now(),
     };
 
-    emitMessage(conv.id, kind, msg.text, msg.fileName);
-
-    conv = { ...conv, messages: [...conv.messages, msg].slice(-CAPS.messages), updatedAt: Date.now() };
+        conv = { ...conv, messages: [...conv.messages, msg].slice(-CAPS.messages), updatedAt: Date.now() };
     list = list.map((c) => (c.username === uname ? conv! : c));
     list = bumpChat(list, uname);
     commitChats(list, true);
+
+        const emitted = emitMessage(
+      conv.id,
+      kind,
+      msg.text,
+      msg.fileName,
+      msg.id,
+    );
+
+    if (!emitted) {
+      const updated = chatsRef.current.map((chat) => ({
+        ...chat,
+        messages: chat.messages.map((message) =>
+          message.id === msg.id && message.fromMe
+            ? { ...message, status: "failed" as const }
+            : message,
+        ),
+      }));
+
+      commitChats(updated, true);
+    }
   };
 
   const markChatRead = (username: string) => {
