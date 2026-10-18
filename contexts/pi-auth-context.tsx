@@ -10,7 +10,7 @@ import React, {
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { PRODUCT_CONFIG } from "@/lib/product-config";
 import { buildPiSdk, createSdk } from "@/lib/pi";
-import { verifyPiAuth, initSocket } from "@/lib/api-client";
+import { verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
 import type {
   Product,
   SDKLiteInstance,
@@ -120,6 +120,7 @@ function requestParentCredentials(): Promise<{ accessToken: string; appId: strin
 }
 
 interface PiAuthContextType {
+  endLocalSession: () => void;
   isAuthenticated: boolean;
   authMessage: string;
   hasError: boolean;
@@ -205,6 +206,22 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     UserPurchaseBalance[] | null
   >(null);
   const [premiumActive, setPremiumActiveState] = useState(false);
+  const endLocalSession = () => {
+    if (sessionToken) {
+  void revokeSession(sessionToken).catch((error) => {
+    console.error("[SESSION REVOCATION ERROR]", error);
+  });
+}
+  disconnectSocket();
+  setIsAuthenticated(false);
+  setSessionToken(null);
+  setPiUsername("");
+  setSdk(null);
+  setProducts(null);
+  setRestoredPurchases(null);
+  setPremiumActiveState(false);
+  setAuthMessage("Session ended");
+};
 
   const setPremiumActive = async (active: boolean) => {
     setPremiumActiveState(active);
@@ -276,7 +293,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   setSessionToken(authResult.sessionToken);
   setPiUsername(authResult.piUsername || "");
   setIsAuthenticated(true);
-  initSocket(authResult.userId, authResult.piUsername);
+  initSocket(authResult.userId, authResult.piUsername, authResult.sessionToken);
   return;
 }
       setAuthMessage("Loading Pi SDK...");
@@ -298,8 +315,21 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       setAuthMessage("Logging in...");
       const pi = buildPiSdk();
       const authenticatedUser = await pi.auth.login();
-      setPiUsername(authenticatedUser.username || "");
-      initSocket(authenticatedUser.uid, authenticatedUser.username);
+
+const renderSession = pi.auth.getRenderSession();
+
+if (!renderSession) {
+  throw new Error("Render session unavailable after Pi login");
+}
+
+setSessionToken(renderSession.sessionToken);
+setPiUsername(renderSession.piUsername);
+
+initSocket(
+  renderSession.userId,
+  renderSession.piUsername,
+  renderSession.sessionToken,
+);
       const sdkInstance = createSdk(sdkLite, pi);
       setSdk(sdkInstance);
       setIsAuthenticated(true);
@@ -338,6 +368,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value: PiAuthContextType = {
+    endLocalSession,
     isAuthenticated,
     authMessage,
     hasError,
