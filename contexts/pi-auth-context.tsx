@@ -333,6 +333,7 @@ initSocket(
       const sdkInstance = createSdk(sdkLite, pi);
       setSdk(sdkInstance);
       setIsAuthenticated(true);
+      setAuthMessage("Loading products...");
       const availableProducts = await fetchProducts(sdkInstance);
 
       try {
@@ -355,10 +356,12 @@ initSocket(
     } catch (err) {
       console.error("SDKLite initialization failed:", err);
       setHasError(true);
-      setAuthMessage(
-        err instanceof Error
-          ? err.message
-          : "Authentication failed. Please try again.",
+      setAuthMessage((currentStage) =>
+        `${currentStage} — ${
+          err instanceof Error
+            ? err.message
+            : "Authentication failed. Please try again."
+        }`
       );
     }
   };

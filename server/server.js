@@ -40,6 +40,7 @@ await contactsCollection.createIndex(
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "https://one-connect-lake.vercel.app",
+  "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
   "http://localhost:3000",
 ].filter(Boolean);
 const app = express();
