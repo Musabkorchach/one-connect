@@ -12,7 +12,6 @@
 
 import { createPiSDK } from "@swetate/core";
 import { authPlugin } from "@swetate/auth";
-import { userStatePlugin } from "@swetate/user-state";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { verifyPiAuth } from "@/lib/api-client";
 import type { RestoreOptions, SDKLiteInstance, UserStateRecord } from "@/lib/sdklite-types";
@@ -55,7 +54,6 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
 
     install(ctx) {
       let user: PiUser | null = null;
-      let appStudioToken: string | null = null;
       let renderSession: {
         sessionToken: string;
         userId: string;
@@ -74,18 +72,11 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
           incompletePaymentHandler,
         );
 
-        const appStudioResponse = await ctx.backendClient.post(
-          "/login",
-          { accessToken: result.accessToken },
-        );
-
         const verifiedRenderSession = await verifyPiAuth(
           result.accessToken,
         );
 
         if (
-          !appStudioResponse.data?.sessionToken ||
-          !appStudioResponse.data?.user ||
           !verifiedRenderSession?.sessionToken ||
           !verifiedRenderSession?.userId ||
           verifiedRenderSession.piUsername !== result.user.username
@@ -93,13 +84,15 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
           throw new Error("Pi authentication verification failed");
         }
 
-        appStudioToken = appStudioResponse.data.sessionToken;
         renderSession = {
           sessionToken: verifiedRenderSession.sessionToken,
           userId: verifiedRenderSession.userId,
           piUsername: verifiedRenderSession.piUsername,
         };
-        user = appStudioResponse.data.user;
+        user = {
+          uid: verifiedRenderSession.userId,
+          username: verifiedRenderSession.piUsername,
+      };
 
         return user!;
       }
@@ -109,10 +102,8 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
       }
 
       function getHeaders() {
-        return appStudioToken
-          ? { Authorization: `Bearer ${appStudioToken}` }
-          : {};
-      }
+  return {};
+}
 
       return {
         internal: {
@@ -143,7 +134,6 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
 export function buildPiSdk(): PiSdk {
   const pi = createPiSDK({ backendUrl: PI_NETWORK_CONFIG.BACKEND_URL });
   pi.use(oneConnectAuthPlugin());
-  pi.use(userStatePlugin());
   return pi as unknown as PiSdk;
 }
 
@@ -179,8 +169,8 @@ export function createSdk(sdkLite: SDKLiteInstance, pi: PiSdk): SDKLiteInstance 
     },
     state: {
       ...sdkLiteStateMethods,
-      get: (key) => pi.userState.get(key),
-      set: (key, blob) => pi.userState.set(key, blob),
+      get: (key) => sdkLite.state.get(key),
+      set: (key, blob) => sdkLite.state.set(key, blob),
     },
   };
 }
