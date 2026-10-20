@@ -10,7 +10,20 @@ import React, {
 } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { getDict, type Dict } from "@/lib/connect/i18n";
-import { emitMessage, joinConversation, onNewMessage, onMessageSaved, onMessageError, addContact as saveContactToServer, getUserContacts, disconnectSocket } from "@/lib/api-client";
+import {
+  emitMessage,
+  joinConversation,
+  onConversationMessages,
+  getSocket,
+  onNewMessage,
+  onMessageSaved,
+  onMessageError,
+  addContact as saveContactToServer,
+  getUserContacts,
+  getAppState,
+  saveAppState,
+  disconnectSocket,
+} from "@/lib/api-client";
 import {
   KEYS,
   CAPS,
@@ -215,15 +228,12 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   let cancelled = false;
   setChatsLoaded(false);
 
-    const api: StateApi = sdk
-      ? {
-          get: (k) => sdk.state.get(k),
-          set: (k, b) => sdk.state.set(k, b),
-        }
-      : {
-          get: async (k) => (memStore.has(k) ? { blob: memStore.get(k)! } : null),
-          set: async (k, b) => { memStore.set(k, b); },
-        };
+        if (!sessionToken) return;
+
+    const api: StateApi = {
+      get: (key) => getAppState(key, sessionToken),
+      set: (key, blob) => saveAppState(key, blob, sessionToken),
+    };
     stateApi.current = api;
 
     (async () => {
@@ -380,6 +390,135 @@ if (cRec) {
     setEmails(next);
     scheduleSave(KEYS.emails, emailsToBlob(next), immediate);
   };
+    const receiveConversationHistory = (data: {
+    username: string;
+    messages: Record<string, unknown>[];
+  }) => {
+    if (!data || typeof data.username !== "string" ||
+        !Array.isArray(data.messages)) return;
+
+    const me = normalizeUsername(piUsername || "");
+    const peer = normalizeUsername(data.username);
+    if (!me || !peer || peer === me) return;
+
+    const list = [...chatsRef.current];
+    const existing = list.find(
+      (chat) => !chat.isGroup && chat.username === peer
+    );
+    const merged = new Map<string, Message>(
+      (existing?.messages || []).map((message) => [message.id, message])
+    );
+
+    for (const item of data.messages) {
+      if (
+        !item ||
+        typeof item.id !== "string" ||
+        typeof item.senderUsername !== "string" ||
+        typeof item.recipientUsername !== "string" ||
+        typeof item.text !== "string" ||
+        typeof item.kind !== "string" ||
+        typeof item.at !== "number" ||
+        !Number.isFinite(item.at) ||
+        !["text", "image", "file", "video", "voice"].includes(item.kind)
+      ) continue;
+
+      const sender = normalizeUsername(item.senderUsername);
+      const recipient = normalizeUsername(item.recipientUsername);
+      const fromMe = sender === me && recipient === peer;
+      if (!fromMe && !(sender === peer && recipient === me)) continue;
+
+      const previous = merged.get(item.id);
+      merged.set(item.id, {
+        id: item.id,
+        fromMe,
+        kind: item.kind as MsgKind,
+        text: cleanStr(item.text, 2000),
+        fileName: typeof item.fileName === "string"
+          ? cleanStr(item.fileName, 40)
+          : undefined,
+        at: item.at,
+        status: fromMe
+          ? previous?.status === "read" || previous?.status === "delivered"
+            ? previous.status
+            : "sent"
+          : "delivered",
+      });
+    }
+
+    const messages = [...merged.values()]
+      .sort((a, b) => a.at - b.at)
+      .slice(-CAPS.messages);
+    if (!messages.length) return;
+
+    const contact = contactsRef.current.find((item) => item.username === peer);
+    const conversation: Conversation = {
+      ...existing,
+      id: peer,
+      username: peer,
+      isGroup: false,
+      name: existing?.name || contact?.name || peer,
+      color: existing?.color ?? contact?.color ?? hueFromString(peer),
+      messages,
+      updatedAt: messages[messages.length - 1].at,
+      unread: existing?.unread ?? 0,
+    };
+
+    const updated = [
+      conversation,
+      ...list.filter((chat) => chat.isGroup || chat.username !== peer),
+    ].sort((a, b) => b.updatedAt - a.updatedAt);
+
+    chatsRef.current = updated;
+    setChats(updated);
+  };
+
+    useEffect(() => {
+    if (!isAuthenticated || !chatsLoaded || !piUsername) return;
+
+    const unsubscribe = onConversationMessages(
+      receiveConversationHistory
+    );
+    const currentSocket = getSocket();
+
+    const requestHistory = () => {
+      const me = normalizeUsername(piUsername);
+      const peers = new Set<string>();
+
+      for (const contact of contactsRef.current) {
+        peers.add(normalizeUsername(contact.username));
+      }
+
+      for (const chat of chatsRef.current) {
+        if (!chat.isGroup && chat.username) {
+          peers.add(normalizeUsername(chat.username));
+        }
+      }
+
+      for (const peer of peers) {
+        if (peer && peer !== me) {
+          joinConversation(peer);
+        }
+      }
+    };
+
+    currentSocket?.on("connect", requestHistory);
+
+    if (currentSocket?.connected) {
+      requestHistory();
+    }
+
+    return () => {
+      unsubscribe();
+      currentSocket?.off("connect", requestHistory);
+    };
+  }, [
+    isAuthenticated,
+    chatsLoaded,
+    piUsername,
+    sessionToken,
+    contacts,
+  ]);
+
   const receiveMessage = (incoming: Record<string, unknown>) => {
   if (
     typeof incoming.id !== "string" ||
