@@ -92,6 +92,16 @@ const conversations = new Map();
 const contacts = new Map();
 const userSessions = new Map();
 
+function normalizeMessagingUsername(value) {
+  if (typeof value !== "string") return "";
+
+  const username = value.trim().replace(/^@+/, "").toLowerCase();
+
+  return /^[a-z0-9._-]{1,32}$/.test(username)
+    ? username
+    : "";
+}
+
 function requireSession(req, res, next) {
   const authHeader = req.headers.authorization;
 
@@ -365,29 +375,40 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
   socket.join(`user:${socket.userId}`);
+    const messagingUsername = normalizeMessagingUsername(socket.piUsername);
 
-    socket.on("conversation:join", async (conversationId) => {
-    if (
-      typeof conversationId !== "string" ||
-      !/^[a-zA-Z0-9_]{1,50}$/.test(conversationId) ||
-      conversationId === socket.piUsername
-    ) {
+  if (!messagingUsername) {
+    socket.disconnect(true);
+    return;
+  }
+
+  socket.join(`peer:${messagingUsername}`);
+
+      socket.on("conversation:join", async (conversationId) => {
+    const peer = normalizeMessagingUsername(conversationId);
+
+    if (!peer || peer === messagingUsername) {
       return socket.emit("conversation:error", {
         error: "Invalid recipient",
       });
     }
+
+    const exactUsername = (username) => ({
+      $regex: `^${username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      $options: "i",
+    });
 
     try {
       const messages = await messagesCollection
         .find({
           $or: [
             {
-              senderUsername: socket.piUsername,
-              recipientUsername: conversationId,
+              senderUsername: exactUsername(messagingUsername),
+              recipientUsername: exactUsername(peer),
             },
             {
-              senderUsername: conversationId,
-              recipientUsername: socket.piUsername,
+              senderUsername: exactUsername(peer),
+              recipientUsername: exactUsername(messagingUsername),
             },
           ],
         })
@@ -397,13 +418,13 @@ io.on("connection", (socket) => {
         .toArray();
 
       socket.emit("conversation:messages", {
-        username: conversationId,
+        username: peer,
         messages: messages.reverse(),
       });
     } catch (error) {
       console.error("[CONVERSATION LOAD ERROR]", error);
       socket.emit("conversation:error", {
-        username: conversationId,
+        username: peer,
         error: "Messages could not be loaded",
       });
     }
@@ -446,19 +467,19 @@ io.on("connection", (socket) => {
     error: "Invalid message content",
   });
 }
-    if (
-  typeof conversationId !== "string" ||
-  !/^[a-zA-Z0-9_]{1,50}$/.test(conversationId) ||
-  conversationId === socket.piUsername
-) {
-  return socket.emit("message:error", {
-    error: "Invalid recipient",
-  });
-}
+       const recipient = normalizeMessagingUsername(conversationId);
+
+    if (!recipient || recipient === messagingUsername) {
+      return socket.emit("message:error", {
+        id: messageId,
+        error: "Invalid recipient",
+      });
+    }
+
     const message = {
       id: messageId,
-      senderUsername: socket.piUsername,
-      recipientUsername: conversationId,
+      senderUsername: messagingUsername,
+      recipientUsername: recipient,
       kind,
       text,
       fileName,
@@ -482,7 +503,8 @@ io.on("connection", (socket) => {
 
     socket.emit("message:saved", { id: message.id, status: "sent" });
 
-    io.to(`user:pi_${conversationId}`).emit("message:new", message);
+        const recipientUsername = normalizeMessagingUsername(conversationId);
+    io.to(`peer:${recipientUsername}`).emit("message:new", message);
   });
 
   socket.on("status:update", (userId, status, statusText) => {
