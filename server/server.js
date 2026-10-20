@@ -37,6 +37,23 @@ await contactsCollection.createIndex(
   { unique: true, name: "unique_owner_contact" }
 );
 
+const appStateCollection = db.collection("app_state");
+
+await appStateCollection.createIndex(
+  { ownerUserId: 1, key: 1 },
+  { unique: true, name: "unique_owner_state_key" }
+);
+
+const allowedStateKeys = new Set([
+  "connect.profile",
+  "connect.contacts",
+  "connect.requests",
+  "connect.chats",
+  "connect.calls",
+  "connect.emails",
+  "connect.groups",
+]);
+
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "https://one-connect-lake.vercel.app",
@@ -97,6 +114,62 @@ function requireSession(req, res, next) {
 
   next();
 }
+
+app.get("/api/state/:key", requireSession, async (req, res) => {
+  const { key } = req.params;
+  res.set("Cache-Control", "no-store");
+
+  if (!allowedStateKeys.has(key)) {
+    return res.status(400).json({ error: "Invalid state key" });
+  }
+
+  try {
+    const record = await appStateCollection.findOne(
+      { ownerUserId: req.user.userId, key },
+      { projection: { _id: 0, blob: 1 } }
+    );
+
+    return res.json(record ? { blob: record.blob } : null);
+  } catch (error) {
+    console.error("[APP STATE LOAD ERROR]", error);
+    return res.status(500).json({ error: "State could not be loaded" });
+  }
+});
+
+app.put("/api/state/:key", requireSession, async (req, res) => {
+  const { key } = req.params;
+  const blob = req.body?.blob;
+
+  if (!allowedStateKeys.has(key)) {
+    return res.status(400).json({ error: "Invalid state key" });
+  }
+
+  if (!blob || typeof blob !== "object" || Array.isArray(blob)) {
+    return res.status(400).json({ error: "Invalid state data" });
+  }
+
+  if (Buffer.byteLength(JSON.stringify(blob), "utf8") > 256 * 1024) {
+    return res.status(413).json({ error: "State data is too large" });
+  }
+
+  try {
+    await appStateCollection.updateOne(
+      { ownerUserId: req.user.userId, key },
+      {
+        $set: {
+          blob,
+          updatedAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+
+    return res.status(204).end();
+  } catch (error) {
+    console.error("[APP STATE SAVE ERROR]", error);
+    return res.status(500).json({ error: "State could not be saved" });
+  }
+});
 
 // Routes
 app.get("/health", (req, res) => {
@@ -289,27 +362,48 @@ io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
   socket.join(`user:${socket.userId}`);
 
-  socket.on("conversation:join", async (conversationId) => {
-  return socket.emit("conversation:error", { error: "Conversation access verification pending" });
+    socket.on("conversation:join", async (conversationId) => {
+    if (
+      typeof conversationId !== "string" ||
+      !/^[a-zA-Z0-9_]{1,50}$/.test(conversationId) ||
+      conversationId === socket.piUsername
+    ) {
+      return socket.emit("conversation:error", {
+        error: "Invalid recipient",
+      });
+    }
 
-  const messages = await messagesCollection
-    .find({
-  $or: [
-    {
-      senderUsername: socket.piUsername,
-      recipientUsername: conversationId,
-    },
-    {
-      senderUsername: conversationId,
-      recipientUsername: socket.piUsername,
-    },
-  ],
-})
-    .sort({ at: 1 })
-    .toArray();
+    try {
+      const messages = await messagesCollection
+        .find({
+          $or: [
+            {
+              senderUsername: socket.piUsername,
+              recipientUsername: conversationId,
+            },
+            {
+              senderUsername: conversationId,
+              recipientUsername: socket.piUsername,
+            },
+          ],
+        })
+        .project({ _id: 0 })
+        .sort({ at: -1 })
+        .limit(200)
+        .toArray();
 
-  socket.emit("conversation:messages", messages);
-});
+      socket.emit("conversation:messages", {
+        username: conversationId,
+        messages: messages.reverse(),
+      });
+    } catch (error) {
+      console.error("[CONVERSATION LOAD ERROR]", error);
+      socket.emit("conversation:error", {
+        username: conversationId,
+        error: "Messages could not be loaded",
+      });
+    }
+  });
 
   socket.on("user:login", () => {
   const userId = socket.userId;

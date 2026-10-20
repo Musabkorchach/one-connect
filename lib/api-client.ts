@@ -13,7 +13,69 @@ const messageListeners = {
   newMessage: new Set<(message: Record<string, unknown>) => void>(),
   saved: new Set<(data: { id: string; status: "sent" }) => void>(),
   error: new Set<(data: { id?: string; error: string }) => void>(),
+  history: new Set<
+    (data: {
+      username: string;
+      messages: Record<string, unknown>[];
+    }) => void
+  >(),
 };
+
+export async function getAppState(
+  key: string,
+  sessionToken: string
+): Promise<{ blob: Record<string, unknown> } | null> {
+  const response = await fetch(
+    `${API_URL}/api/state/${encodeURIComponent(key)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      cache: "no-store",
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`State load failed (${response.status}): ${key}`);
+  }
+
+  const record: unknown = await response.json();
+  if (record === null) return null;
+
+  if (
+    typeof record !== "object" ||
+    !("blob" in record) ||
+    !record.blob ||
+    typeof record.blob !== "object" ||
+    Array.isArray(record.blob)
+  ) {
+    throw new Error(`Invalid state response: ${key}`);
+  }
+
+  return { blob: record.blob as Record<string, unknown> };
+}
+
+export async function saveAppState(
+  key: string,
+  blob: Record<string, unknown>,
+  sessionToken: string
+): Promise<void> {
+  const response = await fetch(
+    `${API_URL}/api/state/${encodeURIComponent(key)}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ blob }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`State save failed (${response.status}): ${key}`);
+  }
+}
 
 /**
  * Initialize WebSocket connection
@@ -40,6 +102,10 @@ if (socket) disconnectSocket();
 
   for (const callback of messageListeners.error) {
     socket.on("message:error", callback);
+  }
+
+    for (const callback of messageListeners.history) {
+    socket.on("conversation:messages", callback);
   }
 
   socket.on("connect", () => {
@@ -205,6 +271,27 @@ export function joinConversation(conversationId: string) {
   }
 
   socket.emit("conversation:join", conversationId);
+}
+
+export function onConversationMessages(
+  callback: (data: {
+    username: string;
+    messages: Record<string, unknown>[];
+  }) => void
+) {
+  messageListeners.history.add(callback);
+
+  const currentSocket = socket;
+  currentSocket?.on("conversation:messages", callback);
+
+  return () => {
+    messageListeners.history.delete(callback);
+    currentSocket?.off("conversation:messages", callback);
+
+    if (socket && socket !== currentSocket) {
+      socket.off("conversation:messages", callback);
+    }
+  };
 }
 
 /**
