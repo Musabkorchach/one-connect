@@ -357,7 +357,7 @@ initSocket(
       console.error("SDKLite initialization failed:", err);
       setHasError(true);
       setAuthMessage((currentStage) =>
-        `${currentStage} — ${
+       `${currentStage} — Origin: ${window.location.origin} — ${
           err instanceof Error
             ? err.message
             : "Authentication failed. Please try again."
