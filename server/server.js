@@ -56,6 +56,10 @@ const allowedStateKeys = new Set([
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  ...(process.env.CORS_EXTRA_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
   "https://one-connect-lake.vercel.app",
   "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
   "https://demo-kzmkra2mcgav4p1ncaco.vusercontent.net",
