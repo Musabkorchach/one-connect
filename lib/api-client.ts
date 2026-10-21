@@ -509,16 +509,16 @@ export async function fetchChatImage(
 
   const blob = await response.blob();
 
-  if (
-    !["image/png", "image/jpeg", "image/gif", "image/webp"]
-      .includes(blob.type) ||
-    !blob.size ||
-    blob.size > 5 * 1024 * 1024
-  ) {
-    throw new Error("Invalid image response");
-  }
+if (
+  !["image/png", "image/jpeg", "image/gif", "image/webp"]
+    .includes(blob.type) ||
+  !blob.size ||
+  blob.size > 5 * 1024 * 1024
+) {
+  throw new Error("Invalid image response");
+}
 
-  return blob;
+return blob;
 }
 
 export async function saveChatBlob(
@@ -564,7 +564,7 @@ export async function saveChatBlob(
 
 export async function fetchChatAttachment(
   attachmentId: string,
-  kind: "file" | "video",
+  kind: "file" | "video" | "voice",
   sessionToken: string,
   signal?: AbortSignal,
 ): Promise<Blob> {
@@ -588,36 +588,47 @@ export async function fetchChatAttachment(
   }
 
   const blob = await response.blob();
-  const allowedTypes = kind === "video"
-    ? ["video/mp4", "video/webm"]
+
+const allowedTypes = kind === "video"
+  ? ["video/mp4", "video/webm"]
+  : kind === "voice"
+    ? ["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"]
     : ["application/octet-stream"];
 
-  if (
-    !blob.size ||
-    blob.size > 25 * 1024 * 1024 ||
-    !allowedTypes.includes(blob.type)
-  ) {
-    throw new Error("Invalid attachment response");
-  }
+const maxSize = (kind === "voice" ? 5 : 25) * 1024 * 1024;
 
-  return blob;
+if (
+  !blob.size ||
+  blob.size > maxSize ||
+  !allowedTypes.includes(blob.type)
+) {
+  throw new Error("Invalid attachment response");
+}
+
+return blob;
 }
 
 export async function uploadChatAttachment(
   recipient: string,
-  kind: "file" | "video",
+  kind: "file" | "video" | "voice",
   file: File,
   sessionToken: string,
 ): Promise<{
   attachmentId: string;
-  kind: "file" | "video";
+  kind: "file" | "video" | "voice";
   fileName: string;
   mimeType: string;
   fileSize: number;
 }> {
-  if (!file.size || file.size > 25 * 1024 * 1024) {
-    throw new Error("Attachment must be between 1 byte and 25 MB");
-  }
+  const maxSize = (kind === "voice" ? 5 : 25) * 1024 * 1024;
+
+if (!file.size || file.size > maxSize) {
+  throw new Error(
+    kind === "voice"
+      ? "Voice message must be between 1 byte and 5 MB"
+      : "Attachment must be between 1 byte and 25 MB",
+  );
+}
 
   const formData = new FormData();
   formData.append("recipient", recipient);
@@ -653,7 +664,7 @@ export async function uploadChatAttachment(
     typeof result.mimeType !== "string" ||
     !Number.isFinite(result.fileSize) ||
     result.fileSize <= 0 ||
-    result.fileSize > 25 * 1024 * 1024
+    result.fileSize > maxSize
   ) {
     throw new Error("Invalid attachment upload response");
   }

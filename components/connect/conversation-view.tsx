@@ -13,11 +13,13 @@ import { useEffect, useRef, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Button, IconButton, TextInput, cx } from "./ui";
 import { Sheet } from "./feedback";
+import { VoiceRecorder } from "./voice-recorder";
 import {
   IconBack,
   IconPhone,
   IconVideo,
   IconSend,
+  IconMic,
   IconPlus,
   IconImage,
   IconFile,
@@ -58,6 +60,7 @@ export function ConversationView({
   const contact = contacts.find((c) => c.username === username);
   const [text, setText] = useState("");
   const [attachOpen, setAttachOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [typing, setTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLInputElement>(null);
@@ -235,14 +238,14 @@ export function ConversationView({
   };
 
   const onAttachment = async (
-  kind: "file" | "video",
+  kind: "file" | "video" | "voice",
   file?: File,
-) => {
-  if (!file || imageUploading) return;
+): Promise<boolean> => {
+  if (!file || imageUploading) return false;
 
   if (!sessionToken) {
     pushToast("Please sign in again before sending an attachment.");
-    return;
+    return false;
   }
 
   setImageUploading(true);
@@ -265,12 +268,15 @@ export function ConversationView({
       undefined,
       attachment.attachmentId,
     );
+
+    return true;
   } catch (error) {
     pushToast(
       error instanceof Error
         ? error.message
         : "Attachment could not be uploaded.",
     );
+    return false;
   } finally {
     setImageUploading(false);
     if (fileRef.current) fileRef.current.value = "";
@@ -388,7 +394,16 @@ const onVideo = (file?: File) => {
             >
               <IconSend className="h-5 w-5 rtl:rotate-180" />
             </IconButton>
-          ) : null}
+          ) : (
+            <IconButton
+              className="h-11 w-11 shrink-0 bg-primary text-primary-foreground"
+              disabled={imageUploading}
+              onClick={() => setVoiceOpen(true)}
+              aria-label="Record voice message"
+           >
+              <IconMic className="h-5 w-5" />
+            </IconButton>
+      )}
         </div>
       </div>
 
@@ -439,6 +454,25 @@ const onVideo = (file?: File) => {
       <span className="text-sm font-semibold">Video</span>
     </button>
   </div>
+</Sheet>
+<Sheet
+  open={voiceOpen}
+  onClose={() => {
+    if (!imageUploading) setVoiceOpen(false);
+  }}
+  title="Voice message"
+>
+  {voiceOpen && (
+    <VoiceRecorder
+      key={`${username}:${sessionToken || ""}`}
+      disabled={imageUploading}
+      onSend={async (file) => {
+        const sent = await onAttachment("voice", file);
+        if (sent) setVoiceOpen(false);
+        return sent;
+      }}
+    />
+  )}
 </Sheet>
 
       {/* in-chat pay */}
@@ -614,7 +648,7 @@ function ChatAttachment({
   fileName,
 }: {
   attachmentId: string;
-  kind: "file" | "video";
+  kind: "file" | "video" | "voice";
   fileName?: string;
 }) {
   const { sessionToken } = usePiAuth();
@@ -661,7 +695,7 @@ function ChatAttachment({
 
       setBlob(content);
 
-      if (kind === "video") {
+      if (kind === "video" || kind === "voice") {
         const url = URL.createObjectURL(content);
         urlRef.current = url;
         setVideoUrl(url);
@@ -691,19 +725,31 @@ function ChatAttachment({
   };
 
   return (
-    <div className="flex min-w-0 flex-col gap-2">
-      {kind === "video" && videoUrl && (
-        <video
-          src={videoUrl}
-          controls
-          playsInline
-          preload="metadata"
-          className="max-h-72 w-64 max-w-full rounded-xl bg-black"
-          onError={() =>
-            setError("This video cannot play on this device. You can save it.")
-          }
-        />
-      )}
+  <div className="flex min-w-0 flex-col gap-2">
+    {kind === "voice" && videoUrl && (
+      <audio
+        src={videoUrl}
+        controls
+        preload="metadata"
+        className="w-64 max-w-full"
+        onError={() =>
+          setError("This recording cannot play on this device. You can save it.")
+        }
+      />
+    )}
+
+    {kind === "video" && videoUrl && (
+      <video
+        src={videoUrl}
+        controls
+        playsInline
+        preload="metadata"
+        className="max-h-72 w-64 max-w-full rounded-xl bg-black"
+        onError={() =>
+          setError("This video cannot play on this device. You can save it.")
+        }
+      />
+    )}
 
       <button
         type="button"
@@ -720,7 +766,9 @@ function ChatAttachment({
           : blob
             ? "Save / Share"
             : kind === "video"
-              ? "Load video"
+             ? "Load video"
+            : kind === "voice"
+              ? "Load voice message"
               : "Download file"}
       </button>
 
@@ -770,7 +818,7 @@ function Bubble({
     );
   }
 
-  if (m.kind === "file" || m.kind === "video") {
+  if (m.kind === "file" || m.kind === "video" || m.kind === "voice") {
   return (
     <div
       className={cx(
@@ -788,14 +836,18 @@ function Bubble({
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-turquoise/20 text-turquoise">
             {m.kind === "video" ? (
               <IconVideo className="h-5 w-5" />
+            ) : m.kind === "voice" ? (
+              <IconMic className="h-5 w-5" />
             ) : (
               <IconFile className="h-5 w-5" />
-            )}
+          )}
           </span>
 
           <div className="min-w-0 flex-1">
             <p className="break-all text-sm font-medium text-foreground">
-              {m.fileName || (m.kind === "video" ? "Video" : t.file)}
+              {m.kind === "voice"
+                ? "Voice message"
+                : m.fileName || (m.kind === "video" ? "Video" : t.file)}
             </p>
             <TimeInline m={m} locale={locale} mine={mine} />
           </div>

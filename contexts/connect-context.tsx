@@ -441,7 +441,7 @@ if (cRec) {
       merged.set(item.id, {
         id: item.id,
         attachmentId:
-          (item.kind === "file" || item.kind === "video") &&
+          (item.kind === "file" || item.kind === "video" || item.kind === "voice") &&
           typeof item.attachmentId === "string" &&
           /^[a-fA-F0-9]{24}$/.test(item.attachmentId)
             ? item.attachmentId
@@ -614,7 +614,7 @@ useEffect(() => {
   const message: Message = {
     id: incoming.id,
     attachmentId:
-      (incoming.kind === "file" || incoming.kind === "video") &&
+      (incoming.kind === "file" || incoming.kind === "video" || incoming.kind === "voice") &&
       typeof incoming.attachmentId === "string" &&
       /^[a-fA-F0-9]{24}$/.test(incoming.attachmentId)
         ? incoming.attachmentId
@@ -931,7 +931,7 @@ return "added";
       id: uid(),
       imageId: kind === "image" ? imageId : undefined,
       attachmentId:
-      kind === "file" || kind === "video" ? attachmentId : undefined,
+      kind === "file" || kind === "video" || kind === "voice" ? attachmentId : undefined,
       fromMe: true,
       kind,
       text: cleanStr(text, 2000),
