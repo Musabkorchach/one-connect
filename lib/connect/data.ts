@@ -71,6 +71,7 @@ export interface ContactRequest {
 
 export interface Message {
   id: string;
+  imageId?: string;
   fromMe: boolean;
   kind: MsgKind;
   text: string;          // text body / caption / file name
@@ -457,6 +458,11 @@ function sanitizeMessage(v: unknown): Message | null {
   const status = MSG_STATUS.includes(m.status as MsgStatus) ? (m.status as MsgStatus) : "sent";
   return {
     id: typeof m.id === "string" ? m.id : uid(),
+    imageId:
+      typeof m.imageId === "string" &&
+      /^[a-fA-F0-9]{24}$/.test(m.imageId)
+        ? m.imageId
+        : undefined,
     fromMe: m.fromMe === true,
     kind,
     text: cleanStr(m.text, MSG_MAX),
