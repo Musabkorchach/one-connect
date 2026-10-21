@@ -111,7 +111,8 @@ interface ConnectContextType {
     text: string,
     fileName?: string,
     amount?: number,
-    imageId?: string
+    imageId?: string,
+    attachmentId?: string
   ) => void;
   markChatRead: (username: string, messageIds?: string[]) => void;
   // calls
@@ -439,6 +440,12 @@ if (cRec) {
       const previous = merged.get(item.id);
       merged.set(item.id, {
         id: item.id,
+        attachmentId:
+          (item.kind === "file" || item.kind === "video") &&
+          typeof item.attachmentId === "string" &&
+          /^[a-fA-F0-9]{24}$/.test(item.attachmentId)
+            ? item.attachmentId
+            : undefined,
         imageId:
           item.kind === "image" &&
           typeof item.imageId === "string" &&
@@ -449,7 +456,7 @@ if (cRec) {
         kind: item.kind as MsgKind,
         text: cleanStr(item.text, 2000),
         fileName: typeof item.fileName === "string"
-          ? cleanStr(item.fileName, 40)
+          ? cleanStr(item.fileName, 120)
           : undefined,
         at: item.at,
         status:
@@ -606,6 +613,12 @@ useEffect(() => {
   acknowledgeMessages(sender, [incoming.id], "delivered");
   const message: Message = {
     id: incoming.id,
+    attachmentId:
+      (incoming.kind === "file" || incoming.kind === "video") &&
+      typeof incoming.attachmentId === "string" &&
+      /^[a-fA-F0-9]{24}$/.test(incoming.attachmentId)
+        ? incoming.attachmentId
+        : undefined,
     imageId:
       incoming.kind === "image" &&
       typeof incoming.imageId === "string" &&
@@ -614,7 +627,7 @@ useEffect(() => {
         : undefined,
     fileName:
       typeof incoming.fileName === "string"
-        ? cleanStr(incoming.fileName, 40)
+        ? cleanStr(incoming.fileName, 120)
         : undefined,
     fromMe: false,
     kind: incoming.kind as MsgKind,
@@ -895,6 +908,7 @@ return "added";
     fileName?: string,
     amount?: number,
     imageId?: string,
+    attachmentId?: string,
   ) => {
     const uname = normalizeUsername(username);
     let list = [...chatsRef.current];
@@ -916,10 +930,12 @@ return "added";
     const msg: Message = {
       id: uid(),
       imageId: kind === "image" ? imageId : undefined,
+      attachmentId:
+      kind === "file" || kind === "video" ? attachmentId : undefined,
       fromMe: true,
       kind,
       text: cleanStr(text, 2000),
-      fileName: fileName ? cleanStr(fileName, 40) : undefined,
+      fileName: fileName ? cleanStr(fileName, 120) : undefined,
       status: "pending",
       at: Date.now(),
     };
@@ -936,6 +952,7 @@ return "added";
       msg.fileName,
       msg.id,
       msg.imageId,
+      msg.attachmentId,
     );
 
     if (!emitted) {

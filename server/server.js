@@ -24,6 +24,9 @@ const chatImagesBucket = new GridFSBucket(db, {
   bucketName: "chat_images",
 });
 
+const chatAttachmentsBucket = new GridFSBucket(db, {
+  bucketName: "chat_attachments",
+});
 const chatImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -33,6 +36,17 @@ const chatImageUpload = multer({
     parts: 3,
   },
 });
+
+const chatAttachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 1,
+    fields: 2,
+    parts: 4,
+  },
+});
+
 const messagesCollection = db.collection("messages");
 await messagesCollection.createIndex(
   { senderUsername: 1, id: 1 },
@@ -137,6 +151,30 @@ function detectChatImageType(buffer) {
   return null;
 }
 
+function detectChatVideoType(buffer) {
+  if (!Buffer.isBuffer(buffer)) return null;
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 4, 8) === "ftyp" &&
+    buffer.toString("ascii", 8, 12) !== "qt  "
+  ) {
+    return "video/mp4";
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer.subarray(0, 4).equals(
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+    ) &&
+    buffer.subarray(0, 4096).includes(Buffer.from("webm"))
+  ) {
+    return "video/webm";
+  }
+
+  return null;
+}
+
 function normalizeMessagingUsername(value) {
   if (typeof value !== "string") return "";
 
@@ -230,6 +268,83 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
   }
 });
 
+app.post("/api/chat/attachments", requireSession, (req, res) => {
+  chatAttachmentUpload.single("file")(req, res, async (uploadError) => {
+    if (uploadError) {
+      return res.status(
+        uploadError.code === "LIMIT_FILE_SIZE" ? 413 : 400,
+      ).json({
+        error: uploadError.code === "LIMIT_FILE_SIZE"
+          ? "Attachment must be 25 MB or smaller"
+          : "Invalid attachment upload",
+      });
+    }
+
+    const senderUsername = normalizeMessagingUsername(req.user.piUsername);
+    const recipientUsername = normalizeMessagingUsername(req.body?.recipient);
+    const kind = req.body?.kind;
+    const file = req.file;
+
+    if (
+      !senderUsername ||
+      !recipientUsername ||
+      senderUsername === recipientUsername ||
+      !["file", "video"].includes(kind)
+    ) {
+      return res.status(400).json({ error: "Invalid attachment details" });
+    }
+
+    if (!file || !file.buffer.length) {
+      return res.status(400).json({ error: "Attachment file is required" });
+    }
+
+    const mimeType = kind === "video"
+      ? detectChatVideoType(file.buffer)
+      : "application/octet-stream";
+
+    if (!mimeType) {
+      return res.status(415).json({
+        error: "Supported videos: MP4 and WebM",
+      });
+    }
+
+    const fileName = file.originalname
+      .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
+      .slice(0, 120) || (kind === "video" ? "video" : "file");
+
+    try {
+      const uploadStream = chatAttachmentsBucket.openUploadStream(fileName, {
+        metadata: {
+          ownerUserId: req.user.userId,
+          senderUsername,
+          recipientUsername,
+          kind,
+          mimeType,
+        },
+      });
+
+      await new Promise((resolve, reject) => {
+        uploadStream.once("error", reject);
+        uploadStream.once("finish", resolve);
+        uploadStream.end(file.buffer);
+      });
+
+      return res.status(201).json({
+        attachmentId: uploadStream.id.toHexString(),
+        kind,
+        fileName,
+        mimeType,
+        fileSize: file.size,
+      });
+    } catch (error) {
+      console.error("[CHAT ATTACHMENT UPLOAD ERROR]", error);
+      return res.status(500).json({
+        error: "Attachment could not be uploaded",
+      });
+    }
+  });
+});
+
 app.post("/api/chat/images", requireSession, (req, res) => {
   chatImageUpload.single("file")(req, res, async (uploadError) => {
     if (uploadError) {
@@ -300,6 +415,89 @@ app.post("/api/chat/images", requireSession, (req, res) => {
     }
   });
 });
+
+app.get(
+  "/api/chat/attachments/:attachmentId",
+  requireSession,
+  async (req, res) => {
+    const { attachmentId } = req.params;
+
+    if (!/^[a-fA-F0-9]{24}$/.test(attachmentId)) {
+      return res.status(400).json({ error: "Invalid attachment ID" });
+    }
+
+    try {
+      const id = new ObjectId(attachmentId);
+      const attachment = await chatAttachmentsBucket.find({ _id: id }).next();
+      const username = normalizeMessagingUsername(req.user.piUsername);
+
+      if (
+        !attachment ||
+        !username ||
+        (
+          attachment.metadata?.senderUsername !== username &&
+          attachment.metadata?.recipientUsername !== username
+        )
+      ) {
+        return res.status(404).json({ error: "Attachment not found" });
+      }
+
+      const kind = attachment.metadata?.kind;
+      const mimeType = kind === "file"
+        ? "application/octet-stream"
+        : attachment.metadata?.mimeType;
+
+      if (
+        !["file", "video"].includes(kind) ||
+        (kind === "video" &&
+          !["video/mp4", "video/webm"].includes(mimeType))
+      ) {
+        return res.status(415).json({ error: "Unsupported attachment type" });
+      }
+
+      const encodedName = encodeURIComponent(
+        attachment.filename || "attachment",
+      ).replace(
+        /['()*]/g,
+        (character) =>
+          `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+      );
+
+      res.set({
+        "Content-Type": mimeType,
+        "Content-Length": String(attachment.length),
+        "Content-Disposition":
+          `attachment; filename="attachment"; filename*=UTF-8''${encodedName}`,
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+
+      const downloadStream = chatAttachmentsBucket.openDownloadStream(id);
+
+      downloadStream.on("error", (error) => {
+        console.error("[CHAT ATTACHMENT READ ERROR]", error);
+
+        if (!res.headersSent) {
+          res.removeHeader("Content-Length");
+          res.status(500).end();
+        } else {
+          res.destroy();
+        }
+      });
+
+      res.on("close", () => downloadStream.destroy());
+      downloadStream.pipe(res);
+    } catch (error) {
+      console.error("[CHAT ATTACHMENT LOAD ERROR]", error);
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          error: "Attachment could not be loaded",
+        });
+      }
+    }
+  },
+);
 
 app.get("/api/chat/images/:imageId", requireSession, async (req, res) => {
   const { imageId } = req.params;
@@ -628,7 +826,15 @@ io.on("connection", (socket) => {
     error: "Invalid message data",
   });
 }
-    const { conversationId, kind, text, fileName, messageId, imageId } = data;
+  const {
+    conversationId,
+    kind,
+    text,
+    fileName,
+    messageId,
+    imageId,
+    attachmentId,
+  } = data;
         if (
       typeof messageId !== "string" ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(messageId)
@@ -699,17 +905,68 @@ io.on("connection", (socket) => {
       });
     }
 
+    let attachmentRecord = null;
+
+if (kind === "file" || kind === "video") {
+  if (
+    typeof attachmentId !== "string" ||
+    !/^[a-fA-F0-9]{24}$/.test(attachmentId)
+  ) {
+    return socket.emit("message:error", {
+      id: messageId,
+      error: "Upload the attachment before sending",
+    });
+  }
+
+  try {
+    attachmentRecord = await chatAttachmentsBucket.find({
+      _id: new ObjectId(attachmentId),
+      "metadata.ownerUserId": socket.userId,
+      "metadata.senderUsername": messagingUsername,
+      "metadata.recipientUsername": recipient,
+      "metadata.kind": kind,
+    }).next();
+  } catch (error) {
+    console.error("[CHAT ATTACHMENT VERIFY ERROR]", error);
+    return socket.emit("message:error", {
+      id: messageId,
+      error: "Attachment could not be verified",
+    });
+  }
+
+  if (!attachmentRecord) {
+    return socket.emit("message:error", {
+      id: messageId,
+      error: "Attachment is unavailable for this conversation",
+    });
+  }
+} else if (attachmentId !== undefined) {
+  return socket.emit("message:error", {
+    id: messageId,
+    error: "Attachment requires a file or video message",
+  });
+}
+
     const message = {
       id: messageId,
       senderUsername: messagingUsername,
       recipientUsername: recipient,
       kind,
       text,
-      fileName: imageRecord ? imageRecord.filename : fileName,
+      fileName: attachmentRecord
+        ? attachmentRecord.filename
+        : imageRecord
+         ? imageRecord.filename
+         : fileName,
       ...(imageRecord ? {
         imageId: imageRecord._id.toHexString(),
         mimeType: imageRecord.metadata.mimeType,
         fileSize: imageRecord.length,
+      } : {}),
+      ...(attachmentRecord ? {
+        attachmentId: attachmentRecord._id.toHexString(),
+        mimeType: attachmentRecord.metadata.mimeType,
+        fileSize: attachmentRecord.length,
       } : {}),
       status: "sent",
       at: Date.now(),

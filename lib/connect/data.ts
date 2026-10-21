@@ -72,6 +72,7 @@ export interface ContactRequest {
 export interface Message {
   id: string;
   imageId?: string;
+  attachmentId?: string;
   fromMe: boolean;
   kind: MsgKind;
   text: string;          // text body / caption / file name
@@ -458,6 +459,12 @@ function sanitizeMessage(v: unknown): Message | null {
   const status = MSG_STATUS.includes(m.status as MsgStatus) ? (m.status as MsgStatus) : "sent";
   return {
     id: typeof m.id === "string" ? m.id : uid(),
+    attachmentId:
+      (kind === "file" || kind === "video") &&
+      typeof m.attachmentId === "string" &&
+      /^[a-fA-F0-9]{24}$/.test(m.attachmentId)
+        ? m.attachmentId
+        : undefined,
     imageId:
       typeof m.imageId === "string" &&
       /^[a-fA-F0-9]{24}$/.test(m.imageId)
@@ -466,7 +473,7 @@ function sanitizeMessage(v: unknown): Message | null {
     fromMe: m.fromMe === true,
     kind,
     text: cleanStr(m.text, MSG_MAX),
-    fileName: m.fileName ? cleanStr(m.fileName, NAME_MAX) : undefined,
+    fileName: m.fileName ? cleanStr(m.fileName, 120) : undefined,
     fileSize: clampNum(m.fileSize, 0, 500 * 1024 * 1024),
     duration: clampNum(m.duration, 0, 3600),
     mimeType: m.mimeType ? cleanStr(m.mimeType, 60) : undefined,
