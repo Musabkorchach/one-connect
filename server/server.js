@@ -1,7 +1,8 @@
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import { MongoClient } from "mongodb";
+import { MongoClient, GridFSBucket, ObjectId } from "mongodb";
+import multer from "multer";
 import cors from "cors";
 import { config } from "dotenv";
 import dns from "dns";
@@ -19,6 +20,19 @@ await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
 const db = mongoClient.db("oneconnect");
+const chatImagesBucket = new GridFSBucket(db, {
+  bucketName: "chat_images",
+});
+
+const chatImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+    fields: 1,
+    parts: 3,
+  },
+});
 const messagesCollection = db.collection("messages");
 await messagesCollection.createIndex(
   { senderUsername: 1, id: 1 },
@@ -91,6 +105,37 @@ const users = new Map();
 const conversations = new Map();
 const contacts = new Map();
 const userSessions = new Map();
+
+function detectChatImageType(buffer) {
+  if (!Buffer.isBuffer(buffer)) return null;
+
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+    )
+  ) return "image/png";
+
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 255 &&
+    buffer[1] === 216 &&
+    buffer[2] === 255
+  ) return "image/jpeg";
+
+  if (
+    buffer.length >= 6 &&
+    ["GIF87a", "GIF89a"].includes(buffer.toString("ascii", 0, 6))
+  ) return "image/gif";
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) return "image/webp";
+
+  return null;
+}
 
 function normalizeMessagingUsername(value) {
   if (typeof value !== "string") return "";
@@ -182,6 +227,143 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
   } catch (error) {
     console.error("[APP STATE SAVE ERROR]", error);
     return res.status(500).json({ error: "State could not be saved" });
+  }
+});
+
+app.post("/api/chat/images", requireSession, (req, res) => {
+  chatImageUpload.single("file")(req, res, async (uploadError) => {
+    if (uploadError) {
+      return res.status(
+        uploadError.code === "LIMIT_FILE_SIZE" ? 413 : 400
+      ).json({
+        error: uploadError.code === "LIMIT_FILE_SIZE"
+          ? "Image must be 5 MB or smaller"
+          : "Invalid image upload",
+      });
+    }
+
+    const senderUsername = normalizeMessagingUsername(req.user.piUsername);
+    const recipientUsername = normalizeMessagingUsername(req.body?.recipient);
+    const file = req.file;
+
+    if (
+      !senderUsername ||
+      !recipientUsername ||
+      senderUsername === recipientUsername
+    ) {
+      return res.status(400).json({ error: "Invalid recipient" });
+    }
+
+    if (!file || !file.buffer.length) {
+      return res.status(400).json({ error: "Image file is required" });
+    }
+
+    const mimeType = detectChatImageType(file.buffer);
+
+    if (!mimeType) {
+      return res.status(415).json({
+        error: "Supported images: PNG, JPEG, GIF and WebP",
+      });
+    }
+
+    const fileName = file.originalname
+      .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
+      .slice(0, 120) || "image";
+
+    try {
+      const uploadStream = chatImagesBucket.openUploadStream(fileName, {
+        metadata: {
+          ownerUserId: req.user.userId,
+          senderUsername,
+          recipientUsername,
+          mimeType,
+        },
+      });
+
+      await new Promise((resolve, reject) => {
+        uploadStream.once("error", reject);
+        uploadStream.once("finish", resolve);
+        uploadStream.end(file.buffer);
+      });
+
+      return res.status(201).json({
+        imageId: uploadStream.id.toHexString(),
+        fileName,
+        mimeType,
+        fileSize: file.size,
+      });
+    } catch (error) {
+      console.error("[CHAT IMAGE UPLOAD ERROR]", error);
+      return res.status(500).json({
+        error: "Image could not be uploaded",
+      });
+    }
+  });
+});
+
+app.get("/api/chat/images/:imageId", requireSession, async (req, res) => {
+  const { imageId } = req.params;
+
+  if (!/^[a-fA-F0-9]{24}$/.test(imageId)) {
+    return res.status(400).json({ error: "Invalid image ID" });
+  }
+
+  try {
+    const id = new ObjectId(imageId);
+    const image = await chatImagesBucket.find({ _id: id }).next();
+    const username = normalizeMessagingUsername(req.user.piUsername);
+
+    if (
+      !image ||
+      !username ||
+      (
+        image.metadata?.senderUsername !== username &&
+        image.metadata?.recipientUsername !== username
+      )
+    ) {
+      return res.status(404).json({ error: "Image not found" });
+    }
+
+    const mimeType = image.metadata?.mimeType;
+
+    if (
+      !["image/png", "image/jpeg", "image/gif", "image/webp"]
+        .includes(mimeType)
+    ) {
+      return res.status(415).json({ error: "Unsupported image type" });
+    }
+
+    res.set({
+      "Content-Type": mimeType,
+      "Content-Length": String(image.length),
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": "inline",
+    });
+
+    const downloadStream = chatImagesBucket.openDownloadStream(id);
+
+    downloadStream.on("error", (error) => {
+      console.error("[CHAT IMAGE READ ERROR]", error);
+
+      if (!res.headersSent) {
+        res.removeHeader("Content-Length");
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
+    });
+
+    res.on("close", () => downloadStream.destroy());
+    downloadStream.pipe(res);
+  } catch (error) {
+    console.error("[CHAT IMAGE LOAD ERROR]", error);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: "Image could not be loaded",
+      });
+    }
   }
 });
 
@@ -446,7 +628,7 @@ io.on("connection", (socket) => {
     error: "Invalid message data",
   });
 }
-    const { conversationId, kind, text, fileName, messageId } = data;
+    const { conversationId, kind, text, fileName, messageId, imageId } = data;
         if (
       typeof messageId !== "string" ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(messageId)
@@ -476,13 +658,59 @@ io.on("connection", (socket) => {
       });
     }
 
+    let imageRecord = null;
+
+    if (kind === "image") {
+      if (
+        typeof imageId !== "string" ||
+        !/^[a-fA-F0-9]{24}$/.test(imageId)
+      ) {
+        return socket.emit("message:error", {
+          id: messageId,
+          error: "Upload the image before sending",
+        });
+      }
+
+      try {
+        imageRecord = await chatImagesBucket.find({
+          _id: new ObjectId(imageId),
+          "metadata.ownerUserId": socket.userId,
+          "metadata.senderUsername": messagingUsername,
+          "metadata.recipientUsername": recipient,
+        }).next();
+      } catch (error) {
+        console.error("[CHAT IMAGE VERIFY ERROR]", error);
+        return socket.emit("message:error", {
+          id: messageId,
+          error: "Image could not be verified",
+        });
+      }
+
+      if (!imageRecord) {
+        return socket.emit("message:error", {
+          id: messageId,
+          error: "Image is unavailable for this conversation",
+        });
+      }
+    } else if (imageId !== undefined) {
+      return socket.emit("message:error", {
+        id: messageId,
+        error: "Image attachment requires an image message",
+      });
+    }
+
     const message = {
       id: messageId,
       senderUsername: messagingUsername,
       recipientUsername: recipient,
       kind,
       text,
-      fileName,
+      fileName: imageRecord ? imageRecord.filename : fileName,
+      ...(imageRecord ? {
+        imageId: imageRecord._id.toHexString(),
+        mimeType: imageRecord.metadata.mimeType,
+        fileSize: imageRecord.length,
+      } : {}),
       status: "sent",
       at: Date.now(),
     };
@@ -506,6 +734,73 @@ io.on("connection", (socket) => {
         const recipientUsername = normalizeMessagingUsername(conversationId);
     io.to(`peer:${recipientUsername}`).emit("message:new", message);
   });
+
+  socket.on("message:receipt", async (data) => {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+
+  const sender = normalizeMessagingUsername(data.senderUsername);
+  const { ids, status } = data;
+
+  if (
+    !sender ||
+    sender === messagingUsername ||
+    !["delivered", "read"].includes(status) ||
+    !Array.isArray(ids) ||
+    ids.length === 0 ||
+    ids.length > 120 ||
+    !ids.every(
+      (id) =>
+        typeof id === "string" &&
+        /^[a-zA-Z0-9_-]{1,100}$/.test(id),
+    )
+  ) {
+    return;
+  }
+
+  const session = userSessions.get(socket.sessionToken);
+  if (!session || session.expiresAt < Date.now()) return;
+
+  const exactUsername = (username) => ({
+    $regex: `^${username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+    $options: "i",
+  });
+
+  const filter = {
+    id: { $in: [...new Set(ids)] },
+    senderUsername: exactUsername(sender),
+    recipientUsername: exactUsername(messagingUsername),
+  };
+
+  try {
+    await messagesCollection.updateMany(
+      {
+        ...filter,
+        status: {
+          $in: status === "read" ? ["sent", "delivered"] : ["sent"],
+        },
+      },
+      { $set: { status } },
+    );
+
+    const confirmed = await messagesCollection
+      .find({
+        ...filter,
+        status: { $in: ["delivered", "read"] },
+      })
+      .project({ _id: 0, id: 1, status: 1 })
+      .toArray();
+
+    for (const message of confirmed) {
+      io.to(`peer:${sender}`).emit("message:status", {
+        id: message.id,
+        recipientUsername: messagingUsername,
+        status: message.status,
+      });
+    }
+  } catch (error) {
+    console.error("[MESSAGE RECEIPT ERROR]", error);
+  }
+});
 
   socket.on("status:update", (userId, status, statusText) => {
     const user = users.get(userId);

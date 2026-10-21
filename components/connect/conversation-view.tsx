@@ -1,6 +1,11 @@
 "use client";
 
-import { joinConversation } from "@/lib/api-client";
+import {
+  joinConversation,
+  uploadChatImage,
+  fetchChatImage,
+} from "@/lib/api-client";
+import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Button, IconButton, TextInput, cx } from "./ui";
@@ -34,7 +39,18 @@ export function ConversationView({
   onBack: () => void;
   onCall: (username: string, name: string, color: number, kind: "voice" | "video") => void;
 }) {
-  const { t, getChat, contacts, sendMessage, markChatRead, lang } = useConnect();
+  const {
+    t,
+    getChat,
+    contacts,
+    sendMessage,
+    markChatRead,
+    lang,
+    pushToast,
+  } = useConnect();
+
+  const { sessionToken } = usePiAuth();
+  const [imageUploading, setImageUploading] = useState(false);
   const conv = getChat(username);
   const contact = contacts.find((c) => c.username === username);
   const [text, setText] = useState("");
@@ -46,15 +62,126 @@ export function ConversationView({
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    joinConversation(conv?.id ?? username);
-    markChatRead(username);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username, conv?.messages.length]);
+    joinConversation(username);
+  }, [username]);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [conv?.messages.length]);
+    if (!el) return;
+
+    let followLatest = true;
+    let frame: number | null = null;
+
+    const scrollToLatest = () => {
+      if (!followLatest) return;
+
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+        frame = null;
+      });
+    };
+
+    const onScroll = () => {
+      const distanceFromBottom =
+        el.scrollHeight - el.clientHeight - el.scrollTop;
+
+      followLatest = distanceFromBottom <= 80;
+
+      if (!followLatest && frame !== null) {
+        cancelAnimationFrame(frame);
+        frame = null;
+      }
+    };
+
+    el.addEventListener("scroll", onScroll, { passive: true });
+
+    const observer = new ResizeObserver(scrollToLatest);
+    observer.observe(el);
+
+    for (const child of Array.from(el.children)) {
+      observer.observe(child);
+    }
+
+    scrollToLatest();
+
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [username, conv?.id]);
+
+    useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const reported = new Set<string>();
+    let frame: number | null = null;
+
+    const checkVisibleMessages = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (document.visibilityState !== "visible") return;
+
+        const viewport = el.getBoundingClientRect();
+        const ids: string[] = [];
+
+        el.querySelectorAll<HTMLElement>("[data-read-message-id]")
+          .forEach((node) => {
+            const id = node.dataset.readMessageId;
+            if (!id || reported.has(id)) return;
+
+            const bounds = node.getBoundingClientRect();
+            const visibleHeight =
+              Math.min(bounds.bottom, viewport.bottom, window.innerHeight) -
+              Math.max(bounds.top, viewport.top, 0);
+            const visibleWidth =
+              Math.min(bounds.right, viewport.right, window.innerWidth) -
+              Math.max(bounds.left, viewport.left, 0);
+
+            if (
+              bounds.height > 0 &&
+              visibleWidth > 0 &&
+              visibleHeight >= Math.min(40, bounds.height / 2)
+            ) {
+              ids.push(id);
+              reported.add(id);
+            }
+          });
+
+        if (ids.length > 0) markChatRead(username, ids);
+      });
+    };
+
+    const onVisibilityChange = () => {
+      reported.clear();
+      checkVisibleMessages();
+    };
+
+    el.addEventListener("scroll", checkVisibleMessages, { passive: true });
+    window.addEventListener("resize", checkVisibleMessages);
+    window.addEventListener("focus", onVisibilityChange);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    const observer = new ResizeObserver(checkVisibleMessages);
+    observer.observe(el);
+    for (const child of Array.from(el.children)) observer.observe(child);
+
+    checkVisibleMessages();
+
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      observer.disconnect();
+      el.removeEventListener("scroll", checkVisibleMessages);
+      window.removeEventListener("resize", checkVisibleMessages);
+      window.removeEventListener("focus", onVisibilityChange);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username, conv?.messages]);
 
   if (!conv) return null;
 
@@ -65,12 +192,45 @@ export function ConversationView({
     setText("");
   };
 
-  const onImage = (file?: File) => {
-    if (!file) return;
-    sendMessage(username, "image", "", file.name);
+  const onImage = async (file?: File) => {
+    if (!file || imageUploading) return;
+
+    if (!sessionToken) {
+      pushToast("Please sign in again before sending an image.");
+      return;
+    }
+
+    setImageUploading(true);
     setAttachOpen(false);
+
+    try {
+      const image = await uploadChatImage(
+        username,
+        file,
+        sessionToken
+      );
+
+      sendMessage(
+        username,
+        "image",
+        "",
+        image.fileName,
+        undefined,
+        image.imageId
+      );
+    } catch (error) {
+      pushToast(
+        error instanceof Error
+          ? error.message
+          : "Image could not be uploaded."
+      );
+    } finally {
+      setImageUploading(false);
+      if (imgRef.current) imgRef.current.value = "";
+    }
   };
-  const onFile = (file?: File) => {
+
+    const onFile = (file?: File) => {
     if (!file) return;
     sendMessage(username, "file", "", file.name);
     setAttachOpen(false);
@@ -116,7 +276,10 @@ export function ConversationView({
       </header>
 
       {/* messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto pc-no-scrollbar px-3 py-4">
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 overflow-y-auto pc-no-scrollbar px-3 py-4"
+     >
         <div className="mx-auto mb-4 flex max-w-[80%] items-center justify-center gap-1.5 rounded-full bg-turquoise/10 px-3 py-1.5 text-center text-[11px] text-turquoise">
           <IconShield className="h-3.5 w-3.5 shrink-0" />
           <span>{t.encrypted}</span>
@@ -126,6 +289,14 @@ export function ConversationView({
 
       {/* composer */}
       <div className="pc-glass-strong pc-safe-bottom border-t border-border/60 px-2 py-2">
+        {imageUploading && (
+          <p
+            role="status"
+            className="px-2 pb-2 text-xs text-muted-foreground"
+          >
+            Uploading image…
+          </p>
+        )}
         <div className="flex items-end gap-2">
           <IconButton
             className="h-11 w-11 shrink-0 bg-primary/15 text-primary"
@@ -227,11 +398,106 @@ function MessageList({
             </span>
           </div>
           {g.items.map((m) => (
-            <Bubble key={m.id} m={m} locale={locale} t={t} />
-          ))}
+            <div
+              key={m.id}
+              data-read-message-id={!m.fromMe ? m.id : undefined}
+            >
+              <Bubble m={m} locale={locale} t={t} />
+            </div>
+   ))}
         </div>
       ))}
     </div>
+  );
+}
+
+function ChatImage({
+  imageId,
+  fileName,
+}: {
+  imageId: string;
+  fileName?: string;
+}) {
+  const { sessionToken } = usePiAuth();
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    setImageUrl(null);
+    setError(false);
+    if (!sessionToken) return;
+
+    const controller = new AbortController();
+    let active = true;
+    let objectUrl: string | null = null;
+
+    void fetchChatImage(imageId, sessionToken, controller.signal)
+      .then((blob) => {
+        if (!active) return;
+
+        objectUrl = URL.createObjectURL(blob);
+        setImageUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) {
+          setError(true);
+        }
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageId, sessionToken]);
+
+  if (!imageUrl) {
+    return (
+      <div
+        className="flex aspect-[4/3] w-52 items-center justify-center rounded-xl bg-muted/40 px-3 text-center text-xs text-muted-foreground"
+        role="status"
+      >
+        {error
+          ? "Image could not be loaded."
+          : !sessionToken
+            ? "Sign in to view this image."
+            : "Loading image…"}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="block overflow-hidden rounded-xl"
+        aria-label="Open image"
+      >
+        <img
+          src={imageUrl}
+          alt={fileName || "Chat image"}
+          className="h-auto max-h-72 w-52 object-contain"
+          onError={() => {
+            setError(true);
+            setImageUrl(null);
+          }}
+        />
+      </button>
+
+      <Sheet
+        open={open}
+        onClose={() => setOpen(false)}
+        title={fileName || "Image"}
+      >
+        <img
+          src={imageUrl}
+          alt={fileName || "Chat image"}
+          className="mx-auto max-h-[70vh] max-w-full object-contain"
+        />
+      </Sheet>
+    </>
   );
 }
 
@@ -250,9 +516,13 @@ function Bubble({
     return (
       <div className={cx("flex pc-fade-up", mine ? "justify-end" : "justify-start")}>
         <div className={cx("max-w-[70%] overflow-hidden rounded-2xl p-1", mine ? "bg-primary/20" : "bg-card")}>
-          <div className="flex aspect-[4/3] w-52 items-center justify-center rounded-xl bg-muted/40 text-muted-foreground">
-            <IconImage className="h-9 w-9" />
-          </div>
+          {m.imageId ? (
+            <ChatImage imageId={m.imageId} fileName={m.fileName} />
+          ) : (
+            <div className="flex aspect-[4/3] w-52 items-center justify-center rounded-xl bg-muted/40 px-3 text-center text-xs text-muted-foreground">
+              Image content was not uploaded.
+            </div>
+          )}
           <div className="flex items-center justify-between px-2 py-1">
             <span className="text-[11px] text-muted-foreground pc-clamp-1">{m.fileName || t.photo}</span>
             <TimeInline m={m} locale={locale} mine={mine} />
@@ -316,8 +586,46 @@ function TimeInline({ m, locale, mine }: { m: Message; locale: string; mine: boo
 }
 
 function StatusTick({ status }: { status: Message["status"] }) {
-  if (status === "sent") return <IconCheck className="h-3.5 w-3.5 text-primary-foreground/70" />;
+  if (status === "pending") {
+    return (
+      <span role="img" aria-label="Sending" title="Sending">
+        …
+      </span>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <span
+        role="img"
+        aria-label="Send failed"
+        title="Send failed"
+        className="font-bold text-red-400"
+      >
+        !
+      </span>
+    );
+  }
+
+  if (status === "sent") {
+    return (
+      <span title="Saved on server" aria-label="Saved on server">
+        <IconCheck className="h-3.5 w-3.5" />
+      </span>
+    );
+  }
+
   return (
-    <IconDoubleCheck className={cx("h-3.5 w-3.5", status === "read" ? "text-turquoise" : "text-primary-foreground/70")} />
+    <span
+      title={status === "read" ? "Read" : "Delivered"}
+      aria-label={status === "read" ? "Read" : "Delivered"}
+    >
+      <IconDoubleCheck
+        className={cx(
+          "h-3.5 w-3.5",
+          status === "read" ? "text-turquoise" : "opacity-70"
+        )}
+      />
+    </span>
   );
 }

@@ -18,6 +18,8 @@ import {
   onNewMessage,
   onMessageSaved,
   onMessageError,
+  onMessageStatus,
+  acknowledgeMessages,
   addContact as saveContactToServer,
   getUserContacts,
   getAppState,
@@ -103,8 +105,15 @@ interface ConnectContextType {
   getChat: (username: string) => Conversation | undefined;
   ensureChat: (c: Contact | ContactRequest) => void;
   totalUnread: number;
-  sendMessage: (username: string, kind: MsgKind, text: string, fileName?: string, amount?: number) => void;
-  markChatRead: (username: string) => void;
+    sendMessage: (
+    username: string,
+    kind: MsgKind,
+    text: string,
+    fileName?: string,
+    amount?: number,
+    imageId?: string
+  ) => void;
+  markChatRead: (username: string, messageIds?: string[]) => void;
   // calls
   calls: CallLog[];
   logCall: (username: string, name: string, color: number, kind: CallKind, dir: CallDir, durationSec: number) => void;
@@ -430,6 +439,12 @@ if (cRec) {
       const previous = merged.get(item.id);
       merged.set(item.id, {
         id: item.id,
+        imageId:
+          item.kind === "image" &&
+          typeof item.imageId === "string" &&
+          /^[a-fA-F0-9]{24}$/.test(item.imageId)
+            ? item.imageId
+            : undefined,
         fromMe,
         kind: item.kind as MsgKind,
         text: cleanStr(item.text, 2000),
@@ -437,11 +452,14 @@ if (cRec) {
           ? cleanStr(item.fileName, 40)
           : undefined,
         at: item.at,
-        status: fromMe
-          ? previous?.status === "read" || previous?.status === "delivered"
-            ? previous.status
-            : "sent"
-          : "delivered",
+        status:
+  item.status === "read" || previous?.status === "read"
+    ? "read"
+    : item.status === "delivered" || previous?.status === "delivered"
+      ? "delivered"
+      : fromMe
+        ? "sent"
+        : "delivered",
       });
     }
 
@@ -460,7 +478,9 @@ if (cRec) {
       color: existing?.color ?? contact?.color ?? hueFromString(peer),
       messages,
       updatedAt: messages[messages.length - 1].at,
-      unread: existing?.unread ?? 0,
+      unread: messages.filter(
+        (message) => !message.fromMe && message.status !== "read",
+      ).length,
     };
 
     const updated = [
@@ -470,6 +490,11 @@ if (cRec) {
 
     chatsRef.current = updated;
     setChats(updated);
+    acknowledgeMessages(
+      peer,
+      messages.filter((message) => !message.fromMe).map((message) => message.id),
+      "delivered",
+    );
   };
 
     useEffect(() => {
@@ -519,6 +544,45 @@ if (cRec) {
     contacts,
   ]);
 
+useEffect(() => {
+  if (!isAuthenticated || !chatsLoaded) return;
+
+  return onMessageStatus(({ id, recipientUsername, status }) => {
+    if (
+      typeof id !== "string" ||
+      typeof recipientUsername !== "string" ||
+      (status !== "delivered" && status !== "read")
+    ) {
+      return;
+    }
+
+    const peer = normalizeUsername(recipientUsername);
+    let changed = false;
+
+    const updated = chatsRef.current.map((chat) => {
+      if (chat.isGroup || chat.username !== peer) return chat;
+
+      const messages = chat.messages.map((message) => {
+        if (
+          !message.fromMe ||
+          message.id !== id ||
+          message.status === "read" ||
+          message.status === status
+        ) {
+          return message;
+        }
+
+        changed = true;
+        return { ...message, status };
+      });
+
+      return { ...chat, messages };
+    });
+
+    if (changed) commitChats(updated, true);
+  });
+}, [isAuthenticated, chatsLoaded, piUsername]);
+
   const receiveMessage = (incoming: Record<string, unknown>) => {
   if (
     typeof incoming.id !== "string" ||
@@ -539,8 +603,19 @@ if (cRec) {
     !["text", "image", "file", "video", "voice"].includes(incoming.kind)
   ) return;
 
+  acknowledgeMessages(sender, [incoming.id], "delivered");
   const message: Message = {
     id: incoming.id,
+    imageId:
+      incoming.kind === "image" &&
+      typeof incoming.imageId === "string" &&
+      /^[a-fA-F0-9]{24}$/.test(incoming.imageId)
+        ? incoming.imageId
+        : undefined,
+    fileName:
+      typeof incoming.fileName === "string"
+        ? cleanStr(incoming.fileName, 40)
+        : undefined,
     fromMe: false,
     kind: incoming.kind as MsgKind,
     text: cleanStr(incoming.text, 2000),
@@ -819,6 +894,7 @@ return "added";
     text: string,
     fileName?: string,
     amount?: number,
+    imageId?: string,
   ) => {
     const uname = normalizeUsername(username);
     let list = [...chatsRef.current];
@@ -839,6 +915,7 @@ return "added";
     }
     const msg: Message = {
       id: uid(),
+      imageId: kind === "image" ? imageId : undefined,
       fromMe: true,
       kind,
       text: cleanStr(text, 2000),
@@ -858,6 +935,7 @@ return "added";
       msg.text,
       msg.fileName,
       msg.id,
+      msg.imageId,
     );
 
     if (!emitted) {
@@ -874,11 +952,54 @@ return "added";
     }
   };
 
-  const markChatRead = (username: string) => {
-    const uname = normalizeUsername(username);
-    const list = chatsRef.current.map((c) => (c.username === uname && c.unread ? { ...c, unread: 0 } : c));
-    if (list.some((c, i) => c !== chatsRef.current[i])) commitChats(list);
-  };
+  const markChatRead = (username: string, messageIds: string[] = []) => {
+  if (
+    typeof document === "undefined" ||
+    document.visibilityState !== "visible" ||
+    messageIds.length === 0
+  ) {
+    return;
+  }
+
+  const uname = normalizeUsername(username);
+  const chat = chatsRef.current.find(
+    (item) => !item.isGroup && item.username === uname,
+  );
+  if (!chat) return;
+
+  const requested = new Set(messageIds);
+  const received = chat.messages.filter(
+    (message) => !message.fromMe && requested.has(message.id),
+  );
+  if (received.length === 0) return;
+
+  const emitted = acknowledgeMessages(
+    uname,
+    received.map((message) => message.id),
+    "read",
+  );
+  if (!emitted) return;
+
+  const newlyRead = received.filter((message) => message.status !== "read");
+  if (newlyRead.length === 0) return;
+
+  const readIds = new Set(newlyRead.map((message) => message.id));
+  const updated = chatsRef.current.map((item) => {
+    if (item !== chat) return item;
+
+    return {
+      ...item,
+      unread: Math.max(0, item.unread - newlyRead.length),
+      messages: item.messages.map((message) =>
+        readIds.has(message.id)
+          ? { ...message, status: "read" as const }
+          : message,
+      ),
+    };
+  });
+
+  commitChats(updated, true);
+};
 
   const totalUnread = chats.reduce((sum, c) => sum + c.unread, 0);
 

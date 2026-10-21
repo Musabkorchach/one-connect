@@ -12,6 +12,13 @@ let socket: ReturnType<typeof io> | null = null;
 const messageListeners = {
   newMessage: new Set<(message: Record<string, unknown>) => void>(),
   saved: new Set<(data: { id: string; status: "sent" }) => void>(),
+  status: new Set<
+  (data: {
+    id: string;
+    recipientUsername: string;
+    status: "delivered" | "read";
+  }) => void
+>(),
   error: new Set<(data: { id?: string; error: string }) => void>(),
   history: new Set<
     (data: {
@@ -100,6 +107,10 @@ if (socket) disconnectSocket();
     socket.on("message:saved", callback);
   }
 
+  for (const callback of messageListeners.status) {
+  socket.on("message:status", callback);
+}
+
   for (const callback of messageListeners.error) {
     socket.on("message:error", callback);
   }
@@ -136,6 +147,50 @@ if (socket) disconnectSocket();
  */
 export function getSocket() {
   return socket;
+}
+
+export function onMessageStatus(
+  callback: (data: {
+    id: string;
+    recipientUsername: string;
+    status: "delivered" | "read";
+  }) => void,
+) {
+  messageListeners.status.add(callback);
+  const attachedSocket = socket;
+  attachedSocket?.on("message:status", callback);
+
+  return () => {
+    messageListeners.status.delete(callback);
+    attachedSocket?.off("message:status", callback);
+    if (socket !== attachedSocket) {
+      socket?.off("message:status", callback);
+    }
+  };
+}
+
+export function acknowledgeMessages(
+  senderUsername: string,
+  ids: string[],
+  status: "delivered" | "read",
+): boolean {
+  if (!socket?.connected) return false;
+
+  const validIds = [...new Set(ids)].filter(
+    (id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id),
+  );
+
+  if (validIds.length === 0) return false;
+
+  for (let i = 0; i < validIds.length; i += 120) {
+    socket.emit("message:receipt", {
+      senderUsername,
+      ids: validIds.slice(i, i + 120),
+      status,
+    });
+  }
+
+  return true;
 }
 
 /**
@@ -248,6 +303,7 @@ export function emitMessage(
   text: string,
   fileName?: string,
   messageId?: string,
+ imageId?: string,
 ): boolean {
   if (!socket?.connected) {
     console.error("WebSocket not connected");
@@ -260,6 +316,7 @@ export function emitMessage(
     text,
     fileName,
     messageId,
+    imageId,
   });
 
   return true;
@@ -424,6 +481,91 @@ export function onIceCandidate(callback: (data: Record<string, unknown>) => void
 /**
  * Upload file to backend
  */
+export async function fetchChatImage(
+  imageId: string,
+  sessionToken: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  if (!/^[a-fA-F0-9]{24}$/.test(imageId)) {
+    throw new Error("Invalid image ID");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/chat/images/${encodeURIComponent(imageId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      cache: "no-store",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Image load failed (${response.status})`);
+  }
+
+  const blob = await response.blob();
+
+  if (
+    !["image/png", "image/jpeg", "image/gif", "image/webp"]
+      .includes(blob.type) ||
+    !blob.size ||
+    blob.size > 5 * 1024 * 1024
+  ) {
+    throw new Error("Invalid image response");
+  }
+
+  return blob;
+}
+
+export async function uploadChatImage(
+  recipient: string,
+  file: File,
+  sessionToken: string
+): Promise<{
+  imageId: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+}> {
+  if (!file.size || file.size > 5 * 1024 * 1024) {
+    throw new Error("Image must be between 1 byte and 5 MB");
+  }
+
+  const formData = new FormData();
+  formData.append("recipient", recipient);
+  formData.append("file", file);
+
+  const response = await fetch(`${API_URL}/api/chat/images`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const details = await response.json().catch(() => null);
+    throw new Error(
+      details?.error || `Image upload failed (${response.status})`
+    );
+  }
+
+  const result = await response.json();
+
+  if (
+    typeof result.imageId !== "string" ||
+    !/^[a-fA-F0-9]{24}$/.test(result.imageId) ||
+    typeof result.fileName !== "string" ||
+    typeof result.mimeType !== "string" ||
+    typeof result.fileSize !== "number"
+  ) {
+    throw new Error("Invalid image upload response");
+  }
+
+  return result;
+}
 export async function uploadFile(userId: string, file: File) {
   const formData = new FormData();
   formData.append("file", file);
