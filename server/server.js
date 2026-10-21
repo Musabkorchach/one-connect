@@ -175,6 +175,45 @@ function detectChatVideoType(buffer) {
   return null;
 }
 
+function detectChatAudioType(buffer) {
+  if (!Buffer.isBuffer(buffer)) return null;
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WAVE"
+  ) {
+    return "audio/wav";
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer.toString("ascii", 0, 4) === "OggS"
+  ) {
+    return "audio/ogg";
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 4, 8) === "ftyp" &&
+    buffer.toString("ascii", 8, 12) !== "qt  "
+  ) {
+    return "audio/mp4";
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer.subarray(0, 4).equals(
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+    ) &&
+    buffer.subarray(0, 4096).includes(Buffer.from("webm"))
+  ) {
+    return "audio/webm";
+  }
+
+  return null;
+}
+
 function normalizeMessagingUsername(value) {
   if (typeof value !== "string") return "";
 
@@ -289,7 +328,7 @@ app.post("/api/chat/attachments", requireSession, (req, res) => {
       !senderUsername ||
       !recipientUsername ||
       senderUsername === recipientUsername ||
-      !["file", "video"].includes(kind)
+      !["file", "video", "voice"].includes(kind)
     ) {
       return res.status(400).json({ error: "Invalid attachment details" });
     }
@@ -298,15 +337,25 @@ app.post("/api/chat/attachments", requireSession, (req, res) => {
       return res.status(400).json({ error: "Attachment file is required" });
     }
 
-    const mimeType = kind === "video"
-      ? detectChatVideoType(file.buffer)
-      : "application/octet-stream";
+    if (kind === "voice" && file.size > 5 * 1024 * 1024) {
+  return res.status(413).json({
+    error: "Voice message must be 5 MB or smaller",
+  });
+}
 
-    if (!mimeType) {
-      return res.status(415).json({
-        error: "Supported videos: MP4 and WebM",
-      });
-    }
+const mimeType = kind === "video"
+  ? detectChatVideoType(file.buffer)
+  : kind === "voice"
+    ? detectChatAudioType(file.buffer)
+    : "application/octet-stream";
+
+if (!mimeType) {
+  return res.status(415).json({
+    error: kind === "voice"
+      ? "Supported audio: WebM, MP4, Ogg and WAV"
+      : "Supported videos: MP4 and WebM",
+  });
+}
 
     const fileName = file.originalname
       .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
@@ -448,12 +497,15 @@ app.get(
         : attachment.metadata?.mimeType;
 
       if (
-        !["file", "video"].includes(kind) ||
+        !["file", "video", "voice"].includes(kind) ||
         (kind === "video" &&
-          !["video/mp4", "video/webm"].includes(mimeType))
+          !["video/mp4", "video/webm"].includes(mimeType)) ||
+        (kind === "voice" &&
+          !["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"]
+            .includes(mimeType))
       ) {
         return res.status(415).json({ error: "Unsupported attachment type" });
-      }
+    }
 
       const encodedName = encodeURIComponent(
         attachment.filename || "attachment",
@@ -907,7 +959,7 @@ io.on("connection", (socket) => {
 
     let attachmentRecord = null;
 
-if (kind === "file" || kind === "video") {
+if (kind === "file" || kind === "video" || kind === "voice") {
   if (
     typeof attachmentId !== "string" ||
     !/^[a-fA-F0-9]{24}$/.test(attachmentId)

@@ -460,7 +460,7 @@ function sanitizeMessage(v: unknown): Message | null {
   return {
     id: typeof m.id === "string" ? m.id : uid(),
     attachmentId:
-      (kind === "file" || kind === "video") &&
+      (kind === "file" || kind === "video" || kind === "voice") &&
       typeof m.attachmentId === "string" &&
       /^[a-fA-F0-9]{24}$/.test(m.attachmentId)
         ? m.attachmentId
