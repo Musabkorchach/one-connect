@@ -4,6 +4,9 @@ import {
   joinConversation,
   uploadChatImage,
   fetchChatImage,
+  uploadChatAttachment,
+  fetchChatAttachment,
+  saveChatBlob,
 } from "@/lib/api-client";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useEffect, useRef, useState } from "react";
@@ -59,6 +62,7 @@ export function ConversationView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -230,11 +234,57 @@ export function ConversationView({
     }
   };
 
-    const onFile = (file?: File) => {
-    if (!file) return;
-    sendMessage(username, "file", "", file.name);
-    setAttachOpen(false);
-  };
+  const onAttachment = async (
+  kind: "file" | "video",
+  file?: File,
+) => {
+  if (!file || imageUploading) return;
+
+  if (!sessionToken) {
+    pushToast("Please sign in again before sending an attachment.");
+    return;
+  }
+
+  setImageUploading(true);
+  setAttachOpen(false);
+
+  try {
+    const attachment = await uploadChatAttachment(
+      username,
+      kind,
+      file,
+      sessionToken,
+    );
+
+    sendMessage(
+      username,
+      kind,
+      "",
+      attachment.fileName,
+      undefined,
+      undefined,
+      attachment.attachmentId,
+    );
+  } catch (error) {
+    pushToast(
+      error instanceof Error
+        ? error.message
+        : "Attachment could not be uploaded.",
+    );
+  } finally {
+    setImageUploading(false);
+    if (fileRef.current) fileRef.current.value = "";
+    if (videoRef.current) videoRef.current.value = "";
+  }
+};
+
+const onFile = (file?: File) => {
+  void onAttachment("file", file);
+};
+
+const onVideo = (file?: File) => {
+  void onAttachment("video", file);
+};
 
   return (
     <div className="fixed inset-0 z-40 flex flex-col bg-background pc-fade-in">
@@ -294,7 +344,7 @@ export function ConversationView({
             role="status"
             className="px-2 pb-2 text-xs text-muted-foreground"
           >
-            Uploading image…
+            Uploading attachment…
           </p>
         )}
         <div className="flex items-end gap-2">
@@ -344,26 +394,52 @@ export function ConversationView({
 
       <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={(e) => onImage(e.target.files?.[0])} />
       <input ref={fileRef} type="file" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
+      <input
+       ref={videoRef}
+       type="file"
+       accept="video/mp4,video/webm,.mp4,.webm"
+       className="hidden"
+       onChange={(event) => onVideo(event.target.files?.[0])}
+/>
 
       {/* attach sheet */}
-      <Sheet open={attachOpen} onClose={() => setAttachOpen(false)} title={t.attach}>
-        <div className="grid grid-cols-2 gap-3 pb-2">
-          <button
-            onClick={() => imgRef.current?.click()}
-            className="pc-press flex flex-col items-center gap-2 rounded-2xl bg-turquoise/10 py-6 text-turquoise"
-          >
-            <IconImage className="h-7 w-7" />
-            <span className="text-sm font-semibold">{t.attachImage}</span>
-          </button>
-          <button
-            onClick={() => fileRef.current?.click()}
-            className="pc-press flex flex-col items-center gap-2 rounded-2xl bg-primary/10 py-6 text-primary"
-          >
-            <IconFile className="h-7 w-7" />
-            <span className="text-sm font-semibold">{t.attachFile}</span>
-          </button>
-        </div>
-      </Sheet>
+      <Sheet
+  open={attachOpen}
+  onClose={() => setAttachOpen(false)}
+  title={t.attach}
+>
+  <div className="grid grid-cols-3 gap-3 pb-2">
+    <button
+      type="button"
+      disabled={imageUploading}
+      onClick={() => imgRef.current?.click()}
+      className="pc-press flex flex-col items-center gap-2 rounded-2xl bg-turquoise/10 py-6 text-turquoise disabled:opacity-50"
+    >
+      <IconImage className="h-7 w-7" />
+      <span className="text-sm font-semibold">{t.attachImage}</span>
+    </button>
+
+    <button
+      type="button"
+      disabled={imageUploading}
+      onClick={() => fileRef.current?.click()}
+      className="pc-press flex flex-col items-center gap-2 rounded-2xl bg-primary/10 py-6 text-primary disabled:opacity-50"
+    >
+      <IconFile className="h-7 w-7" />
+      <span className="text-sm font-semibold">{t.attachFile}</span>
+    </button>
+
+    <button
+      type="button"
+      disabled={imageUploading}
+      onClick={() => videoRef.current?.click()}
+      className="pc-press flex flex-col items-center gap-2 rounded-2xl bg-turquoise/10 py-6 text-turquoise disabled:opacity-50"
+    >
+      <IconVideo className="h-7 w-7" />
+      <span className="text-sm font-semibold">Video</span>
+    </button>
+  </div>
+</Sheet>
 
       {/* in-chat pay */}
 
@@ -419,12 +495,15 @@ function ChatImage({
   fileName?: string;
 }) {
   const { sessionToken } = usePiAuth();
+  const { pushToast } = useConnect();
+  const [imageBlob, setImageBlob] = useState<Blob | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     setImageUrl(null);
+    setImageBlob(null);
     setError(false);
     if (!sessionToken) return;
 
@@ -435,6 +514,7 @@ function ChatImage({
     void fetchChatImage(imageId, sessionToken, controller.signal)
       .then((blob) => {
         if (!active) return;
+        setImageBlob(blob);
 
         objectUrl = URL.createObjectURL(blob);
         setImageUrl(objectUrl);
@@ -496,8 +576,166 @@ function ChatImage({
           alt={fileName || "Chat image"}
           className="mx-auto max-h-[70vh] max-w-full object-contain"
         />
+        <button
+  type="button"
+  disabled={!imageBlob}
+  onClick={() => {
+    if (!imageBlob) return;
+
+    const extension =
+      imageBlob.type === "image/jpeg"
+        ? "jpg"
+        : imageBlob.type === "image/gif"
+          ? "gif"
+          : imageBlob.type === "image/webp"
+            ? "webp"
+            : "png";
+
+    void saveChatBlob(
+      imageBlob,
+      fileName || `image.${extension}`,
+    ).catch(() => {
+      pushToast("Could not open the save options. Please try again.");
+    });
+  }}
+  className="pc-press mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-turquoise/15 px-3 py-3 text-sm font-semibold text-turquoise disabled:opacity-50"
+>
+  <IconDownload className="h-5 w-5" />
+  Save / Share
+</button>
       </Sheet>
     </>
+  );
+}
+
+function ChatAttachment({
+  attachmentId,
+  kind,
+  fileName,
+}: {
+  attachmentId: string;
+  kind: "file" | "video";
+  fileName?: string;
+}) {
+  const { sessionToken } = usePiAuth();
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const controllerRef = useRef<AbortController | null>(null);
+  const urlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setBlob(null);
+    setVideoUrl(null);
+    setLoading(false);
+    setError("");
+
+    return () => {
+      controller.abort();
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current);
+        urlRef.current = null;
+      }
+    };
+  }, [attachmentId, kind, sessionToken]);
+
+  const loadAttachment = async () => {
+    const controller = controllerRef.current;
+    if (!sessionToken || loading || !controller) return;
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const content = await fetchChatAttachment(
+        attachmentId,
+        kind,
+        sessionToken,
+        controller.signal,
+      );
+
+      if (controller.signal.aborted) return;
+
+      setBlob(content);
+
+      if (kind === "video") {
+        const url = URL.createObjectURL(content);
+        urlRef.current = url;
+        setVideoUrl(url);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setError(
+          error instanceof Error ? error.message : "Attachment load failed.",
+        );
+      }
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  };
+
+  const saveAttachment = async () => {
+    if (!blob) return;
+
+    try {
+      await saveChatBlob(
+        blob,
+        fileName || (kind === "video" ? "video.mp4" : "attachment"),
+      );
+    } catch {
+      setError("Could not open the save options. Please try again.");
+    }
+  };
+
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      {kind === "video" && videoUrl && (
+        <video
+          src={videoUrl}
+          controls
+          playsInline
+          preload="metadata"
+          className="max-h-72 w-64 max-w-full rounded-xl bg-black"
+          onError={() =>
+            setError("This video cannot play on this device. You can save it.")
+          }
+        />
+      )}
+
+      <button
+        type="button"
+        disabled={loading || !sessionToken}
+        onClick={() => {
+          if (blob) void saveAttachment();
+          else void loadAttachment();
+        }}
+        className="pc-press flex items-center justify-center gap-2 rounded-xl bg-turquoise/15 px-3 py-2 text-xs font-semibold text-turquoise disabled:opacity-50"
+      >
+        <IconDownload className="h-4 w-4 shrink-0" />
+        {loading
+          ? "Loading…"
+          : blob
+            ? "Save / Share"
+            : kind === "video"
+              ? "Load video"
+              : "Download file"}
+      </button>
+
+      {!sessionToken && (
+        <p className="text-xs text-muted-foreground">
+          Sign in to load this attachment.
+        </p>
+      )}
+
+      {error && (
+        <p role="alert" className="max-w-64 text-xs text-red-400">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -532,25 +770,52 @@ function Bubble({
     );
   }
 
-  if (m.kind === "file") {
-    return (
-      <div className={cx("flex pc-fade-up", mine ? "justify-end" : "justify-start")}>
-        <div className={cx("flex max-w-[78%] items-center gap-3 rounded-2xl p-3", mine ? "bg-primary/20" : "bg-card")}>
+  if (m.kind === "file" || m.kind === "video") {
+  return (
+    <div
+      className={cx(
+        "flex pc-fade-up",
+        mine ? "justify-end" : "justify-start",
+      )}
+    >
+      <div
+        className={cx(
+          "flex max-w-[78%] flex-col gap-3 rounded-2xl p-3",
+          mine ? "bg-primary/20" : "bg-card",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-3">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-turquoise/20 text-turquoise">
-            <IconFile className="h-5 w-5" />
+            {m.kind === "video" ? (
+              <IconVideo className="h-5 w-5" />
+            ) : (
+              <IconFile className="h-5 w-5" />
+            )}
           </span>
+
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-foreground">{m.fileName || t.file}</p>
+            <p className="break-all text-sm font-medium text-foreground">
+              {m.fileName || (m.kind === "video" ? "Video" : t.file)}
+            </p>
             <TimeInline m={m} locale={locale} mine={mine} />
           </div>
-          <button className="pc-press text-muted-foreground" aria-label="Download">
-            <IconDownload className="h-5 w-5" />
-          </button>
         </div>
-      </div>
-    );
-  }
 
+        {m.attachmentId ? (
+          <ChatAttachment
+            attachmentId={m.attachmentId}
+            kind={m.kind}
+            fileName={m.fileName}
+          />
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Attachment content was not uploaded.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
   return (
     <div className={cx("flex pc-fade-up", mine ? "justify-end" : "justify-start")}>
       <div

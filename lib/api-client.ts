@@ -304,6 +304,7 @@ export function emitMessage(
   fileName?: string,
   messageId?: string,
  imageId?: string,
+ attachmentId?: string,
 ): boolean {
   if (!socket?.connected) {
     console.error("WebSocket not connected");
@@ -317,6 +318,7 @@ export function emitMessage(
     fileName,
     messageId,
     imageId,
+    attachmentId,
   });
 
   return true;
@@ -517,6 +519,152 @@ export async function fetchChatImage(
   }
 
   return blob;
+}
+
+export async function saveChatBlob(
+  blob: Blob,
+  fileName: string,
+): Promise<void> {
+  const safeName = fileName
+    .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
+    .slice(0, 120) || "attachment";
+
+  const file = new File([blob], safeName, {
+    type: blob.type || "application/octet-stream",
+  });
+
+  if (
+    typeof navigator.canShare === "function" &&
+    typeof navigator.share === "function" &&
+    navigator.canShare({ files: [file] })
+  ) {
+    try {
+      await navigator.share({ files: [file] });
+      return;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = safeName;
+  link.target = "_blank";
+  link.rel = "noopener";
+  document.body.appendChild(link);
+
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
+export async function fetchChatAttachment(
+  attachmentId: string,
+  kind: "file" | "video",
+  sessionToken: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (!/^[a-fA-F0-9]{24}$/.test(attachmentId)) {
+    throw new Error("Invalid attachment ID");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/chat/attachments/${encodeURIComponent(attachmentId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Attachment load failed (${response.status})`);
+  }
+
+  const blob = await response.blob();
+  const allowedTypes = kind === "video"
+    ? ["video/mp4", "video/webm"]
+    : ["application/octet-stream"];
+
+  if (
+    !blob.size ||
+    blob.size > 25 * 1024 * 1024 ||
+    !allowedTypes.includes(blob.type)
+  ) {
+    throw new Error("Invalid attachment response");
+  }
+
+  return blob;
+}
+
+export async function uploadChatAttachment(
+  recipient: string,
+  kind: "file" | "video",
+  file: File,
+  sessionToken: string,
+): Promise<{
+  attachmentId: string;
+  kind: "file" | "video";
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+}> {
+  if (!file.size || file.size > 25 * 1024 * 1024) {
+    throw new Error("Attachment must be between 1 byte and 25 MB");
+  }
+
+  const formData = new FormData();
+  formData.append("recipient", recipient);
+  formData.append("kind", kind);
+  formData.append("file", file);
+
+  const response = await fetch(`${API_URL}/api/chat/attachments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const details = await response.json().catch(() => null);
+    throw new Error(
+      typeof details?.error === "string"
+        ? details.error
+        : `Attachment upload failed (${response.status})`,
+    );
+  }
+
+  const result = await response.json();
+
+  if (
+    !result ||
+    typeof result !== "object" ||
+    typeof result.attachmentId !== "string" ||
+    !/^[a-fA-F0-9]{24}$/.test(result.attachmentId) ||
+    result.kind !== kind ||
+    typeof result.fileName !== "string" ||
+    typeof result.mimeType !== "string" ||
+    !Number.isFinite(result.fileSize) ||
+    result.fileSize <= 0 ||
+    result.fileSize > 25 * 1024 * 1024
+  ) {
+    throw new Error("Invalid attachment upload response");
+  }
+
+  return {
+    attachmentId: result.attachmentId,
+    kind,
+    fileName: result.fileName,
+    mimeType: result.mimeType,
+    fileSize: result.fileSize,
+  };
 }
 
 export async function uploadChatImage(
