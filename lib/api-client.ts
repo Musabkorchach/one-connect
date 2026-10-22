@@ -9,6 +9,68 @@ const WS_URL =
   "https://one-connect.onrender.com";
 
 let socket: ReturnType<typeof io> | null = null;
+export interface CallEventMap {
+  "call:incoming": {
+    callId: string;
+    from: string;
+    kind: "voice" | "video";
+  };
+  "call:initiated": { callId: string };
+  "call:accepted": { callId: string };
+  "call:offer": {
+    callId: string;
+    offer: RTCSessionDescriptionInit;
+  };
+  "call:answered": {
+    callId: string;
+    answer: RTCSessionDescriptionInit;
+  };
+  "call:ice-candidate": {
+    callId: string;
+    candidate: RTCIceCandidateInit;
+  };
+  "call:connected": { callId: string };
+  "call:ended": { callId: string; reason: string };
+  "call:error": { callId?: string; reason: string };
+  disconnect: string;
+}
+
+const callListeners = new Map<
+  keyof CallEventMap,
+  Set<(data: unknown) => void>
+>();
+
+export function onCallEvent<K extends keyof CallEventMap>(
+  event: K,
+  callback: (data: CallEventMap[K]) => void,
+): () => void {
+  const listener = (data: unknown) => {
+    callback(data as CallEventMap[K]);
+  };
+
+    const listeners =
+    callListeners.get(event) ?? new Set<(data: unknown) => void>();
+
+  callListeners.set(event, listeners);
+
+  listeners.add(listener);
+  const attachedSocket = socket;
+  const socketEvent = String(event);
+  attachedSocket?.on(socketEvent, listener);
+
+  return () => {
+    listeners.delete(listener);
+    attachedSocket?.off(socketEvent, listener);
+
+    if (socket !== attachedSocket) {
+    socket?.off(socketEvent, listener);
+    }
+
+    if (listeners.size === 0 && callListeners.get(event) === listeners) {
+      callListeners.delete(event);
+    }
+  };
+}
 const messageListeners = {
   newMessage: new Set<(message: Record<string, unknown>) => void>(),
   saved: new Set<(data: { id: string; status: "sent" }) => void>(),
@@ -98,6 +160,14 @@ if (socket) disconnectSocket();
   reconnectionDelayMax: 5000,
   reconnectionAttempts: 5,
 });
+
+  for (const [event, listeners] of callListeners) {
+    const socketEvent = String(event);
+
+    for (const listener of listeners) {
+      socket.on(socketEvent, listener);
+    }
+  }
 
   for (const callback of messageListeners.newMessage) {
     socket.on("message:new", callback);
@@ -197,10 +267,17 @@ export function acknowledgeMessages(
  * Disconnect socket
  */
 export function disconnectSocket() {
-  if (socket) {
-    socket.removeAllListeners();
-    socket.disconnect();
-    socket = null;
+  const closingSocket = socket;
+  if (!closingSocket) return;
+
+  socket = null;
+  closingSocket.removeAllListeners();
+  closingSocket.disconnect();
+
+  const listeners = callListeners.get("disconnect");
+
+  for (const listener of [...(listeners ?? [])]) {
+    listener("client-disconnect");
   }
 }
 
@@ -432,52 +509,135 @@ export function onUserStatus(callback: (data: Record<string, unknown>) => void) 
   socket.on("user:status", callback);
 }
 
-/**
- * Initiate WebRTC call
- */
-export function initiateCall(from: string, to: string, offer: Record<string, unknown>) {
-  if (!socket?.connected) return;
-  socket.emit("call:initiate", { from, to, offer });
+export async function getCallConfiguration(): Promise<RTCConfiguration> {
+  const activeSocket = socket;
+  const auth = activeSocket?.auth;
+
+  if (
+    !activeSocket?.connected ||
+    !auth ||
+    typeof auth !== "object" ||
+    typeof auth.sessionToken !== "string"
+  ) {
+    throw new Error("An active session is required for calls.");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(`${API_URL}/api/calls/ice-servers`, {
+      headers: {
+        Authorization: `Bearer ${auth.sessionToken}`,
+      },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error("Unable to load call configuration.");
+    }
+
+    const data: unknown = await response.json();
+
+    if (
+      !data ||
+      typeof data !== "object" ||
+      !("iceServers" in data) ||
+      !Array.isArray(data.iceServers) ||
+      data.iceServers.length === 0 ||
+      data.iceServers.length > 10
+    ) {
+      throw new Error("Invalid call configuration.");
+    }
+
+    const iceServers: RTCIceServer[] = [];
+
+    for (const item of data.iceServers) {
+      if (!item || typeof item !== "object") {
+        throw new Error("Invalid ICE server.");
+      }
+
+      const urls = typeof item.urls === "string" ? [item.urls] : item.urls;
+
+      if (
+        !Array.isArray(urls) ||
+        urls.length === 0 ||
+        urls.length > 8 ||
+        !urls.every(
+          (url: unknown) =>
+            typeof url === "string" && /^(stun|stuns|turn|turns):[^\s]+$/i.test(url),
+        )
+      ) {
+        throw new Error("Invalid ICE server URLs.");
+      }
+
+      const server: RTCIceServer = { urls };
+
+      if (urls.some((url: string) => /^turns?:/i.test(url))) {
+        if (
+          typeof item.username !== "string" ||
+          !item.username ||
+          typeof item.credential !== "string" ||
+          !item.credential
+        ) {
+          throw new Error("Missing TURN credentials.");
+        }
+
+        server.username = item.username;
+        server.credential = item.credential;
+      }
+
+      iceServers.push(server);
+    }
+
+    if (socket !== activeSocket || !activeSocket.connected) {
+      throw new Error("The call session changed.");
+    }
+
+    return { iceServers };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-/**
- * Listen for incoming calls
- */
-export function onIncomingCall(callback: (data: Record<string, unknown>) => void) {
-  if (!socket) return;
-  socket.on("call:incoming", callback);
+export interface CallCommandMap {
+  "call:initiate": {
+    callId: string;
+    to: string;
+    kind: "voice" | "video";
+  };
+  "call:accept": {
+    callId: string;
+  };
+  "call:offer": {
+    callId: string;
+    offer: RTCSessionDescriptionInit;
+  };
+  "call:answer": {
+    callId: string;
+    answer: RTCSessionDescriptionInit;
+  };
+  "call:ice-candidate": {
+    callId: string;
+    candidate: RTCIceCandidateInit;
+  };
+  "call:connected": {
+    callId: string;
+  };
+  "call:end": {
+    callId: string;
+  };
 }
 
-/**
- * Answer call
- */
-export function answerCall(from: string, to: string, answer: Record<string, unknown>) {
-  if (!socket?.connected) return;
-  socket.emit("call:answer", { from, to, answer });
-}
+export function sendCallEvent<K extends keyof CallCommandMap>(
+  event: K,
+  data: CallCommandMap[K],
+): boolean {
+  if (!socket?.connected) return false;
 
-/**
- * Listen for call answers
- */
-export function onCallAnswered(callback: (data: Record<string, unknown>) => void) {
-  if (!socket) return;
-  socket.on("call:answered", callback);
-}
-
-/**
- * Send ICE candidate
- */
-export function sendIceCandidate(from: string, to: string, candidate: Record<string, unknown>) {
-  if (!socket?.connected) return;
-  socket.emit("call:ice-candidate", { from, to, candidate });
-}
-
-/**
- * Listen for ICE candidates
- */
-export function onIceCandidate(callback: (data: Record<string, unknown>) => void) {
-  if (!socket) return;
-  socket.on("call:ice-candidate", callback);
+  socket.emit(String(event), data);
+  return true;
 }
 
 /**

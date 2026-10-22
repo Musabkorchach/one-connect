@@ -784,7 +784,86 @@ app.post("/api/messages/:userId", requireSession, express.json(), (req, res) => 
   res.json(message);
 });
 
+app.get("/api/calls/ice-servers", requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+  ];
+
+  const urls = (process.env.TURN_URLS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const sharedSecret = process.env.TURN_SHARED_SECRET;
+  let username = process.env.TURN_USERNAME;
+  let credential = process.env.TURN_CREDENTIAL;
+
+  const hasTurnSettings =
+    urls.length > 0 || sharedSecret || username || credential;
+
+  if (hasTurnSettings) {
+    if (
+      urls.length === 0 ||
+      urls.length > 8 ||
+      urls.some((url) => !/^turns?:[^\s]+$/i.test(url))
+    ) {
+      return res.status(503).json({
+        error: "Invalid TURN server configuration",
+      });
+    }
+
+    if (sharedSecret) {
+      const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+      username = `${expiresAt}:${crypto.randomBytes(12).toString("hex")}`;
+      credential = crypto
+        .createHmac("sha1", sharedSecret)
+        .update(username)
+        .digest("base64");
+    }
+
+    if (!username || !credential) {
+      return res.status(503).json({
+        error: "Missing TURN credentials",
+      });
+    }
+
+    iceServers.push({ urls, username, credential });
+  }
+
+  return res.json({
+    iceServers,
+    relayConfigured: urls.length > 0,
+  });
+});
+
 // WebSocket handlers
+const liveCallsById = new Map();
+const liveCallIdByUsername = new Map();
+function finishLiveCall(callId, reason = "ended") {
+  const call = liveCallsById.get(callId);
+  if (!call) return;
+
+  clearTimeout(call.ringTimer);
+  liveCallsById.delete(callId);
+
+  for (const username of [call.callerUsername, call.recipientUsername]) {
+    if (liveCallIdByUsername.get(username) === callId) {
+      liveCallIdByUsername.delete(username);
+    }
+  }
+
+  const event = { callId, reason };
+
+  io.to(call.callerSocketId).emit("call:ended", event);
+
+  if (call.recipientSocketId) {
+    io.to(call.recipientSocketId).emit("call:ended", event);
+  } else {
+    io.to(`peer:${call.recipientUsername}`).emit("call:ended", event);
+  }
+}
 io.use((socket, next) => {
   const sessionToken = socket.handshake.auth?.sessionToken;
 
@@ -1120,22 +1199,299 @@ if (kind === "file" || kind === "video" || kind === "voice") {
     }
   });
 
-  socket.on("call:initiate", (data) => {
-    const { from, to, offer } = data;
-    io.to(`user:${to}`).emit("call:incoming", { from, offer });
+    socket.on("call:initiate", (data = {}) => {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return;
+    }
+
+    const { callId, kind } = data;
+    const to = normalizeMessagingUsername(
+      typeof data.to === "string" ? data.to : ""
+    );
+    const session = userSessions.get(socket.sessionToken);
+
+    const reject = (reason) => {
+      socket.emit("call:error", { callId, reason });
+    };
+
+    if (!session || session.expiresAt <= Date.now()) {
+      reject("unauthorized");
+      return;
+    }
+
+    if (
+      typeof callId !== "string" ||
+      !/^[a-zA-Z0-9_-]{16,80}$/.test(callId) ||
+      !to ||
+      to === messagingUsername ||
+      (kind !== "voice" && kind !== "video")
+    ) {
+      reject("invalid");
+      return;
+    }
+
+    if (
+      liveCallsById.has(callId) ||
+      liveCallIdByUsername.has(messagingUsername) ||
+      liveCallIdByUsername.has(to)
+    ) {
+      reject("busy");
+      return;
+    }
+
+    if (!io.sockets.adapter.rooms.get(`peer:${to}`)?.size) {
+      reject("offline");
+      return;
+    }
+
+    const call = {
+      callerUsername: messagingUsername,
+      recipientUsername: to,
+      callerSocketId: socket.id,
+      recipientSocketId: null,
+      kind,
+      phase: "ringing",
+      ringTimer: null,
+    };
+
+    liveCallsById.set(callId, call);
+    liveCallIdByUsername.set(messagingUsername, callId);
+    liveCallIdByUsername.set(to, callId);
+
+    call.ringTimer = setTimeout(() => {
+      finishLiveCall(callId, "no-answer");
+    }, 45000);
+
+    socket.emit("call:initiated", { callId });
+
+    io.to(`peer:${to}`).emit("call:incoming", {
+      callId,
+      from: messagingUsername,
+      kind,
+    });
   });
 
-  socket.on("call:answer", (data) => {
-    const { from, to, answer } = data;
-    io.to(`user:${from}`).emit("call:answered", { to, answer });
+    socket.on("call:accept", (data = {}) => {
+    const callId = data?.callId;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+
+    if (
+      !call ||
+      call.recipientUsername !== messagingUsername ||
+      call.phase !== "ringing" ||
+      call.recipientSocketId
+    ) {
+      return;
+    }
+
+    call.recipientSocketId = socket.id;
+    call.phase = "connecting";
+
+    clearTimeout(call.ringTimer);
+    call.ringTimer = setTimeout(() => {
+      finishLiveCall(callId, "connection-timeout");
+    }, 30000);
+
+    socket.to(`peer:${messagingUsername}`).emit("call:ended", {
+      callId,
+      reason: "answered-elsewhere",
+    });
+
+    socket.emit("call:accepted", { callId });
+    io.to(call.callerSocketId).emit("call:accepted", { callId });
   });
 
-  socket.on("call:ice-candidate", (data) => {
-    const { from, to, candidate } = data;
-    io.to(`user:${to}`).emit("call:ice-candidate", { from, candidate });
+    socket.on("call:offer", (data = {}) => {
+    const callId = data?.callId;
+    const offer = data?.offer;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+
+    if (
+      !call ||
+      call.callerSocketId !== socket.id ||
+      call.phase !== "connecting" ||
+      !call.recipientSocketId ||
+      call.offerSent ||
+      offer?.type !== "offer" ||
+      typeof offer.sdp !== "string" ||
+      !offer.sdp.length ||
+      offer.sdp.length > 100000
+    ) {
+      return;
+    }
+
+    call.offerSent = true;
+
+    io.to(call.recipientSocketId).emit("call:offer", {
+      callId,
+      offer: {
+        type: "offer",
+        sdp: offer.sdp,
+      },
+    });
   });
 
+    socket.on("call:answer", (data = {}) => {
+    const callId = data?.callId;
+    const answer = data?.answer;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+
+    if (
+      !call ||
+      call.recipientSocketId !== socket.id ||
+      call.phase !== "connecting" ||
+      !call.offerSent ||
+      call.answerSent ||
+      answer?.type !== "answer" ||
+      typeof answer.sdp !== "string" ||
+      !answer.sdp.length ||
+      answer.sdp.length > 100000
+    ) {
+      return;
+    }
+
+    call.answerSent = true;
+
+    io.to(call.callerSocketId).emit("call:answered", {
+      callId,
+      answer: {
+        type: "answer",
+        sdp: answer.sdp,
+      },
+    });
+  });
+
+    socket.on("call:ice-candidate", (data = {}) => {
+    const callId = data?.callId;
+    const candidate = data?.candidate;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+    if (!call || !call.recipientSocketId) return;
+
+    const isCaller = call.callerSocketId === socket.id;
+    const isRecipient = call.recipientSocketId === socket.id;
+
+    if (!isCaller && !isRecipient) return;
+
+    if (
+      !candidate ||
+      typeof candidate.candidate !== "string" ||
+      candidate.candidate.length > 8192 ||
+      (candidate.sdpMid != null &&
+        (typeof candidate.sdpMid !== "string" ||
+          candidate.sdpMid.length > 256)) ||
+      (candidate.sdpMLineIndex != null &&
+        (!Number.isInteger(candidate.sdpMLineIndex) ||
+          candidate.sdpMLineIndex < 0 ||
+          candidate.sdpMLineIndex > 65535)) ||
+      (candidate.usernameFragment != null &&
+        (typeof candidate.usernameFragment !== "string" ||
+          candidate.usernameFragment.length > 256))
+    ) {
+      return;
+    }
+
+    const targetSocketId = isCaller
+      ? call.recipientSocketId
+      : call.callerSocketId;
+
+    io.to(targetSocketId).emit("call:ice-candidate", {
+      callId,
+      candidate: {
+        candidate: candidate.candidate,
+        sdpMid: candidate.sdpMid ?? null,
+        sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+        ...(candidate.usernameFragment != null
+          ? { usernameFragment: candidate.usernameFragment }
+          : {}),
+      },
+    });
+  });
+
+      socket.on("call:connected", (data = {}) => {
+    const callId = data?.callId;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+
+    if (
+      !call ||
+      call.phase !== "connecting" ||
+      !call.answerSent ||
+      (socket.id !== call.callerSocketId &&
+        socket.id !== call.recipientSocketId)
+    ) {
+      return;
+    }
+
+    if (!call.connectedSockets) {
+      call.connectedSockets = new Set();
+    }
+
+    call.connectedSockets.add(socket.id);
+
+    if (call.connectedSockets.size !== 2) return;
+
+    clearTimeout(call.ringTimer);
+    call.phase = "active";
+
+    io.to(call.callerSocketId).emit("call:connected", { callId });
+    io.to(call.recipientSocketId).emit("call:connected", { callId });
+  });
+    socket.on("call:end", (data = {}) => {
+    const callId = data?.callId;
+    const call = liveCallsById.get(callId);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (!session || session.expiresAt <= Date.now()) return;
+    if (!call) return;
+
+    const isCaller = call.callerSocketId === socket.id;
+    const isRecipient =
+      call.recipientSocketId === socket.id ||
+      (call.phase === "ringing" &&
+        call.recipientUsername === messagingUsername);
+
+    if (!isCaller && !isRecipient) return;
+
+    const reason =
+      call.phase === "ringing"
+        ? isCaller
+          ? "cancelled"
+          : "declined"
+        : "ended";
+
+    finishLiveCall(callId, reason);
+  });
   socket.on("disconnect", () => {
+    const callId = liveCallIdByUsername.get(messagingUsername);
+    const call = callId ? liveCallsById.get(callId) : null;
+
+    if (call) {
+      const isCaller = call.callerSocketId === socket.id;
+      const isRecipient = call.recipientSocketId === socket.id;
+
+      const recipientUnavailable =
+        call.phase === "ringing" &&
+        call.recipientUsername === messagingUsername &&
+        !io.sockets.adapter.rooms.get(`peer:${messagingUsername}`)?.size;
+
+      if (isCaller || isRecipient || recipientUnavailable) {
+        finishLiveCall(callId, "disconnected");
+      }
+    }
     if (socket.userId) {
       io.emit("user:offline", { userId: socket.userId, piUsername: socket.piUsername });
     }
