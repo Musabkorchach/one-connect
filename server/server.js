@@ -784,8 +784,101 @@ app.post("/api/messages/:userId", requireSession, express.json(), (req, res) => 
   res.json(message);
 });
 
-app.get("/api/calls/ice-servers", requireSession, (req, res) => {
+app.get("/api/calls/ice-servers", requireSession, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+  const cloudflareId = process.env.CLOUDFLARE_TURN_TOKEN_ID?.trim();
+  const cloudflareToken = process.env.CLOUDFLARE_TURN_API_TOKEN?.trim();
+
+  if (cloudflareId || cloudflareToken) {
+    if (
+      !cloudflareId ||
+      !/^[a-f0-9]{32}$/i.test(cloudflareId) ||
+      !cloudflareToken
+    ) {
+      return res.status(503).json({
+        error: "Incomplete Cloudflare TURN configuration",
+      });
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+
+    try {
+      const response = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${cloudflareId}/credentials/generate-ice-servers`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${cloudflareToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ttl: 86400 }),
+          signal: controller.signal,
+          redirect: "error",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("TURN credential generation failed");
+      }
+
+      const data = await response.json();
+      const servers = data?.iceServers;
+
+      if (
+        !Array.isArray(servers) ||
+        servers.length === 0 ||
+        servers.length > 10 ||
+        !servers.every((server) => {
+          const urls =
+            typeof server?.urls === "string"
+              ? [server.urls]
+              : server?.urls;
+
+          if (
+            !Array.isArray(urls) ||
+            urls.length === 0 ||
+            urls.length > 8 ||
+            !urls.every(
+              (url) =>
+                typeof url === "string" &&
+                /^(stun|stuns|turn|turns):[^\s]+$/i.test(url),
+            )
+          ) {
+            return false;
+          }
+
+          return (
+            !urls.some((url) => /^turns?:/i.test(url)) ||
+            (typeof server.username === "string" &&
+              server.username.length > 0 &&
+              typeof server.credential === "string" &&
+              server.credential.length > 0)
+          );
+        }) ||
+        !servers.some((server) => {
+          const urls = Array.isArray(server.urls)
+            ? server.urls
+            : [server.urls];
+
+          return urls.some((url) => /^turns?:/i.test(url));
+        })
+      ) {
+        throw new Error("Invalid TURN configuration response");
+      }
+
+      return res.json({
+        iceServers: servers,
+        relayConfigured: true,
+      });
+    } catch {
+      return res.status(502).json({
+        error: "Unable to generate TURN credentials",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   const iceServers = [
     { urls: "stun:stun.l.google.com:19302" },
