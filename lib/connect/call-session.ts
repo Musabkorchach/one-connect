@@ -5,6 +5,7 @@ import {
 } from "@/lib/api-client";
 import {
   openCallMedia,
+  openCallCamera,
   stopCallMedia,
   createCallPeer,
   createRemoteSignalQueue,
@@ -26,6 +27,8 @@ export interface CallSessionOptions {
 export class CallSession {
   private ended = false;
   private started = false;
+  private cameraFacingMode: "user" | "environment" = "user";
+  private cameraSwitching = false;
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private negotiated = false;
   private localStream: MediaStream | null = null;
@@ -294,6 +297,91 @@ export class CallSession {
     } catch (error) {
       this.end("media-error");
       throw error;
+    }
+  }
+
+    async switchCamera(): Promise<"user" | "environment"> {
+    const peer = this.peer;
+    const stream = this.localStream;
+    const oldTrack = stream?.getVideoTracks()[0];
+    const sender = peer?.getSenders().find(
+      (item) => item.track?.kind === "video",
+    );
+
+    if (
+      this.ended ||
+      this.options.kind !== "video" ||
+      !peer ||
+      !stream ||
+      !oldTrack ||
+      !sender ||
+      this.cameraSwitching
+    ) {
+      throw new Error("Camera switching is unavailable.");
+    }
+
+    this.cameraSwitching = true;
+
+    const previousMode = this.cameraFacingMode;
+    const nextMode =
+      previousMode === "user" ? "environment" : "user";
+
+    const installCamera = async (
+      mode: "user" | "environment",
+    ): Promise<void> => {
+      const cameraStream = await openCallCamera(mode);
+      let installed = false;
+
+      try {
+        const track = cameraStream.getVideoTracks()[0];
+
+        if (!track || this.ended || this.peer !== peer) {
+          throw new Error("Camera switching was interrupted.");
+        }
+
+        track.enabled = oldTrack.enabled;
+        await sender.replaceTrack(track);
+
+        if (this.ended || this.peer !== peer) {
+          throw new Error("Call has ended.");
+        }
+
+        track.enabled = oldTrack.enabled;
+
+        const updatedStream = new MediaStream([
+          ...stream.getAudioTracks(),
+          track,
+        ]);
+
+        this.localStream = updatedStream;
+        this.cameraFacingMode = mode;
+        installed = true;
+        this.options.onLocalStream(updatedStream);
+      } finally {
+        if (!installed) stopCallMedia(cameraStream);
+      }
+    };
+
+    try {
+      oldTrack.stop();
+
+      try {
+        await installCamera(nextMode);
+      } catch (error) {
+        if (!this.ended && this.peer === peer) {
+          try {
+            await installCamera(previousMode);
+          } catch {
+            // Keep the audio call running if camera recovery fails.
+          }
+        }
+
+        throw error;
+      }
+
+      return this.cameraFacingMode;
+    } finally {
+      this.cameraSwitching = false;
     }
   }
 

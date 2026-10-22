@@ -29,6 +29,19 @@ export async function openCallMedia(
   });
 }
 
+export async function openCallCamera(
+  facingMode: "user" | "environment",
+): Promise<MediaStream> {
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: { exact: facingMode },
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+    },
+  });
+}
+
 export function stopCallMedia(stream: MediaStream | null): void {
   stream?.getTracks().forEach((track) => track.stop());
 }

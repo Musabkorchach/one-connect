@@ -21,6 +21,8 @@ export interface CallViewState extends CallDetails {
   connectedAt: number | null;
   muted: boolean;
   videoEnabled: boolean;
+  cameraFacingMode: "user" | "environment";
+  cameraSwitching: boolean;
 }
 
 export function useCallController(configuration: RTCConfiguration) {
@@ -133,6 +135,8 @@ export function useCallController(configuration: RTCConfiguration) {
       connectedAt: null,
       muted: false,
       videoEnabled: details.kind === "video",
+      cameraFacingMode: "user",
+      cameraSwitching: false,
     });
 
     return session;
@@ -293,7 +297,52 @@ export function useCallController(configuration: RTCConfiguration) {
     );
   };
 
-  const endCall = () => {
+  const switchCamera = async (): Promise<void> => {
+    const current = sessionRef.current;
+
+    if (
+      !current ||
+      current.details.kind !== "video" ||
+      !callState?.localStream ||
+      !callState.videoEnabled ||
+      callState.cameraSwitching
+    ) {
+      return;
+    }
+
+    const callId = current.details.callId;
+
+    setCallState((state) =>
+      state?.callId === callId
+        ? { ...state, cameraSwitching: true }
+        : state,
+    );
+
+    try {
+      const cameraFacingMode = await current.session.switchCamera();
+
+      setCallState((state) =>
+        state?.callId === callId
+          ? { ...state, cameraFacingMode }
+          : state,
+      );
+    } catch {
+      if (sessionRef.current === current) {
+        connectRef.current.pushToast(
+          "Unable to switch cameras. Check camera permissions and availability.",
+          "error",
+        );
+      }
+    } finally {
+      setCallState((state) =>
+        state?.callId === callId
+          ? { ...state, cameraSwitching: false }
+          : state,
+      );
+    }
+  };
+
+    const endCall = () => {
     sessionRef.current?.session.end();
   };
 
@@ -309,6 +358,7 @@ export function useCallController(configuration: RTCConfiguration) {
     acceptCall,
     setMuted,
     setVideoEnabled,
+    switchCamera,
     endCall,
   };
 }

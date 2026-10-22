@@ -11,6 +11,7 @@ import {
   IconMicOff,
   IconVideo,
   IconVideoOff,
+  IconSwitchCam,
   IconHangup,
 } from "@/components/connect/icons";
 
@@ -20,12 +21,14 @@ export function LiveCallScreen({
   onEnd,
   onMutedChange,
   onVideoEnabledChange,
+  onSwitchCamera,
 }: {
   call: CallViewState;
   onAccept: () => void;
   onEnd: () => void;
   onMutedChange: (muted: boolean) => void;
   onVideoEnabledChange: (enabled: boolean) => void;
+    onSwitchCamera: () => Promise<void>;
 }) {
   const { t } = useConnect();
   const [seconds, setSeconds] = useState(0);
@@ -73,6 +76,7 @@ export function LiveCallScreen({
       <CallStream
         stream={call.remoteStream}
         playbackLabel={t.unmute}
+        outputLabel={t.speaker}
         className={
           hasVideo
             ? "absolute inset-0 h-full w-full object-cover"
@@ -88,7 +92,11 @@ export function LiveCallScreen({
             stream={call.localStream}
             muted
             playbackLabel={t.camera}
-            className="h-full w-full -scale-x-100 object-cover"
+                        className={
+              call.cameraFacingMode === "user"
+                ? "h-full w-full -scale-x-100 object-cover"
+                : "h-full w-full object-cover"
+            }
           />
         </div>
       )}
@@ -113,6 +121,22 @@ export function LiveCallScreen({
       <div className="pc-safe-bottom relative z-[5] px-6 pb-8">
         {!incoming && (
           <div className="mb-6 flex justify-center gap-4">
+                        {call.kind === "video" && (
+              <button
+                type="button"
+                disabled={
+                  !controlsReady ||
+                  !call.videoEnabled ||
+                  call.cameraSwitching
+                }
+                onClick={() => void onSwitchCamera()}
+                aria-label={t.switchCamera}
+                aria-busy={call.cameraSwitching}
+                className="flex h-14 w-14 items-center justify-center rounded-full bg-white/20 text-white disabled:opacity-30"
+              >
+                <IconSwitchCam className="h-6 w-6" />
+              </button>
+            )}
             <button
               type="button"
               disabled={!controlsReady}

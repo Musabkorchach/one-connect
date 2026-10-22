@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ConnectProvider, useConnect } from "@/contexts/connect-context";
 import { useCallController } from "@/lib/connect/use-call-controller";
+import { useCallRingtone } from "@/lib/connect/use-call-ringtone";
 import { LiveCallScreen } from "@/lib/connect/live-call-screen";
 import { LoadingScreen, ToastHost, StorageNotice } from "./feedback";
 import { SetupView } from "./setup-view";
@@ -22,7 +23,7 @@ const CALL_CONFIGURATION: RTCConfiguration = {
 };
 
 function AppInner() {
-  const { ready, profile, ensureChat, contacts } = useConnect();
+  const { ready, profile, ensureChat, contacts, t } = useConnect();
   const [tab, setTab] = useState<TabId>("chats");
   const [openChat, setOpenChat] = useState<string | null>(null);
 
@@ -32,8 +33,12 @@ function AppInner() {
     acceptCall,
     setMuted,
     setVideoEnabled,
+    switchCamera,
     endCall,
   } = useCallController(CALL_CONFIGURATION);
+  const { ringtoneBlocked, enableRingtone } = useCallRingtone(
+    callState?.phase === "incoming",
+  );
 
   if (!ready) return <LoadingScreen />;
 
@@ -82,7 +87,18 @@ function AppInner() {
           onEnd={endCall}
           onMutedChange={setMuted}
           onVideoEnabledChange={setVideoEnabled}
+          onSwitchCamera={switchCamera}
         />
+      )}
+
+      {ringtoneBlocked && (
+        <button
+          type="button"
+          onClick={() => void enableRingtone()}
+          className="fixed left-1/2 top-6 z-[100] -translate-x-1/2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black shadow-lg"
+        >
+          {t.unmute}
+        </button>
       )}
 
       <StorageNotice />
