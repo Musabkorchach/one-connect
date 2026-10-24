@@ -20,6 +20,30 @@ await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
 const db = mongoClient.db("oneconnect");
+const emailsCollection = db.collection("emails");
+const emailUsersCollection = db.collection("email_users");
+
+await emailsCollection.createIndex(
+  { senderUsername: 1, id: 1 },
+  {
+    unique: true,
+    name: "unique_sender_email",
+    partialFilterExpression: {
+      senderUsername: { $type: "string" },
+      id: { $type: "string" },
+    },
+  },
+);
+
+await emailsCollection.createIndex(
+  { recipientUsername: 1, at: -1 },
+  { name: "email_recipient_date" },
+);
+
+await emailsCollection.createIndex(
+  { senderUsername: 1, at: -1 },
+  { name: "email_sender_date" },
+);
 const chatImagesBucket = new GridFSBucket(db, {
   bucketName: "chat_images",
 });
@@ -250,6 +274,292 @@ function requireSession(req, res, next) {
 
   next();
 }
+
+function emailForUser(record, username) {
+  const fromMe = record.senderUsername === username;
+
+  return {
+    id: record._id.toString(),
+    threadId: record.threadId,
+    type: "internal",
+    folder: fromMe ? "sent" : "inbox",
+    fromMe,
+    senderUsername: record.senderUsername,
+    recipientUsername: record.recipientUsername,
+    recipient: `@${record.recipientUsername}`,
+    senderName: fromMe
+      ? `@${record.recipientUsername}`
+      : `@${record.senderUsername}`,
+    color: 200,
+    subject: record.subject,
+    body: record.body,
+    read: fromMe || record.recipientRead === true,
+    at: record.at,
+  };
+}
+
+app.post("/api/emails/internal", requireSession, async (req, res) => {
+  const data = req.body;
+  const senderUsername = normalizeMessagingUsername(req.user.piUsername);
+
+  if (!senderUsername) {
+    return res.status(401).json({ error: "Invalid user identity" });
+  }
+
+  if (
+    !data ||
+    typeof data !== "object" ||
+    Array.isArray(data) ||
+    typeof data.id !== "string" ||
+    !/^[a-zA-Z0-9_-]{16,80}$/.test(data.id) ||
+    typeof data.recipient !== "string" ||
+    !/^@[a-z0-9._-]{1,32}$/i.test(data.recipient) ||
+    typeof data.subject !== "string" ||
+    data.subject.length > 120 ||
+    typeof data.body !== "string" ||
+    data.body.length > 4000 ||
+    !data.body.trim()
+  ) {
+    return res.status(400).json({ error: "Invalid email data" });
+  }
+
+  if (data.attachmentName || data.attachmentSize) {
+    return res.status(400).json({
+      error: "Email attachments are not connected yet",
+    });
+  }
+
+  const recipientUsername = normalizeMessagingUsername(data.recipient);
+
+  if (!recipientUsername || recipientUsername === senderUsername) {
+    return res.status(400).json({ error: "Invalid email recipient" });
+  }
+
+  const subject = data.subject.trim() || "(no subject)";
+  const matchesRequest = (record) =>
+    record.recipientUsername === recipientUsername &&
+    record.subject === subject &&
+    record.body === data.body;
+
+  try {
+    const existing = await emailsCollection.findOne({
+      senderUsername,
+      id: data.id,
+    });
+
+    if (existing) {
+      if (!matchesRequest(existing)) {
+        return res.status(409).json({
+          error: "Email ID is already used for another message",
+        });
+      }
+
+      return res.json({
+        email: emailForUser(existing, senderUsername),
+      });
+    }
+
+    const recipient = await emailUsersCollection.findOne({
+      _id: recipientUsername,
+    });
+
+    if (!recipient) {
+      return res.status(404).json({
+        error: "Recipient has not registered for One Connect email",
+      });
+    }
+
+    const record = {
+      id: data.id,
+      threadId: crypto.randomUUID(),
+      type: "internal",
+      senderUsername,
+      recipientUsername,
+      subject,
+      body: data.body,
+      recipientRead: false,
+      senderDeleted: false,
+      recipientDeleted: false,
+      at: Date.now(),
+    };
+
+    let result;
+
+    try {
+      result = await emailsCollection.insertOne(record);
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+
+      const saved = await emailsCollection.findOne({
+        senderUsername,
+        id: data.id,
+      });
+
+      if (!saved || !matchesRequest(saved)) {
+        return res.status(409).json({
+          error: "Email ID is already used for another message",
+        });
+      }
+
+      return res.json({
+        email: emailForUser(saved, senderUsername),
+      });
+    }
+
+    const saved = { ...record, _id: result.insertedId };
+
+    io.to(`peer:${recipientUsername}`).emit(
+      "email:new",
+      emailForUser(saved, recipientUsername),
+    );
+
+    io.to(`peer:${senderUsername}`).emit(
+      "email:new",
+      emailForUser(saved, senderUsername),
+    );
+
+    return res.status(201).json({
+      email: emailForUser(saved, senderUsername),
+    });
+  } catch (error) {
+    console.error("[EMAIL SEND ERROR]", error);
+    return res.status(500).json({
+      error: "Email could not be sent",
+    });
+  }
+});
+
+app.get("/api/emails", requireSession, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  const username = normalizeMessagingUsername(req.user.piUsername);
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid user identity" });
+  }
+
+  try {
+    const records = await emailsCollection
+      .find({
+        type: "internal",
+        $or: [
+          {
+            senderUsername: username,
+            senderDeleted: { $ne: true },
+          },
+          {
+            recipientUsername: username,
+            recipientDeleted: { $ne: true },
+          },
+        ],
+      })
+      .sort({ at: -1, _id: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.json({
+      emails: records.map((record) => emailForUser(record, username)),
+    });
+  } catch (error) {
+    console.error("[EMAIL LOAD ERROR]", error);
+    return res.status(500).json({
+      error: "Emails could not be loaded",
+    });
+  }
+});
+
+app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const { id } = req.params;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid user identity" });
+  }
+
+  if (!/^[a-f0-9]{24}$/i.test(id)) {
+    return res.status(400).json({ error: "Invalid email ID" });
+  }
+
+  try {
+    const result = await emailsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        type: "internal",
+        recipientUsername: username,
+        recipientDeleted: { $ne: true },
+      },
+      {
+        $set: { recipientRead: true },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "Email not found" });
+    }
+
+    io.to(`peer:${username}`).emit("email:read", { id });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[EMAIL READ ERROR]", error);
+    return res.status(500).json({
+      error: "Email could not be marked as read",
+    });
+  }
+});
+
+app.delete("/api/emails/:id", requireSession, async (req, res) => {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const { id } = req.params;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid user identity" });
+  }
+
+  if (!/^[a-f0-9]{24}$/i.test(id)) {
+    return res.status(400).json({ error: "Invalid email ID" });
+  }
+
+  try {
+    const record = await emailsCollection.findOne({
+      _id: new ObjectId(id),
+      type: "internal",
+      $or: [
+        { senderUsername: username },
+        { recipientUsername: username },
+      ],
+    });
+
+    if (!record) {
+      return res.status(404).json({ error: "Email not found" });
+    }
+
+    const fromMe = record.senderUsername === username;
+
+    await emailsCollection.updateOne(
+      {
+        _id: record._id,
+        ...(fromMe
+          ? { senderUsername: username }
+          : { recipientUsername: username }),
+      },
+      {
+        $set: fromMe
+          ? { senderDeleted: true }
+          : { recipientDeleted: true },
+      },
+    );
+
+    io.to(`peer:${username}`).emit("email:deleted", { id });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[EMAIL DELETE ERROR]", error);
+    return res.status(500).json({
+      error: "Email could not be deleted",
+    });
+  }
+});
 
 app.get("/api/state/:key", requireSession, async (req, res) => {
   const { key } = req.params;
@@ -649,6 +959,28 @@ if (!piUsername) {
 }
     const userId = `pi_${piUsername}`;
     const sessionToken = crypto.randomBytes(32).toString("hex");
+
+        const messagingUsername = normalizeMessagingUsername(piUsername);
+
+    if (!messagingUsername) {
+      return res.status(401).json({
+        error: "Invalid Pi username",
+      });
+    }
+
+    await emailUsersCollection.updateOne(
+      { _id: messagingUsername },
+      {
+        $set: {
+          userId,
+          piUsername: messagingUsername,
+        },
+        $setOnInsert: {
+          createdAt: Date.now(),
+        },
+      },
+      { upsert: true },
+    );
 
     users.set(userId, {
       id: userId,

@@ -19,6 +19,8 @@ export interface Email {
   threadId: string;
   type: EmailType;           // internal (@username) or external (user@domain.com)
   fromMe: boolean;
+  senderUsername?: string;
+  recipientUsername?: string;
   recipient: string;         // @username for internal, email@domain.com for external
   senderName: string;        // display name for sender
   color: number;             // hue for avatar (internal only; external uses gray)
@@ -566,6 +568,16 @@ export function sanitizeEmails(blob: unknown): Email[] {
       threadId: typeof e.threadId === "string" ? cleanStr(e.threadId, 40) : uid(),
       type,
       fromMe: e.fromMe === true,
+      senderUsername:
+        typeof e.senderUsername === "string" &&
+        /^[a-z0-9._-]{1,32}$/i.test(e.senderUsername)
+          ? e.senderUsername.toLowerCase()
+          : undefined,
+      recipientUsername:
+        typeof e.recipientUsername === "string" &&
+        /^[a-z0-9._-]{1,32}$/i.test(e.recipientUsername)
+          ? e.recipientUsername.toLowerCase()
+          : undefined,
       recipient,
       senderName: cleanStr(e.senderName, NAME_MAX) || recipient,
       color: type === "internal" ? clampNum(e.color, 0, 360, hueFromString(recipient)) : 0,
@@ -585,4 +597,68 @@ export function sanitizeEmails(blob: unknown): Email[] {
 }
 export function emailsToBlob(items: Email[]): Record<string, unknown> {
   return { items: items.slice(0, CAPS.emails) };
+}
+
+export function parseInternalEmail(
+  value: unknown,
+  ownUsername: string,
+): Email | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const e = value as Record<string, unknown>;
+  const me = ownUsername.trim().replace(/^@/, "").toLowerCase();
+  const usernamePattern = /^[a-z0-9._-]{1,32}$/;
+
+  if (
+    !usernamePattern.test(me) ||
+    e.type !== "internal" ||
+    typeof e.id !== "string" ||
+    !/^[a-f0-9]{24}$/i.test(e.id) ||
+    typeof e.threadId !== "string" ||
+    e.threadId.length === 0 ||
+    e.threadId.length > 80 ||
+    typeof e.senderUsername !== "string" ||
+    !usernamePattern.test(e.senderUsername) ||
+    typeof e.recipientUsername !== "string" ||
+    !usernamePattern.test(e.recipientUsername) ||
+    typeof e.subject !== "string" ||
+    e.subject.length > 120 ||
+    typeof e.body !== "string" ||
+    e.body.length > 4000 ||
+    typeof e.read !== "boolean" ||
+    typeof e.at !== "number" ||
+    !Number.isSafeInteger(e.at) ||
+    e.at <= 0
+  ) {
+    return null;
+  }
+
+  const fromMe = e.senderUsername === me;
+
+  if (!fromMe && e.recipientUsername !== me) {
+    return null;
+  }
+
+  const counterpart = fromMe
+    ? e.recipientUsername
+    : e.senderUsername;
+
+  return {
+    id: e.id,
+    threadId: e.threadId,
+    type: "internal",
+    folder: fromMe ? "sent" : "inbox",
+    fromMe,
+    senderUsername: e.senderUsername,
+    recipientUsername: e.recipientUsername,
+    recipient: `@${e.recipientUsername}`,
+    senderName: `@${counterpart}`,
+    color: hueFromString(counterpart),
+    subject: e.subject,
+    body: e.body,
+    read: fromMe || e.read,
+    at: e.at,
+  };
 }

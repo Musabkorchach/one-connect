@@ -25,6 +25,11 @@ import {
   getAppState,
   saveAppState,
   disconnectSocket,
+  getInternalEmails,
+  onEmailEvent,
+  sendInternalEmail,
+  markInternalEmailRead,
+  deleteInternalEmail,
 } from "@/lib/api-client";
 import {
   KEYS,
@@ -55,6 +60,7 @@ import {
   emailsToBlob,
   validateEmailRecipient,
   MAX_ATTACHMENT_SIZE,
+  parseInternalEmail,
   type Profile,
   type Contact,
   type ContactRequest,
@@ -120,10 +126,17 @@ interface ConnectContextType {
   logCall: (username: string, name: string, color: number, kind: CallKind, dir: CallDir, durationSec: number) => void;
   // emails
   emails: Email[];
-  sendEmail: (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => void;
+  sendEmail: (
+    recipient: string,
+    subject: string,
+    body: string,
+    attachmentName?: string,
+    attachmentSize?: number,
+    requestId?: string,
+  ) => Promise<boolean>;
   saveDraft: (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => void;
   markEmailRead: (id: string) => void;
-  deleteEmail: (id: string) => void;
+  deleteEmail: (id: string) => Promise<boolean>;
   unreadEmails: number;
 }
 
@@ -143,6 +156,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   const [chats, setChats] = useState<Conversation[]>([]);
   const [calls, setCalls] = useState<CallLog[]>([]);
   const [emails, setEmails] = useState<Email[]>([]);
+  const [emailsLoadedFor, setEmailsLoadedFor] = useState<string | null>(null);
 
   // authoritative refs
   const profileRef = useRef(profile);
@@ -151,6 +165,8 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   const chatsRef = useRef(chats);
   const callsRef = useRef(calls);
   const emailsRef = useRef(emails);
+  const emailSessionRef = useRef<string | null>(null);
+  emailSessionRef.current = isAuthenticated ? sessionToken : null;
 
   const stateApi = useRef<StateApi | null>(null);
 
@@ -237,6 +253,7 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   if (!isAuthenticated) return;
   let cancelled = false;
   setChatsLoaded(false);
+  setEmailsLoadedFor(null);
 
         if (!sessionToken) return;
 
@@ -331,7 +348,39 @@ if (cRec) {
         const loadedRequests = rRec ? sanitizeRequests(rRec.blob) : (fresh ? seedRequests() : []);
         const loadedChats = chRec ? sanitizeChats(chRec.blob) : (fresh ? seedChats() : []);
         const loadedCalls = clRec ? sanitizeCalls(clRec.blob) : (fresh ? seedCalls() : []);
-        const loadedEmails = emRec ? sanitizeEmails(emRec.blob) : (fresh ? seedEmails() : []);
+        const savedEmails = emRec ? sanitizeEmails(emRec.blob) : [];
+
+        let loadedEmails = savedEmails.filter(
+          (email) =>
+            email.folder === "drafts" || email.type === "external",
+        );
+
+        try {
+          const records = await getInternalEmails(sessionToken);
+          if (cancelled) return;
+
+          const serverEmails: Email[] = [];
+
+          for (const record of records) {
+            const email = parseInternalEmail(record, piUsername || "");
+
+            if (!email) {
+              throw new Error("Invalid internal email data.");
+            }
+
+            serverEmails.push(email);
+          }
+
+          loadedEmails = [...loadedEmails, ...serverEmails]
+            .sort((a, b) => b.at - a.at)
+            .slice(0, CAPS.emails);
+        } catch (error) {
+          if (cancelled) return;
+
+          console.error("[EMAIL LOAD ERROR]", error);
+          setStorageNotice(true);
+          pushToast("Unable to load email. Please try again.", "error");
+        }
 
         setProfile(loadedProfile); profileRef.current = loadedProfile;
         setContacts(loadedContacts); contactsRef.current = loadedContacts;
@@ -340,6 +389,7 @@ if (cRec) {
         setChatsLoaded(true);
         setCalls(loadedCalls); callsRef.current = loadedCalls;
         setEmails(loadedEmails); emailsRef.current = loadedEmails;
+        setEmailsLoadedFor(sessionToken);
 
         setReady(true);
             } catch (error) {
@@ -398,8 +448,101 @@ if (cRec) {
   const commitEmails = (next: Email[], immediate = false) => {
     emailsRef.current = next;
     setEmails(next);
-    scheduleSave(KEYS.emails, emailsToBlob(next), immediate);
+
+    const savedEmails = next.filter(
+      (email) =>
+        email.folder === "drafts" || email.type === "external",
+    );
+
+    scheduleSave(
+      KEYS.emails,
+      emailsToBlob(savedEmails),
+      immediate,
+    );
   };
+
+    useEffect(() => {
+    if (
+      !isAuthenticated ||
+      !sessionToken ||
+      !piUsername ||
+      emailsLoadedFor !== sessionToken
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let revision = 0;
+
+    const refresh = async (): Promise<void> => {
+      const requestRevision = ++revision;
+
+      try {
+        const records = await getInternalEmails(sessionToken);
+
+        if (cancelled || requestRevision !== revision) return;
+
+        const serverEmails: Email[] = [];
+
+        for (const record of records) {
+          const email = parseInternalEmail(record, piUsername);
+
+          if (!email) {
+            throw new Error("Invalid internal email data.");
+          }
+
+          serverEmails.push(email);
+        }
+
+        const savedEmails = emailsRef.current.filter(
+          (email) =>
+            email.folder === "drafts" || email.type === "external",
+        );
+
+        const next = [...savedEmails, ...serverEmails]
+          .sort((a, b) => b.at - a.at)
+          .slice(0, CAPS.emails);
+
+        emailsRef.current = next;
+        setEmails(next);
+      } catch (error) {
+        if (cancelled || requestRevision !== revision) return;
+
+        console.error("[EMAIL SYNC ERROR]", error);
+        setStorageNotice(true);
+      }
+    };
+
+    const refreshMailbox = (): void => {
+      void refresh();
+    };
+
+    const unsubscribe = [
+      onEmailEvent("connect", refreshMailbox),
+      onEmailEvent("email:new", refreshMailbox),
+      onEmailEvent("email:read", refreshMailbox),
+      onEmailEvent("email:deleted", refreshMailbox),
+    ];
+
+    const onVisible = (): void => {
+      if (document.visibilityState === "visible") {
+        refreshMailbox();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    refreshMailbox();
+
+    return () => {
+      cancelled = true;
+      revision++;
+
+      for (const stop of unsubscribe) stop();
+
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [isAuthenticated, sessionToken, piUsername, emailsLoadedFor]);
+
     const receiveConversationHistory = (data: {
     username: string;
     messages: Record<string, unknown>[];
@@ -1043,105 +1186,90 @@ return "added";
   };
 
   // ---- emails ----
-  const sendEmail = (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => {
-    const emailType = validateEmailRecipient(recipient);
+  const sendEmail = async (
+    recipient: string,
+    subject: string,
+    body: string,
+    attachmentName?: string,
+    attachmentSize?: number,
+    requestId?: string,
+  ): Promise<boolean> => {
+    const token = emailSessionRef.current;
+    const username = piUsername || "";
+
+    if (!token || !username) {
+      pushToast("Please sign in before sending email.", "error");
+      return false;
+    }
+
+    const target = recipient.trim().toLowerCase();
+    const emailType = validateEmailRecipient(target);
+
     if (!emailType) {
-      pushToast("Invalid email recipient", "error");
-      return;
+      pushToast("Invalid email recipient.", "error");
+      return false;
     }
 
-    const now = Date.now();
-    const threadId = uid();
-    
-    // Build email object
-    let senderName = profile.displayName || profile.username || "You";
-    let color = 0;
-    
-    if (emailType === "internal") {
-      const uname = normalizeUsername(recipient.slice(1));
-      const contact = contactsRef.current.find((c) => c.username === uname);
-      senderName = contact?.name || uname;
-      color = contact?.color ?? hueFromString(uname);
-    }
-
-    const email: Email = {
-      id: uid(),
-      folder: "sent",
-      threadId,
-      type: emailType,
-      fromMe: true,
-      recipient: recipient.toLowerCase(),
-      senderName,
-      color,
-      subject: cleanStr(subject, 120) || "(no subject)",
-      body: cleanStr(body, 4000),
-      attachmentName: attachmentName ? cleanStr(attachmentName, 40) : undefined,
-      attachmentSize: attachmentSize ? Math.min(attachmentSize, MAX_ATTACHMENT_SIZE) : undefined,
-      deliveryStatus: emailType === "external" ? "pending" : undefined,
-      read: true,
-      at: now,
-    };
-
-    commitEmails([email, ...emailsRef.current].slice(0, CAPS.emails), true);
-
-    // Handle external email sending
     if (emailType === "external") {
-      fetch("/api/email/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          recipient: email.recipient,
-          subject: email.subject,
-          body: email.body,
-          attachmentName: email.attachmentName,
-        }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.success) {
-            pushToast("Email sent", "success");
-            // Update delivery status
-            const updated = emailsRef.current.map((e) =>
-              e.id === email.id ? { ...e, deliveryStatus: "sent" as const } : e
-            );
-            commitEmails(updated);
-          } else {
-            pushToast("Failed to send email", "error");
-            
-            const updated = emailsRef.current.map((e) =>
-              e.id === email.id ? { ...e, deliveryStatus: "failed" as const } : e
-            );
-            commitEmails(updated);
-          }
-        })
-        .catch((err) => {
-          console.error("[v0] Email send error:", err);
-          pushToast("Email delivery failed", "error");
-        });
-    } else {
-  // Simulate internal email reply
-  pushToast("Email sent", "success");
-  return;
-  setTimeout(() => {
-    const reply: Email = {
-      id: uid(),
-      folder: "inbox",
-      threadId,
-      type: "internal",
-      fromMe: false,
-      recipient: `@${profile.username}`,
-      senderName: email.senderName,
-      color: email.color,
-      subject: `Re: ${email.subject}`,
-      body: "Thanks for your message! I'll get back to you soon.\n\nSent from One Connect.",
-      read: false,
-      at: Date.now(),
-    };
-    commitEmails([reply, ...emailsRef.current].slice(0, CAPS.emails));
-  }, 3000);
-}
-    
-      
+      pushToast("External email delivery is not configured yet.", "error");
+      return false;
+    }
+
+    if (!body.trim()) {
+      pushToast("Please enter an email message.", "error");
+      return false;
+    }
+
+    if (subject.length > 120 || body.length > 4000) {
+      pushToast("The email exceeds the allowed length.", "error");
+      return false;
+    }
+
+    if (attachmentName || attachmentSize) {
+      pushToast("Email attachments are not connected yet.", "error");
+      return false;
+    }
+
+    try {
+      const record = await sendInternalEmail(token, {
+        id: requestId || crypto.randomUUID(),
+        recipient: target,
+        subject: subject.trim() || "(no subject)",
+        body,
+      });
+
+      if (emailSessionRef.current !== token) return false;
+
+      const email = parseInternalEmail(record, username);
+
+      if (!email || !email.fromMe) {
+        throw new Error("Invalid email response.");
+      }
+
+      const next = [
+        email,
+        ...emailsRef.current.filter((item) => item.id !== email.id),
+      ]
+        .sort((a, b) => b.at - a.at)
+        .slice(0, CAPS.emails);
+
+      emailsRef.current = next;
+      setEmails(next);
+
+      pushToast("Email sent.", "success");
+      return true;
+    } catch (error) {
+      if (emailSessionRef.current !== token) return false;
+
+      pushToast(
+        error instanceof Error
+          ? error.message
+          : "Unable to send email.",
+        "error",
+      );
+
+      return false;
+    }
   };
 
   const saveDraft = (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => {
@@ -1177,13 +1305,82 @@ return "added";
     commitEmails([email, ...emailsRef.current].slice(0, CAPS.emails), true);
   };
 
-  const markEmailRead = (id: string) => {
-    const list = emailsRef.current.map((e) => (e.id === id && !e.read ? { ...e, read: true } : e));
-    if (list.some((e, i) => e !== emailsRef.current[i])) commitEmails(list);
+  const markEmailRead = async (id: string): Promise<void> => {
+    const email = emailsRef.current.find((item) => item.id === id);
+    if (!email || email.read) return;
+
+    if (email.type !== "internal" || email.folder === "drafts") {
+      commitEmails(
+        emailsRef.current.map((item) =>
+          item.id === id ? { ...item, read: true } : item,
+        ),
+      );
+      return;
+    }
+
+    const token = emailSessionRef.current;
+
+    if (!token) {
+      pushToast("Please sign in before updating email.", "error");
+      return;
+    }
+
+    try {
+      await markInternalEmailRead(token, id);
+
+      if (emailSessionRef.current !== token) return;
+
+      const next = emailsRef.current.map((item) =>
+        item.id === id ? { ...item, read: true } : item,
+      );
+
+      emailsRef.current = next;
+      setEmails(next);
+    } catch {
+      if (emailSessionRef.current !== token) return;
+
+      pushToast("Unable to mark email as read.", "error");
+    }
   };
-  const deleteEmail = (id: string) => {
-    commitEmails(emailsRef.current.filter((e) => e.id !== id), true);
+
+    const deleteEmail = async (id: string): Promise<boolean> => {
+    const email = emailsRef.current.find((item) => item.id === id);
+    if (!email) return true;
+
+    if (email.type !== "internal" || email.folder === "drafts") {
+      commitEmails(
+        emailsRef.current.filter((item) => item.id !== id),
+        true,
+      );
+      return true;
+    }
+
+    const token = emailSessionRef.current;
+
+    if (!token) {
+      pushToast("Please sign in before deleting email.", "error");
+      return false;
+    }
+
+    try {
+      await deleteInternalEmail(token, id);
+
+      if (emailSessionRef.current !== token) return false;
+
+      const next = emailsRef.current.filter((item) => item.id !== id);
+
+      emailsRef.current = next;
+      setEmails(next);
+
+      return true;
+    } catch {
+      if (emailSessionRef.current !== token) return false;
+
+      pushToast("Unable to delete email. Please try again.", "error");
+      return false;
+    }
   };
+
   const unreadEmails = emails.filter((e) => e.folder === "inbox" && !e.read).length;
 
   const lang = profile.language;
