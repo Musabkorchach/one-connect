@@ -71,6 +71,54 @@ export function onCallEvent<K extends keyof CallEventMap>(
     }
   };
 }
+
+export interface EmailEventMap {
+  "email:new": Record<string, unknown>;
+  "email:read": { id: string };
+  "email:deleted": { id: string };
+  connect: undefined;
+}
+
+const emailListeners = new Map<
+  keyof EmailEventMap,
+  Set<(data: unknown) => void>
+>();
+
+export function onEmailEvent<K extends keyof EmailEventMap>(
+  event: K,
+  callback: (data: EmailEventMap[K]) => void,
+): () => void {
+  const listener = (data: unknown) => {
+    callback(data as EmailEventMap[K]);
+  };
+
+  const listeners =
+    emailListeners.get(event) ?? new Set<(data: unknown) => void>();
+
+  emailListeners.set(event, listeners);
+  listeners.add(listener);
+
+  const attachedSocket = socket;
+  const socketEvent = String(event);
+  attachedSocket?.on(socketEvent, listener);
+
+  return () => {
+    listeners.delete(listener);
+    attachedSocket?.off(socketEvent, listener);
+
+    if (socket !== attachedSocket) {
+      socket?.off(socketEvent, listener);
+    }
+
+    if (
+      listeners.size === 0 &&
+      emailListeners.get(event) === listeners
+    ) {
+      emailListeners.delete(event);
+    }
+  };
+}
+
 const messageListeners = {
   newMessage: new Set<(message: Record<string, unknown>) => void>(),
   saved: new Set<(data: { id: string; status: "sent" }) => void>(),
@@ -162,6 +210,14 @@ if (socket) disconnectSocket();
 });
 
   for (const [event, listeners] of callListeners) {
+    const socketEvent = String(event);
+
+    for (const listener of listeners) {
+      socket.on(socketEvent, listener);
+    }
+  }
+
+    for (const [event, listeners] of emailListeners) {
     const socketEvent = String(event);
 
     for (const listener of listeners) {
@@ -896,4 +952,135 @@ export async function uploadFile(userId: string, file: File) {
 
   if (!response.ok) throw new Error("File upload failed");
   return response.json();
+}
+
+export async function getInternalEmails(
+  sessionToken: string,
+): Promise<Record<string, unknown>[]> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before loading email.");
+  }
+
+  const response = await fetch(`${API_URL}/api/emails`, {
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error("Unable to load email.");
+  }
+
+  const data = await response.json();
+
+  if (
+    !data ||
+    !Array.isArray(data.emails) ||
+    !data.emails.every(
+      (email: unknown) =>
+        email !== null &&
+        typeof email === "object" &&
+        !Array.isArray(email),
+    )
+  ) {
+    throw new Error("Invalid email response.");
+  }
+
+  return data.emails;
+}
+
+export async function sendInternalEmail(
+  sessionToken: string,
+  email: {
+    id: string;
+    recipient: string;
+    subject: string;
+    body: string;
+    attachmentName?: string;
+    attachmentSize?: number;
+  },
+): Promise<Record<string, unknown>> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before sending email.");
+  }
+
+  const response = await fetch(`${API_URL}/api/emails/internal`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(email),
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      typeof data?.error === "string"
+        ? data.error
+        : "Unable to send email.",
+    );
+  }
+
+  if (
+    !data?.email ||
+    typeof data.email !== "object" ||
+    Array.isArray(data.email)
+  ) {
+    throw new Error("Invalid email response.");
+  }
+
+  return data.email;
+}
+
+async function updateInternalEmail(
+  sessionToken: string,
+  id: string,
+  action: "read" | "delete",
+): Promise<void> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before updating email.");
+  }
+
+  if (!/^[a-f0-9]{24}$/i.test(id)) {
+    throw new Error("Invalid email ID.");
+  }
+
+  const path =
+    action === "read"
+      ? `/api/emails/${id}/read`
+      : `/api/emails/${id}`;
+
+  const response = await fetch(`${API_URL}${path}`, {
+    method: action === "read" ? "PATCH" : "DELETE",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || data?.success !== true) {
+    throw new Error(
+      typeof data?.error === "string"
+        ? data.error
+        : "Unable to update email.",
+    );
+  }
+}
+
+export function markInternalEmailRead(
+  sessionToken: string,
+  id: string,
+): Promise<void> {
+  return updateInternalEmail(sessionToken, id, "read");
+}
+
+export function deleteInternalEmail(
+  sessionToken: string,
+  id: string,
+): Promise<void> {
+  return updateInternalEmail(sessionToken, id, "delete");
 }

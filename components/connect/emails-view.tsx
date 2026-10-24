@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, IconButton, Button, EmptyState, TextInput, TextArea, cx } from "./ui";
 import { Overlay, ConfirmDialog } from "./feedback";
@@ -151,8 +151,10 @@ function ReadEmail({
   const { t, markEmailRead, deleteEmail, lang } = useConnect();
   const [confirm, setConfirm] = useState(false);
 
-  useMemo(() => {
-    if (email && !email.read) markEmailRead(email.id);
+  useEffect(() => {
+    if (email && !email.read) {
+      void markEmailRead(email.id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email?.id]);
 
@@ -221,11 +223,16 @@ function ReadEmail({
         message={`${email?.subject || ""}`}
         confirmLabel={t.confirm}
         cancelLabel={t.cancel}
-        onConfirm={() => {
-          if (email) deleteEmail(email.id);
+                onConfirm={async () => {
+          if (!email) return;
+
+          const deleted = await deleteEmail(email.id);
+          if (!deleted) return;
+
           setConfirm(false);
           onClose();
         }}
+
         onCancel={() => setConfirm(false)}
       />
     </Overlay>
@@ -249,10 +256,14 @@ function ComposeEmail({
   const [attachmentSize, setAttachmentSize] = useState<number | undefined>();
   const fileRef = useRef<HTMLInputElement>(null);
   const initialized = useRef<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const requestRef = useRef<{ key: string; id: string } | null>(null);
 
   // seed from reply/draft when opened
   if (open && initialized.current !== (replyTo?.id || "new")) {
     initialized.current = replyTo?.id || "new";
+    requestRef.current = null;
     if (replyTo?.folder === "drafts") {
       setTo(replyTo.recipient);
       setSubject(replyTo.subject);
@@ -260,7 +271,11 @@ function ComposeEmail({
       setAttachmentName(replyTo.attachmentName);
       setAttachmentSize(replyTo.attachmentSize);
     } else if (replyTo) {
-      setTo(replyTo.recipient);
+      setTo(
+        replyTo.type === "internal" && !replyTo.fromMe
+          ? `@${replyTo.senderUsername || ""}`
+          : replyTo.recipient,
+      );
       setSubject(replyTo.subject.startsWith("Re:") ? replyTo.subject : `Re: ${replyTo.subject}`);
       setBody("");
       setAttachmentName(undefined);
@@ -275,21 +290,69 @@ function ComposeEmail({
   }
   if (!open && initialized.current !== null) initialized.current = null;
 
-  const send = () => {
+  const send = async (): Promise<void> => {
+    if (sendingRef.current) return;
+
     const recipient = to.trim().toLowerCase();
+
     if (!recipient) {
-      pushToast("Please enter a recipient (e.g., @username or email@domain.com)", "error");
+      pushToast(
+        "Please enter a recipient (e.g., @username or email@domain.com)",
+        "error",
+      );
       return;
     }
-    sendEmail(recipient, subject, body, attachmentName, attachmentSize);
-    onClose();
+
+    sendingRef.current = true;
+    setSending(true);
+
+    try {
+      const key = JSON.stringify([
+        recipient,
+        subject.trim() || "(no subject)",
+        body,
+        attachmentName,
+        attachmentSize,
+      ]);
+
+      if (requestRef.current?.key !== key) {
+        requestRef.current = {
+          key,
+          id: crypto.randomUUID(),
+        };
+      }
+
+      const sent = await sendEmail(
+        recipient,
+        subject,
+        body,
+        attachmentName,
+        attachmentSize,
+        requestRef.current.id,
+      );
+
+      if (sent) {
+        requestRef.current = null;
+        onClose();
+      }
+    } catch {
+      pushToast("Unable to send email. Please try again.", "error");
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
   };
+
   const draft = () => {
+    if (sendingRef.current) return;
+
     const recipient = to.trim().toLowerCase();
+
     if (!recipient) {
       pushToast("Please enter a recipient", "error");
       return;
     }
+
     saveDraft(recipient, subject, body, attachmentName, attachmentSize);
     pushToast(t.draftSaved, "success");
     onClose();
@@ -298,7 +361,9 @@ function ComposeEmail({
   return (
     <Overlay
       open={open}
-      onClose={onClose}
+      onClose={() => {
+        if (!sendingRef.current) onClose();
+      }}
       title={t.compose}
       right={
         <IconButton className="h-9 w-9 text-gold" onClick={draft} aria-label={t.saveDraft}>
@@ -306,7 +371,11 @@ function ComposeEmail({
         </IconButton>
       }
     >
-      <div className="flex flex-col gap-3 px-4 py-4">
+      <fieldset
+        disabled={sending}
+        aria-busy={sending}
+        className="m-0 flex min-w-0 flex-col gap-3 border-0 px-4 py-4"
+      >
         <div>
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{t.to}</label>
           <div className="mt-1.5 rounded-xl bg-input/70 border border-border px-3 py-3">
@@ -392,9 +461,9 @@ function ComposeEmail({
 
         <Button variant="primary" className="mt-2 w-full py-3.5" onClick={send}>
           <IconSend className="h-5 w-5 rtl:rotate-180" />
-          {t.send}
+                    {t.send}
         </Button>
-      </div>
+      </fieldset>
     </Overlay>
   );
 }
