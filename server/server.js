@@ -51,6 +51,19 @@ const chatImagesBucket = new GridFSBucket(db, {
 const chatAttachmentsBucket = new GridFSBucket(db, {
   bucketName: "chat_attachments",
 });
+const emailAttachmentsBucket = new GridFSBucket(db, {
+  bucketName: "email_attachments",
+});
+
+const emailAttachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 1,
+    fields: 1,
+    parts: 3,
+  },
+});
 const chatImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -275,6 +288,100 @@ function requireSession(req, res, next) {
   next();
 }
 
+app.post("/api/emails/attachments", requireSession, (req, res) => {
+  emailAttachmentUpload.single("file")(req, res, async (uploadError) => {
+    if (uploadError) {
+      return res.status(
+        uploadError.code === "LIMIT_FILE_SIZE" ? 413 : 400,
+      ).json({
+        error: uploadError.code === "LIMIT_FILE_SIZE"
+          ? "Email attachment must be 10 MB or smaller"
+          : "Invalid email attachment upload",
+      });
+    }
+
+    const senderUsername = normalizeMessagingUsername(req.user.piUsername);
+    const recipient = req.body?.recipient;
+    const file = req.file;
+
+    if (
+      !senderUsername ||
+      typeof recipient !== "string" ||
+      !/^@[a-z0-9._-]{1,32}$/i.test(recipient)
+    ) {
+      return res.status(400).json({
+        error: "Invalid email attachment details",
+      });
+    }
+
+    const recipientUsername = normalizeMessagingUsername(recipient);
+
+    if (!recipientUsername || recipientUsername === senderUsername) {
+      return res.status(400).json({
+        error: "Invalid email recipient",
+      });
+    }
+
+    if (!file || file.size === 0 || !file.buffer?.length) {
+      return res.status(400).json({
+        error: "Email attachment file is required",
+      });
+    }
+
+    const fileName = file.originalname
+      .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
+      .slice(0, 120) || "attachment";
+
+    let uploadStream;
+
+    try {
+      const registered = await emailUsersCollection.findOne({
+        _id: recipientUsername,
+      });
+
+      if (!registered) {
+        return res.status(404).json({
+          error: "Recipient has not registered for One Connect email",
+        });
+      }
+
+      uploadStream = emailAttachmentsBucket.openUploadStream(fileName, {
+        metadata: {
+          ownerUserId: req.user.userId,
+          senderUsername,
+          recipientUsername,
+          mimeType: "application/octet-stream",
+          uploadedAt: new Date(),
+        },
+      });
+
+      await new Promise((resolve, reject) => {
+        uploadStream.once("error", reject);
+        uploadStream.once("finish", resolve);
+        uploadStream.end(file.buffer);
+      });
+
+      return res.status(201).json({
+        attachmentId: uploadStream.id.toString(),
+        attachmentName: fileName,
+        attachmentSize: file.size,
+      });
+    } catch (error) {
+      if (uploadStream) {
+        await uploadStream.abort().catch(() => {});
+      }
+
+      console.error("[EMAIL ATTACHMENT UPLOAD ERROR]", error);
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          error: "Email attachment could not be uploaded",
+        });
+      }
+    }
+  });
+});
+
 function emailForUser(record, username) {
   const fromMe = record.senderUsername === username;
 
@@ -293,6 +400,9 @@ function emailForUser(record, username) {
     color: 200,
     subject: record.subject,
     body: record.body,
+    attachmentId: record.attachmentId,
+    attachmentName: record.attachmentName,
+    attachmentSize: record.attachmentSize,
     read: fromMe || record.recipientRead === true,
     at: record.at,
   };
@@ -323,11 +433,27 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
     return res.status(400).json({ error: "Invalid email data" });
   }
 
-  if (data.attachmentName || data.attachmentSize) {
+    if (
+    (
+      data.attachmentId !== undefined &&
+      (
+        typeof data.attachmentId !== "string" ||
+        !/^[a-f0-9]{24}$/i.test(data.attachmentId)
+      )
+    ) ||
+    (
+      data.attachmentId === undefined &&
+      (data.attachmentName || data.attachmentSize)
+    )
+  ) {
     return res.status(400).json({
-      error: "Email attachments are not connected yet",
+      error: "Invalid email attachment",
     });
   }
+
+  const attachmentId = typeof data.attachmentId === "string"
+    ? data.attachmentId.toLowerCase()
+    : null;
 
   const recipientUsername = normalizeMessagingUsername(data.recipient);
 
@@ -339,7 +465,8 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
   const matchesRequest = (record) =>
     record.recipientUsername === recipientUsername &&
     record.subject === subject &&
-    record.body === data.body;
+    record.body === data.body &&
+    (record.attachmentId ?? null) === attachmentId;
 
   try {
     const existing = await emailsCollection.findOne({
@@ -369,6 +496,28 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
       });
     }
 
+    let attachment = null;
+
+    if (attachmentId) {
+      attachment = await emailAttachmentsBucket.find({
+        _id: new ObjectId(attachmentId),
+        "metadata.ownerUserId": req.user.userId,
+        "metadata.senderUsername": senderUsername,
+        "metadata.recipientUsername": recipientUsername,
+      }).next();
+
+      if (
+        !attachment ||
+        !Number.isSafeInteger(attachment.length) ||
+        attachment.length <= 0 ||
+        attachment.length > 10 * 1024 * 1024
+      ) {
+        return res.status(400).json({
+          error: "Email attachment is unavailable or does not match this recipient",
+        });
+      }
+    }
+
     const record = {
       id: data.id,
       threadId: crypto.randomUUID(),
@@ -377,6 +526,11 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
       recipientUsername,
       subject,
       body: data.body,
+      ...(attachment ? {
+        attachmentId,
+        attachmentName: attachment.filename,
+        attachmentSize: attachment.length,
+      } : {}),
       recipientRead: false,
       senderDeleted: false,
       recipientDeleted: false,
@@ -426,6 +580,109 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
     return res.status(500).json({
       error: "Email could not be sent",
     });
+  }
+});
+
+app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const { emailId } = req.params;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid user identity" });
+  }
+
+  if (!/^[a-f0-9]{24}$/i.test(emailId)) {
+    return res.status(400).json({ error: "Invalid email ID" });
+  }
+
+  try {
+    const email = await emailsCollection.findOne({
+      _id: new ObjectId(emailId),
+      type: "internal",
+      $or: [
+        {
+          senderUsername: username,
+          senderDeleted: { $ne: true },
+        },
+        {
+          recipientUsername: username,
+          recipientDeleted: { $ne: true },
+        },
+      ],
+    });
+
+    if (
+      !email ||
+      typeof email.attachmentId !== "string" ||
+      !/^[a-f0-9]{24}$/i.test(email.attachmentId)
+    ) {
+      return res.status(404).json({ error: "Email attachment not found" });
+    }
+
+    const id = new ObjectId(email.attachmentId);
+
+    const attachment = await emailAttachmentsBucket.find({
+      _id: id,
+      "metadata.senderUsername": email.senderUsername,
+      "metadata.recipientUsername": email.recipientUsername,
+    }).next();
+
+    if (
+      !attachment ||
+      !Number.isSafeInteger(attachment.length) ||
+      attachment.length <= 0 ||
+      attachment.length > 10 * 1024 * 1024
+    ) {
+      return res.status(404).json({ error: "Email attachment not found" });
+    }
+
+    const encodedName = encodeURIComponent(
+      attachment.filename || "attachment",
+    ).replace(
+      /['()*]/g,
+      (character) =>
+        `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+
+    res.set({
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(attachment.length),
+      "Content-Disposition":
+        `attachment; filename="attachment"; filename*=UTF-8''${encodedName}`,
+      "X-Content-Type-Options": "nosniff",
+    });
+
+    const downloadStream = emailAttachmentsBucket.openDownloadStream(id);
+
+    downloadStream.on("error", (error) => {
+      console.error("[EMAIL ATTACHMENT READ ERROR]", error);
+
+      if (!res.headersSent) {
+        res.removeHeader("Content-Length");
+        res.removeHeader("Content-Disposition");
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
+    });
+
+    res.on("close", () => downloadStream.destroy());
+    downloadStream.pipe(res);
+  } catch (error) {
+    console.error("[EMAIL ATTACHMENT LOAD ERROR]", error);
+
+    if (!res.headersSent) {
+      res.removeHeader("Content-Length");
+      res.removeHeader("Content-Disposition");
+
+      return res.status(500).json({
+        error: "Email attachment could not be downloaded",
+      });
+    }
+
+    res.destroy();
   }
 });
 

@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, IconButton, Button, EmptyState, TextInput, TextArea, cx } from "./ui";
 import { Overlay, ConfirmDialog } from "./feedback";
+import { usePiAuth } from "@/contexts/pi-auth-context";
+import { downloadEmailAttachment } from "@/lib/api-client";
 import {
   IconMail,
   IconInbox,
@@ -148,8 +150,81 @@ function ReadEmail({
   onClose: () => void;
   onReply: (e: Email) => void;
 }) {
-  const { t, markEmailRead, deleteEmail, lang } = useConnect();
+  const { t, markEmailRead, deleteEmail, lang, pushToast } = useConnect();
+  const { sessionToken } = usePiAuth();
   const [confirm, setConfirm] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const downloadingRef = useRef(false);
+
+  const downloadContextRef = useRef({
+    sessionToken,
+    emailId: email?.id,
+  });
+
+  downloadContextRef.current = {
+    sessionToken,
+    emailId: email?.id,
+  };
+
+  const download = async (): Promise<void> => {
+    const selected = email;
+    const token = sessionToken;
+
+    if (downloadingRef.current || !selected?.attachmentId) return;
+
+    if (!token) {
+      pushToast("Please sign in before downloading an attachment.", "error");
+      return;
+    }
+
+    downloadingRef.current = true;
+    setDownloading(true);
+
+    try {
+      const blob = await downloadEmailAttachment(token, selected.id);
+
+      if (
+        downloadContextRef.current.sessionToken !== token ||
+        downloadContextRef.current.emailId !== selected.id
+      ) {
+        return;
+      }
+
+      if (blob.size !== selected.attachmentSize) {
+        throw new Error("The attachment download is incomplete.");
+      }
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      try {
+        link.href = url;
+        link.download = selected.attachmentName || "attachment";
+        document.body.appendChild(link);
+        link.click();
+      } finally {
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+    } catch (error) {
+      if (
+        downloadContextRef.current.sessionToken !== token ||
+        downloadContextRef.current.emailId !== selected.id
+      ) {
+        return;
+      }
+
+      pushToast(
+        error instanceof Error
+          ? error.message
+          : "Unable to download email attachment.",
+        "error",
+      );
+    } finally {
+      downloadingRef.current = false;
+      setDownloading(false);
+    }
+  };
 
   useEffect(() => {
     if (email && !email.read) {
@@ -202,7 +277,14 @@ function ReadEmail({
                 {email.attachmentName}
                 {email.attachmentSize && ` (${Math.round(email.attachmentSize / 1024)}KB)`}
               </span>
-              <button className="pc-press text-muted-foreground" aria-label="Download">
+              <button
+                type="button"
+                disabled={downloading || !email.attachmentId}
+                onClick={() => void download()}
+                className="pc-press text-muted-foreground disabled:opacity-40"
+                aria-label="Download"
+                aria-busy={downloading}
+              >
                 <IconDownload className="h-5 w-5" />
               </button>
             </div>
@@ -254,6 +336,7 @@ function ComposeEmail({
   const [body, setBody] = useState("");
   const [attachmentName, setAttachmentName] = useState<string | undefined>();
   const [attachmentSize, setAttachmentSize] = useState<number | undefined>();
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const initialized = useRef<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -263,6 +346,7 @@ function ComposeEmail({
   // seed from reply/draft when opened
   if (open && initialized.current !== (replyTo?.id || "new")) {
     initialized.current = replyTo?.id || "new";
+    setAttachmentFile(null);
     requestRef.current = null;
     if (replyTo?.folder === "drafts") {
       setTo(replyTo.recipient);
@@ -329,6 +413,7 @@ function ComposeEmail({
         attachmentName,
         attachmentSize,
         requestRef.current.id,
+        attachmentFile ?? undefined,
       );
 
       if (sent) {
@@ -429,7 +514,20 @@ function ComposeEmail({
               <p className="truncate text-sm font-medium">{attachmentName}</p>
               {attachmentSize && <p className="text-xs text-muted-foreground">{Math.round(attachmentSize / 1024)}KB</p>}
             </div>
-            <button onClick={() => { setAttachmentName(undefined); setAttachmentSize(undefined); }} className="pc-press text-destructive" aria-label={t.cancel}>
+            <button
+              onClick={() => {
+                setAttachmentFile(null);
+                setAttachmentName(undefined);
+                setAttachmentSize(undefined);
+                requestRef.current = null;
+
+                if (fileRef.current) {
+                  fileRef.current.value = "";
+                }
+              }}
+              className="pc-press text-destructive"
+              aria-label={t.cancel}
+            >
               <IconTrash className="h-4 w-4" />
             </button>
           </div>
@@ -447,15 +545,25 @@ function ComposeEmail({
           type="file"
           className="hidden"
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) {
-              if (f.size > 10 * 1024 * 1024) {
-                pushToast("File too large (max 10MB)", "error");
-                return;
-              }
-              setAttachmentName(f.name);
-              setAttachmentSize(f.size);
+            if (sendingRef.current) return;
+
+            const file = e.currentTarget.files?.[0];
+            e.currentTarget.value = "";
+
+            if (!file) return;
+
+            if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+              pushToast(
+                "Email attachment must be between 1 byte and 10 MB.",
+                "error",
+              );
+              return;
             }
+
+            setAttachmentFile(file);
+            setAttachmentName(file.name);
+            setAttachmentSize(file.size);
+            requestRef.current = null;
           }}
         />
 
