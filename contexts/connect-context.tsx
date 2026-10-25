@@ -30,6 +30,7 @@ import {
   sendInternalEmail,
   markInternalEmailRead,
   deleteInternalEmail,
+  uploadEmailAttachment,
 } from "@/lib/api-client";
 import {
   KEYS,
@@ -133,6 +134,7 @@ interface ConnectContextType {
     attachmentName?: string,
     attachmentSize?: number,
     requestId?: string,
+    attachmentFile?: File,
   ) => Promise<boolean>;
   saveDraft: (recipient: string, subject: string, body: string, attachmentName?: string, attachmentSize?: number) => void;
   markEmailRead: (id: string) => void;
@@ -167,6 +169,17 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   const emailsRef = useRef(emails);
   const emailSessionRef = useRef<string | null>(null);
   emailSessionRef.current = isAuthenticated ? sessionToken : null;
+
+  const emailUploadRef = useRef<{
+    token: string;
+    recipient: string;
+    file: File;
+    attachmentId: string;
+  } | null>(null);
+
+  if (emailUploadRef.current?.token !== emailSessionRef.current) {
+    emailUploadRef.current = null;
+  }
 
   const stateApi = useRef<StateApi | null>(null);
 
@@ -1193,6 +1206,7 @@ return "added";
     attachmentName?: string,
     attachmentSize?: number,
     requestId?: string,
+    attachmentFile?: File,
   ): Promise<boolean> => {
     const token = emailSessionRef.current;
     const username = piUsername || "";
@@ -1225,17 +1239,60 @@ return "added";
       return false;
     }
 
-    if (attachmentName || attachmentSize) {
-      pushToast("Email attachments are not connected yet.", "error");
+    if ((attachmentName || attachmentSize) && !attachmentFile) {
+      pushToast("Please select the attachment file again.", "error");
+      return false;
+    }
+
+    if (
+      attachmentFile &&
+      (
+        attachmentFile.size === 0 ||
+        attachmentFile.size > 10 * 1024 * 1024
+      )
+    ) {
+      pushToast("Email attachment must be between 1 byte and 10 MB.", "error");
       return false;
     }
 
     try {
+      let attachmentId: string | undefined;
+
+      if (attachmentFile) {
+        const cached = emailUploadRef.current;
+
+        if (
+          cached?.token === token &&
+          cached.recipient === target &&
+          cached.file === attachmentFile
+        ) {
+          attachmentId = cached.attachmentId;
+        } else {
+          const uploaded = await uploadEmailAttachment(
+            token,
+            target,
+            attachmentFile,
+          );
+
+          if (emailSessionRef.current !== token) return false;
+
+          attachmentId = uploaded.attachmentId;
+
+          emailUploadRef.current = {
+            token,
+            recipient: target,
+            file: attachmentFile,
+            attachmentId,
+          };
+        }
+      }
+
       const record = await sendInternalEmail(token, {
         id: requestId || crypto.randomUUID(),
         recipient: target,
         subject: subject.trim() || "(no subject)",
         body,
+        ...(attachmentId ? { attachmentId } : {}),
       });
 
       if (emailSessionRef.current !== token) return false;

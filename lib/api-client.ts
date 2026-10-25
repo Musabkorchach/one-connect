@@ -997,6 +997,7 @@ export async function sendInternalEmail(
     recipient: string;
     subject: string;
     body: string;
+    attachmentId?: string;
     attachmentName?: string;
     attachmentSize?: number;
   },
@@ -1083,4 +1084,104 @@ export function deleteInternalEmail(
   id: string,
 ): Promise<void> {
   return updateInternalEmail(sessionToken, id, "delete");
+}
+
+export async function uploadEmailAttachment(
+  sessionToken: string,
+  recipient: string,
+  file: File,
+): Promise<{
+  attachmentId: string;
+  attachmentName: string;
+  attachmentSize: number;
+}> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before uploading an attachment.");
+  }
+
+  if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+    throw new Error("Email attachment must be between 1 byte and 10 MB.");
+  }
+
+  const formData = new FormData();
+  formData.append("recipient", recipient);
+  formData.append("file", file);
+
+  const response = await fetch(`${API_URL}/api/emails/attachments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    body: formData,
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      typeof data?.error === "string"
+        ? data.error
+        : "Unable to upload email attachment.",
+    );
+  }
+
+  if (
+    typeof data?.attachmentId !== "string" ||
+    !/^[a-f0-9]{24}$/i.test(data.attachmentId) ||
+    typeof data.attachmentName !== "string" ||
+    !data.attachmentName.trim() ||
+    data.attachmentName.length > 120 ||
+    typeof data.attachmentSize !== "number" ||
+    !Number.isSafeInteger(data.attachmentSize) ||
+    data.attachmentSize !== file.size
+  ) {
+    throw new Error("Invalid email attachment response.");
+  }
+
+  return {
+    attachmentId: data.attachmentId,
+    attachmentName: data.attachmentName,
+    attachmentSize: data.attachmentSize,
+  };
+}
+
+export async function downloadEmailAttachment(
+  sessionToken: string,
+  emailId: string,
+): Promise<Blob> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before downloading an attachment.");
+  }
+
+  if (!/^[a-f0-9]{24}$/i.test(emailId)) {
+    throw new Error("Invalid email ID.");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/emails/${emailId}/attachment`,
+    {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+
+    throw new Error(
+      typeof data?.error === "string"
+        ? data.error
+        : "Unable to download email attachment.",
+    );
+  }
+
+  const blob = await response.blob();
+
+  if (blob.size === 0 || blob.size > 10 * 1024 * 1024) {
+    throw new Error("Invalid email attachment size.");
+  }
+
+  return blob;
 }

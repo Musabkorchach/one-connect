@@ -26,6 +26,7 @@ export interface Email {
   color: number;             // hue for avatar (internal only; external uses gray)
   subject: string;
   body: string;
+  attachmentId?: string;
   attachmentName?: string;   // file name only (no data URI)
   attachmentSize?: number;   // bytes for limit checking
   deliveryStatus?: "pending" | "sent" | "failed" | "spam";  // external only
@@ -583,6 +584,12 @@ export function sanitizeEmails(blob: unknown): Email[] {
       color: type === "internal" ? clampNum(e.color, 0, 360, hueFromString(recipient)) : 0,
       subject: cleanStr(e.subject, SUBJECT_MAX),
       body: cleanStr(e.body, BODY_MAX),
+      attachmentId:
+        type === "internal" &&
+        typeof e.attachmentId === "string" &&
+        /^[a-f0-9]{24}$/i.test(e.attachmentId)
+          ? e.attachmentId.toLowerCase()
+          : undefined,
       attachmentName: e.attachmentName ? cleanStr(e.attachmentName, NAME_MAX) : undefined,
       attachmentSize: clampNum(e.attachmentSize, 0, MAX_ATTACHMENT_SIZE, undefined),
       deliveryStatus: type === "external" && DELIVERY_STATUSES.includes(e.deliveryStatus as Email["deliveryStatus"]) ? (e.deliveryStatus as Email["deliveryStatus"]) : undefined,
@@ -635,6 +642,37 @@ export function parseInternalEmail(
     return null;
   }
 
+    let attachment: Pick<
+    Email,
+    "attachmentId" | "attachmentName" | "attachmentSize"
+  > = {};
+
+  if (
+    e.attachmentId !== undefined ||
+    e.attachmentName !== undefined ||
+    e.attachmentSize !== undefined
+  ) {
+    if (
+      typeof e.attachmentId !== "string" ||
+      !/^[a-f0-9]{24}$/i.test(e.attachmentId) ||
+      typeof e.attachmentName !== "string" ||
+      !e.attachmentName.trim() ||
+      e.attachmentName.length > 120 ||
+      typeof e.attachmentSize !== "number" ||
+      !Number.isSafeInteger(e.attachmentSize) ||
+      e.attachmentSize <= 0 ||
+      e.attachmentSize > 10 * 1024 * 1024
+    ) {
+      return null;
+    }
+
+    attachment = {
+      attachmentId: e.attachmentId.toLowerCase(),
+      attachmentName: e.attachmentName,
+      attachmentSize: e.attachmentSize,
+    };
+  }
+
   const fromMe = e.senderUsername === me;
 
   if (!fromMe && e.recipientUsername !== me) {
@@ -658,6 +696,7 @@ export function parseInternalEmail(
     color: hueFromString(counterpart),
     subject: e.subject,
     body: e.body,
+    ...attachment,
     read: fromMe || e.read,
     at: e.at,
   };
