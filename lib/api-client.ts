@@ -212,7 +212,13 @@ if (socket) disconnectSocket();
   reconnectionAttempts: 5,
 });
 
-  for (const [event, listeners] of callListeners) {
+for (const [event, listeners] of groupListeners) {
+  for (const listener of listeners) {
+    socket.on(String(event), listener);
+   }
+  }
+
+for (const [event, listeners] of callListeners) {
     const socketEvent = String(event);
 
     for (const listener of listeners) {
@@ -1251,4 +1257,183 @@ export async function downloadEmailAttachment(
   }
 
   return blob;
+}
+
+export interface GroupRecord {
+  id: string;
+  name: string;
+  ownerUsername: string;
+  members: string[];
+  createdAt: number;
+  updatedAt: number;
+  unreadCount: number;
+}
+
+export interface GroupMessageRecord {
+  id: string;
+  groupId: string;
+  senderUsername: string;
+  kind: "text";
+  text: string;
+  at: number;
+  readBy: string[];
+}
+
+export interface GroupHistoryPage {
+  group: GroupRecord;
+  messages: GroupMessageRecord[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface GroupReadReceipt {
+  groupId: string;
+  username: string;
+  messageIds: string[];
+}
+
+async function groupRequest<T>(
+  path: string,
+  sessionToken: string,
+  method: "GET" | "POST" = "GET",
+  body?: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!sessionToken) throw new Error("Authentication required");
+
+  const response = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+    signal,
+  });
+
+  const result: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const error =
+      result &&
+      typeof result === "object" &&
+      "error" in result &&
+      typeof result.error === "string"
+        ? result.error
+        : `Group request failed (${response.status})`;
+
+    throw new Error(error);
+  }
+
+  if (!result || typeof result !== "object") {
+    throw new Error("Invalid group response");
+  }
+
+  return result as T;
+}
+
+export function getGroups(
+  sessionToken: string,
+  signal?: AbortSignal,
+): Promise<{ groups: GroupRecord[] }> {
+  return groupRequest("/api/groups", sessionToken, "GET", undefined, signal);
+}
+
+export function createGroup(
+  sessionToken: string,
+  name: string,
+  members: string[],
+): Promise<{ group: GroupRecord }> {
+  return groupRequest("/api/groups", sessionToken, "POST", {
+    name,
+    members,
+  });
+}
+
+export function getGroupMessages(
+  sessionToken: string,
+  groupId: string,
+  before?: string,
+  signal?: AbortSignal,
+): Promise<GroupHistoryPage> {
+  const query = before ? `?before=${encodeURIComponent(before)}` : "";
+
+  return groupRequest(
+    `/api/groups/${encodeURIComponent(groupId)}/messages${query}`,
+    sessionToken,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function sendGroupMessage(
+  sessionToken: string,
+  groupId: string,
+  id: string,
+  text: string,
+): Promise<{ message: GroupMessageRecord }> {
+  return groupRequest(
+    `/api/groups/${encodeURIComponent(groupId)}/messages`,
+    sessionToken,
+    "POST",
+    { id, kind: "text", text },
+  );
+}
+
+export function markGroupMessagesRead(
+  sessionToken: string,
+  groupId: string,
+  messageIds: string[],
+): Promise<GroupReadReceipt & { success: boolean }> {
+  return groupRequest(
+    `/api/groups/${encodeURIComponent(groupId)}/read`,
+    sessionToken,
+    "POST",
+    { messageIds },
+  );
+}
+
+export interface GroupEventMap {
+  "group:updated": GroupRecord;
+  "group:message": { message: GroupMessageRecord };
+  "group:read": GroupReadReceipt;
+  connect: undefined;
+}
+
+const groupListeners = new Map<
+  keyof GroupEventMap,
+  Set<(data: unknown) => void>
+>();
+
+export function onGroupEvent<K extends keyof GroupEventMap>(
+  event: K,
+  callback: (data: GroupEventMap[K]) => void,
+): () => void {
+  const listener = (data: unknown) => {
+    callback(data as GroupEventMap[K]);
+  };
+
+  const listeners =
+    groupListeners.get(event) ?? new Set<(data: unknown) => void>();
+
+  groupListeners.set(event, listeners);
+  listeners.add(listener);
+
+  const attachedSocket = socket;
+  attachedSocket?.on(String(event), listener);
+
+  return () => {
+    listeners.delete(listener);
+    attachedSocket?.off(String(event), listener);
+
+    if (socket !== attachedSocket) {
+      socket?.off(String(event), listener);
+    }
+
+    if (listeners.size === 0 && groupListeners.get(event) === listeners) {
+      groupListeners.delete(event);
+    }
+  };
 }

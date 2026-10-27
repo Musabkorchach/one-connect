@@ -3,6 +3,7 @@
 import type { ReactElement } from "react";
 import { cx } from "./ui";
 import { useConnect } from "@/contexts/connect-context";
+import { useGroups } from "@/contexts/group-context";
 import type { TabId } from "@/lib/connect/data";
 import {
   IconChat,
@@ -20,9 +21,15 @@ export function BottomNav({
   onChange: (t: TabId) => void;
 }) {
   const { t, totalUnread, unreadEmails } = useConnect();
+  const { groups } = useGroups();
+
+  const groupUnread = groups.reduce(
+    (sum, group) => sum + (group.unreadCount || 0),
+    0,
+  );
 
   const tabs: { id: TabId; label: string; icon: ReactElement; badge?: number }[] = [
-    { id: "chats", label: t.tabChats, icon: <IconChat className="h-[22px] w-[22px]" />, badge: totalUnread },
+    { id: "chats", label: t.tabChats, icon: <IconChat className="h-[22px] w-[22px]" />, badge: totalUnread + groupUnread },
     { id: "contacts", label: t.tabContacts, icon: <IconContacts className="h-[22px] w-[22px]" /> },
     { id: "calls", label: t.tabCalls, icon: <IconPhone className="h-[22px] w-[22px]" /> },
     { id: "emails", label: t.tabEmails, icon: <IconMail className="h-[22px] w-[22px]" />, badge: unreadEmails },

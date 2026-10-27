@@ -84,6 +84,23 @@ const chatAttachmentUpload = multer({
   },
 });
 
+const groupsCollection = db.collection("chat_groups");
+const groupMessagesCollection = db.collection("group_messages");
+
+await groupsCollection.createIndex(
+  { members: 1, updatedAt: -1 },
+  { name: "group_member_updated" },
+);
+
+await groupMessagesCollection.createIndex(
+  { groupId: 1, _id: -1 },
+  { name: "group_message_history" },
+);
+
+await groupMessagesCollection.createIndex(
+  { groupId: 1, senderUsername: 1, id: 1 },
+  { unique: true, name: "unique_group_sender_message" },
+);
 const messagesCollection = db.collection("messages");
 await messagesCollection.createIndex(
   { senderUsername: 1, id: 1 },
@@ -287,6 +304,388 @@ function requireSession(req, res, next) {
 
   next();
 }
+
+function groupForClient(group) {
+  return {
+    id: group._id.toString(),
+    name: group.name,
+    ownerUsername: group.ownerUsername,
+    members: group.members,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+    unreadCount: 0,
+  };
+}
+
+app.post("/api/groups", requireSession, async (req, res) => {
+  const ownerUsername = normalizeMessagingUsername(req.user.piUsername);
+  if (!ownerUsername) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  const data = req.body;
+
+  if (
+    !data ||
+    typeof data.name !== "string" ||
+    !data.name.trim() ||
+    data.name.trim().length > 80 ||
+    !Array.isArray(data.members) ||
+    data.members.length > 50
+  ) {
+    return res.status(400).json({ error: "Invalid group details" });
+  }
+
+  const normalizedMembers = data.members.map(normalizeMessagingUsername);
+
+  if (normalizedMembers.some((username) => !username)) {
+    return res.status(400).json({ error: "Invalid member username" });
+  }
+
+  const members = [...new Set([ownerUsername, ...normalizedMembers])];
+
+  if (members.length < 3 || members.length > 50) {
+    return res.status(400).json({
+      error: "A group must have between 3 and 50 members",
+    });
+  }
+
+  try {
+    const registered = await emailUsersCollection
+      .find(
+        { _id: { $in: members } },
+        { projection: { _id: 1 } },
+      )
+      .toArray();
+
+    const registeredNames = new Set(registered.map((user) => user._id));
+
+    if (members.some((username) => !registeredNames.has(username))) {
+      return res.status(400).json({
+        error: "All members must first sign in to One Connect",
+      });
+    }
+
+    const now = Date.now();
+    const group = {
+      _id: new ObjectId(),
+      name: data.name.trim(),
+      ownerUsername,
+      members,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await groupsCollection.insertOne(group);
+
+    const result = groupForClient(group);
+
+    for (const username of members) {
+      io.to(`peer:${username}`).emit("group:updated", result);
+    }
+
+    return res.status(201).json({ group: result });
+  } catch (error) {
+    console.error("[GROUP CREATE ERROR]", error);
+    return res.status(500).json({ error: "Group could not be created" });
+  }
+});
+
+app.get("/api/groups", requireSession, async (req, res) => {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  try {
+    const groups = await groupsCollection
+      .find({ members: username })
+      .sort({ updatedAt: -1, _id: -1 })
+      .toArray();
+
+    const groupIds = groups.map((group) => group._id.toString());
+
+    const counts = groupIds.length
+      ? await groupMessagesCollection.aggregate([
+          {
+            $match: {
+              groupId: { $in: groupIds },
+              senderUsername: { $ne: username },
+              readBy: { $ne: username },
+              deletedFor: { $ne: username },
+            },
+          },
+          {
+            $group: {
+              _id: "$groupId",
+              count: { $sum: 1 },
+            },
+          },
+        ]).toArray()
+      : [];
+
+    const unreadByGroup = new Map(
+      counts.map((item) => [item._id, item.count]),
+    );
+
+    return res.json({
+      groups: groups.map((group) => ({
+        ...groupForClient(group),
+        unreadCount: unreadByGroup.get(group._id.toString()) || 0,
+      })),
+    });
+  } catch (error) {
+    console.error("[GROUP LIST ERROR]", error);
+    return res.status(500).json({ error: "Groups could not be loaded" });
+  }
+});
+
+function groupMessageForClient(message) {
+  return {
+    id: message.id,
+    groupId: message.groupId,
+    senderUsername: message.senderUsername,
+    kind: message.kind,
+    text: message.text,
+    at: message.at,
+    readBy: message.readBy || [],
+  };
+}
+
+app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const groupId = req.params.groupId;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  if (!/^[a-f0-9]{24}$/.test(groupId)) {
+    return res.status(400).json({ error: "Invalid group ID" });
+  }
+
+  const before = req.query.before;
+
+  if (
+    before !== undefined &&
+    (typeof before !== "string" || !/^[a-f0-9]{24}$/.test(before))
+  ) {
+    return res.status(400).json({ error: "Invalid history cursor" });
+  }
+
+  try {
+    const group = await groupsCollection.findOne({
+      _id: new ObjectId(groupId),
+      members: username,
+    });
+
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    const filter = {
+      groupId,
+      deletedFor: { $ne: username },
+    };
+
+    if (before) {
+      filter._id = { $lt: new ObjectId(before) };
+    }
+
+    const records = await groupMessagesCollection
+      .find(filter)
+      .sort({ _id: -1 })
+      .limit(101)
+      .toArray();
+
+    const hasMore = records.length > 100;
+    const page = records.slice(0, 100);
+
+    return res.json({
+      group: groupForClient(group),
+      messages: page.slice().reverse().map(groupMessageForClient),
+      hasMore,
+      nextCursor: hasMore
+        ? page[page.length - 1]._id.toString()
+        : null,
+    });
+  } catch (error) {
+    console.error("[GROUP HISTORY ERROR]", error);
+    return res.status(500).json({
+      error: "Group messages could not be loaded",
+    });
+  }
+});
+
+app.post("/api/groups/:groupId/messages", requireSession, async (req, res) => {
+  const senderUsername = normalizeMessagingUsername(req.user.piUsername);
+  const groupId = req.params.groupId;
+  const data = req.body;
+
+  if (!senderUsername) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  if (!/^[a-f0-9]{24}$/.test(groupId)) {
+    return res.status(400).json({ error: "Invalid group ID" });
+  }
+
+  if (
+    !data ||
+    typeof data.id !== "string" ||
+    !data.id.trim() ||
+    data.id.length > 120 ||
+    data.kind !== "text" ||
+    typeof data.text !== "string" ||
+    !data.text.trim() ||
+    data.text.length > 2000
+  ) {
+    return res.status(400).json({ error: "Invalid group message" });
+  }
+
+  try {
+    const group = await groupsCollection.findOne({
+      _id: new ObjectId(groupId),
+      members: senderUsername,
+    });
+
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    const identity = {
+      groupId,
+      senderUsername,
+      id: data.id,
+    };
+
+    let message = await groupMessagesCollection.findOne(identity);
+    let created = false;
+
+    if (!message) {
+      const candidate = {
+        _id: new ObjectId(),
+        ...identity,
+        kind: "text",
+        text: data.text.trim(),
+        at: Date.now(),
+        readBy: [senderUsername],
+        deletedFor: [],
+      };
+
+      try {
+        await groupMessagesCollection.insertOne(candidate);
+        message = candidate;
+        created = true;
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+
+        message = await groupMessagesCollection.findOne(identity);
+        if (!message) throw error;
+      }
+    }
+
+    await groupsCollection.updateOne(
+      { _id: group._id },
+      { $max: { updatedAt: message.at } },
+    );
+
+    const result = groupMessageForClient(message);
+
+    for (const username of group.members) {
+      io.to(`peer:${username}`).emit("group:message", {
+        message: result,
+      });
+    }
+
+    return res.status(created ? 201 : 200).json({
+      message: result,
+    });
+  } catch (error) {
+    console.error("[GROUP MESSAGE SEND ERROR]", error);
+    return res.status(500).json({
+      error: "Group message could not be sent",
+    });
+  }
+});
+
+app.post("/api/groups/:groupId/read", requireSession, async (req, res) => {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const groupId = req.params.groupId;
+  const messageIds = req.body?.messageIds;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  if (!/^[a-f0-9]{24}$/.test(groupId)) {
+    return res.status(400).json({ error: "Invalid group ID" });
+  }
+
+  if (
+    !Array.isArray(messageIds) ||
+    messageIds.length === 0 ||
+    messageIds.length > 100 ||
+    messageIds.some(
+      (id) => typeof id !== "string" || !id.trim() || id.length > 120,
+    )
+  ) {
+    return res.status(400).json({ error: "Invalid message IDs" });
+  }
+
+  try {
+    const group = await groupsCollection.findOne({
+      _id: new ObjectId(groupId),
+      members: username,
+    });
+
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    const filter = {
+      groupId,
+      id: { $in: [...new Set(messageIds)] },
+      deletedFor: { $ne: username },
+    };
+
+    const records = await groupMessagesCollection
+      .find(filter, { projection: { _id: 1, id: 1 } })
+      .toArray();
+
+    if (records.length > 0) {
+      await groupMessagesCollection.updateMany(
+        { groupId, _id: { $in: records.map((message) => message._id) } },
+        { $addToSet: { readBy: username } },
+      );
+    }
+
+    const readIds = [...new Set(records.map((message) => message.id))];
+
+    if (readIds.length > 0) {
+      for (const member of group.members) {
+        io.to(`peer:${member}`).emit("group:read", {
+          groupId,
+          username,
+          messageIds: readIds,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      groupId,
+      username,
+      messageIds: readIds,
+    });
+  } catch (error) {
+    console.error("[GROUP READ ERROR]", error);
+    return res.status(500).json({
+      error: "Group messages could not be marked as read",
+    });
+  }
+});
 
 app.post("/api/emails/attachments", requireSession, (req, res) => {
   emailAttachmentUpload.single("file")(req, res, async (uploadError) => {
