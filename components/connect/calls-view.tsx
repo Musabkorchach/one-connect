@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, EmptyState, cx } from "./ui";
-import { Sheet } from "./feedback";
+import { Sheet, ConfirmDialog } from "./feedback";
 import {
   IconPhone,
   IconPhoneIncoming,
@@ -11,6 +11,7 @@ import {
   IconPhoneMissed,
   IconVideo,
   IconContacts,
+  IconTrash,
 } from "./icons";
 import { formatDuration, timeAgo, type CallLog, type Contact } from "@/lib/connect/data";
 
@@ -19,12 +20,26 @@ export function CallsView({
 }: {
   onCall: (username: string, name: string, color: number, kind: "voice" | "video") => void;
 }) {
-  const { t, calls, contacts } = useConnect();
+  const { t, calls, contacts, deleteCall, clearCallHistory } = useConnect();
   const [pickOpen, setPickOpen] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
 
   return (
     <div className="pb-24">
       <Header title={t.callsTitle} />
+      {calls.length > 0 && (
+        <div className="flex justify-end px-5 pt-3">
+          <button
+            type="button"
+            onClick={() => setClearOpen(true)}
+            className="pc-press flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold text-destructive"
+          >
+            <IconTrash className="h-4 w-4" />
+            Clear call history
+          </button>
+        </div>
+      )}
 
       {calls.length === 0 ? (
         <EmptyState icon={<IconPhone className="h-7 w-7" />} title={t.noCalls} />
@@ -32,11 +47,41 @@ export function CallsView({
         <ul className="px-2 pt-2">
           {calls.map((c, i) => (
             <li key={c.id} style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }} className="pc-fade-up">
-              <CallRow log={c} t={t} onCall={onCall} />
+              <CallRow
+                log={c}
+                t={t}
+                onCall={onCall}
+                onDelete={() => setSelectedCall(c)}
+              />
             </li>
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={clearOpen}
+        title="Clear call history?"
+        message="This removes all call history from your account. Other people keep their own history."
+        confirmLabel="Clear history"
+        cancelLabel={t.cancel}
+        onConfirm={() => {
+          clearCallHistory();
+          setClearOpen(false);
+        }}
+        onCancel={() => setClearOpen(false)}
+      />
+      <ConfirmDialog
+        open={selectedCall !== null}
+        title="Delete call?"
+        message="This removes this call from your account's history."
+        confirmLabel="Delete call"
+        cancelLabel={t.cancel}
+        onConfirm={() => {
+          if (selectedCall) deleteCall(selectedCall.id);
+          setSelectedCall(null);
+        }}
+        onCancel={() => setSelectedCall(null)}
+      />
 
       {/* new call FAB */}
       <button
@@ -66,10 +111,17 @@ function CallRow({
   log,
   t,
   onCall,
+  onDelete,
 }: {
   log: CallLog;
   t: ReturnType<typeof useConnect>["t"];
-  onCall: (username: string, name: string, color: number, kind: "voice" | "video") => void;
+  onCall: (
+    username: string,
+    name: string,
+    color: number,
+    kind: "voice" | "video",
+  ) => void;
+  onDelete: () => void;
 }) {
   const dirIcon =
     log.dir === "missed" ? (
@@ -96,6 +148,14 @@ function CallRow({
           <span>· {timeAgo(log.at)}</span>
         </div>
       </div>
+      <button
+        type="button"
+        onClick={onDelete}
+        aria-label="Delete call"
+        className="pc-press flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-destructive"
+      >
+        <IconTrash className="h-4 w-4" />
+      </button>
       <button
         onClick={() => onCall(log.username, log.name, log.color, log.kind)}
         className="pc-press flex h-9 w-9 items-center justify-center rounded-full bg-turquoise/15 text-turquoise"

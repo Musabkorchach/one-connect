@@ -12,7 +12,7 @@ import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Button, IconButton, TextInput, cx } from "./ui";
-import { Sheet } from "./feedback";
+import { Sheet, ConfirmDialog } from "./feedback";
 import { VoiceRecorder } from "./voice-recorder";
 import {
   IconBack,
@@ -27,6 +27,7 @@ import {
   IconDoubleCheck,
   IconShield,
   IconDownload,
+  IconTrash,
 } from "./icons";
 import {
   formatTime,
@@ -340,7 +341,12 @@ const onVideo = (file?: File) => {
           <IconShield className="h-3.5 w-3.5 shrink-0" />
           <span>{t.encrypted}</span>
         </div>
-        <MessageList messages={conv.messages} locale={lang} t={t} />
+        <MessageList
+          username={username}
+          messages={conv.messages}
+          locale={lang}
+          t={t}
+        />
       </div>
 
       {/* composer */}
@@ -482,18 +488,46 @@ const onVideo = (file?: File) => {
 }
 
 function MessageList({
+  username,
   messages,
   locale,
   t,
 }: {
+  username: string;
   messages: Message[];
   locale: string;
   t: ReturnType<typeof useConnect>["t"];
 }) {
+  const { deleteMessage } = useConnect();
+  const [selected, setSelected] = useState<Message | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
+
+  useEffect(() => {
+    setSelected(null);
+  }, [username]);
+
+  const confirmDelete = async () => {
+    if (!selected || deletingRef.current) return;
+
+    deletingRef.current = true;
+    setDeleting(true);
+
+    try {
+      const deleted = await deleteMessage(username, selected.id);
+      if (deleted) setSelected(null);
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+    }
+  };
+
   const groups: { day: string; items: Message[] }[] = [];
+
   for (const m of messages) {
     const day = dayLabel(m.at, locale);
     const last = groups[groups.length - 1];
+
     if (last && last.day === day) last.items.push(m);
     else groups.push({ day, items: [m] });
   }
@@ -504,19 +538,55 @@ function MessageList({
         <div key={gi} className="flex flex-col gap-1.5">
           <div className="my-2 flex justify-center">
             <span className="rounded-full bg-card/70 px-3 py-1 text-[11px] text-muted-foreground">
-              {g.day === "Today" ? t.today : g.day === "Yesterday" ? t.yesterday : g.day}
+              {g.day === "Today"
+                ? t.today
+                : g.day === "Yesterday"
+                  ? t.yesterday
+                  : g.day}
             </span>
           </div>
+
           {g.items.map((m) => (
             <div
-              key={m.id}
+              key={`${m.fromMe ? "out" : "in"}:${m.id}`}
               data-read-message-id={!m.fromMe ? m.id : undefined}
             >
               <Bubble m={m} locale={locale} t={t} />
+
+              <div
+                className={cx(
+                  "flex",
+                  m.fromMe ? "justify-end" : "justify-start",
+                )}
+              >
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => setSelected(m)}
+                  aria-label="Delete message for me"
+                  className="pc-press flex h-9 w-9 items-center justify-center text-muted-foreground disabled:opacity-50"
+                >
+                  <IconTrash className="h-4 w-4" />
+                </button>
+              </div>
             </div>
-   ))}
+          ))}
         </div>
       ))}
+
+      <ConfirmDialog
+        open={selected !== null}
+        title="Delete message?"
+        message="This message will be removed from your account. The other person keeps their copy."
+        confirmLabel={deleting ? "Deleting..." : "Delete for me"}
+        cancelLabel={t.cancel}
+        onConfirm={() => {
+          void confirmDelete();
+        }}
+        onCancel={() => {
+          if (!deletingRef.current) setSelected(null);
+        }}
+      />
     </div>
   );
 }

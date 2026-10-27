@@ -31,6 +31,8 @@ import {
   markInternalEmailRead,
   deleteInternalEmail,
   uploadEmailAttachment,
+  deleteChatMessage,
+  onMessageDeleted,
 } from "@/lib/api-client";
 import {
   KEYS,
@@ -122,9 +124,12 @@ interface ConnectContextType {
     attachmentId?: string
   ) => void;
   markChatRead: (username: string, messageIds?: string[]) => void;
+  deleteMessage: (username: string, messageId: string) => Promise<boolean>;
   // calls
   calls: CallLog[];
   logCall: (username: string, name: string, color: number, kind: CallKind, dir: CallDir, durationSec: number) => void;
+  deleteCall: (id: string) => void;
+  clearCallHistory: () => void;
   // emails
   emails: Email[];
   sendEmail: (
@@ -169,6 +174,20 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   const emailsRef = useRef(emails);
   const emailSessionRef = useRef<string | null>(null);
   emailSessionRef.current = isAuthenticated ? sessionToken : null;
+  const deletedChatMessagesRef = useRef<{
+    token: string | null;
+    keys: Set<string>;
+  }>({
+    token: null,
+    keys: new Set<string>(),
+  });
+
+  if (deletedChatMessagesRef.current.token !== emailSessionRef.current) {
+    deletedChatMessagesRef.current = {
+      token: emailSessionRef.current,
+      keys: new Set<string>(),
+    };
+  }
 
   const emailUploadRef = useRef<{
     token: string;
@@ -194,40 +213,96 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   // ---- per-key saver factory ----
   const savers = useRef<Record<string, { timer: ReturnType<typeof setTimeout> | null; delay: number; pending: Record<string, unknown> | null }>>({});
 
-  const writeNow = async (key: string, blob: Record<string, unknown>) => {
+  const saveQueues = useRef<
+    Map<
+      string,
+      {
+        api: StateApi;
+        tail: Promise<void>;
+        latest: Record<string, unknown>;
+      }
+    >
+  >(new Map());
+
+  const writeNow = async (
+    key: string,
+    blob: Record<string, unknown>,
+  ) => {
     const api = stateApi.current;
 
     if (!api) {
       console.error("[ONE CONNECT STORAGE NOT READY]", { key });
       setStorageNotice(true);
       return;
-   }
-    try {
-      await api.set(key, blob);
-      const s = savers.current[key];
-      if (s) s.delay = 1300;
-    } catch (error) {
-  console.error("[ONE CONNECT STORAGE ERROR]", {
-    key,
-    error,
-  });
-  if (stateApi.current !== api) return;
-
-  setStorageNotice(true);
-      setTimeout(() => setStorageNotice(false), 2600);
-      const s = savers.current[key];
-      if (s) {
-        s.delay = Math.min(30000, Math.round(s.delay * 1.8));
-        s.pending = blob;
-        if (s.timer) clearTimeout(s.timer);
-        s.timer = setTimeout(() => {
-          const p = s.pending;
-          s.pending = null;
-          s.timer = null;
-          if (p) void writeNow(key, p);
-        }, s.delay);
-      }
     }
+
+    let queue = saveQueues.current.get(key);
+
+    if (!queue || queue.api !== api) {
+      queue = {
+        api,
+        tail: Promise.resolve(),
+        latest: blob,
+      };
+      saveQueues.current.set(key, queue);
+    }
+
+    queue.latest = blob;
+    const activeQueue = queue;
+
+    const task = activeQueue.tail.then(async () => {
+      if (
+        stateApi.current !== api ||
+        activeQueue.latest !== blob
+      ) {
+        return;
+      }
+
+      try {
+        await api.set(key, blob);
+
+        if (stateApi.current !== api) return;
+
+        const saver = savers.current[key];
+        if (saver) saver.delay = 1300;
+      } catch (error) {
+        console.error("[ONE CONNECT STORAGE ERROR]", { key, error });
+
+        if (
+          stateApi.current !== api ||
+          activeQueue.latest !== blob
+        ) {
+          return;
+        }
+
+        setStorageNotice(true);
+
+        const saver = savers.current[key];
+        if (!saver) return;
+
+        saver.delay = Math.min(
+          30000,
+          Math.round(saver.delay * 1.8),
+        );
+
+        // Preserve any newer change waiting to be saved.
+        if (!saver.pending) saver.pending = blob;
+        if (saver.timer) return;
+
+        saver.timer = setTimeout(() => {
+          const pending = saver.pending;
+          saver.pending = null;
+          saver.timer = null;
+
+          if (stateApi.current === api && pending) {
+            void writeNow(key, pending);
+          }
+        }, saver.delay);
+      }
+    });
+
+    activeQueue.tail = task.catch(() => {});
+    await task;
   };
 
   const scheduleSave = (key: string, blob: Record<string, unknown>, immediate = false) => {
@@ -556,9 +631,59 @@ if (cRec) {
     };
   }, [isAuthenticated, sessionToken, piUsername, emailsLoadedFor]);
 
-    const receiveConversationHistory = (data: {
+  useEffect(() => {
+    if (!isAuthenticated || !chatsLoaded || !sessionToken || !piUsername) {
+      return;
+    }
+
+    const token = sessionToken;
+    const me = normalizeUsername(piUsername);
+
+    return onMessageDeleted((data) => {
+      if (
+        emailSessionRef.current !== token ||
+        !data ||
+        typeof data.id !== "string" ||
+        typeof data.senderUsername !== "string"
+      ) {
+        return;
+      }
+
+      const sender = normalizeUsername(data.senderUsername);
+      if (!sender) return;
+      deletedChatMessagesRef.current.keys.add(`${sender}:${data.id}`);
+
+      let changed = false;
+
+      const updated = chatsRef.current.map((chat) => {
+        if (chat.isGroup || !chat.username) return chat;
+
+        const messages = chat.messages.filter((message) => {
+          const messageSender = message.fromMe ? me : chat.username;
+
+          return message.id !== data.id || messageSender !== sender;
+        });
+
+        if (messages.length === chat.messages.length) return chat;
+
+        changed = true;
+
+        return {
+          ...chat,
+          messages,
+          unread: messages.filter(
+            (message) => !message.fromMe && message.status !== "read",
+          ).length,
+        };
+      });
+
+      if (changed) commitChats(updated, true);
+    });
+  }, [isAuthenticated, chatsLoaded, sessionToken, piUsername]);
+  const receiveConversationHistory = (data: {
     username: string;
     messages: Record<string, unknown>[];
+    deletedMessages?: Record<string, unknown>[];
   }) => {
     if (!data || typeof data.username !== "string" ||
         !Array.isArray(data.messages)) return;
@@ -626,10 +751,34 @@ if (cRec) {
       });
     }
 
+    const deletedKeys = new Set<string>(
+      deletedChatMessagesRef.current.keys,
+    );
+    if (Array.isArray(data.deletedMessages)) {
+      for (const item of data.deletedMessages) {
+        if (
+          !item ||
+          typeof item.id !== "string" ||
+          typeof item.senderUsername !== "string"
+        ) continue;
+
+        const sender = normalizeUsername(item.senderUsername);
+        if (sender !== me && sender !== peer) continue;
+
+        deletedKeys.add(`${sender}:${item.id}`);
+        deletedChatMessagesRef.current.keys.add(`${sender}:${item.id}`);
+      }
+    }
+
     const messages = [...merged.values()]
+      .filter((message) => {
+        const sender = message.fromMe ? me : peer;
+        return !deletedKeys.has(`${sender}:${message.id}`);
+      })
       .sort((a, b) => a.at - b.at)
       .slice(-CAPS.messages);
-    if (!messages.length) return;
+
+    if (!messages.length && !existing) return;
 
     const contact = contactsRef.current.find((item) => item.username === peer);
     const conversation: Conversation = {
@@ -640,7 +789,10 @@ if (cRec) {
       name: existing?.name || contact?.name || peer,
       color: existing?.color ?? contact?.color ?? hueFromString(peer),
       messages,
-      updatedAt: messages[messages.length - 1].at,
+      updatedAt:
+        messages[messages.length - 1]?.at ??
+        existing?.updatedAt ??
+        Date.now(),
       unread: messages.filter(
         (message) => !message.fromMe && message.status !== "read",
       ).length,
@@ -651,8 +803,7 @@ if (cRec) {
       ...list.filter((chat) => chat.isGroup || chat.username !== peer),
     ].sort((a, b) => b.updatedAt - a.updatedAt);
 
-    chatsRef.current = updated;
-    setChats(updated);
+    commitChats(updated, true);
     acknowledgeMessages(
       peer,
       messages.filter((message) => !message.fromMe).map((message) => message.id),
@@ -763,6 +914,10 @@ useEffect(() => {
   if (!me || !sender || recipient !== me || sender === me) return;
 
   if (
+    deletedChatMessagesRef.current.keys.has(`${sender}:${incoming.id}`)
+  ) return;
+
+  if (
     !["text", "image", "file", "video", "voice"].includes(incoming.kind)
   ) return;
 
@@ -819,10 +974,14 @@ useEffect(() => {
 
   if (chat.messages.some((item) => item.id === message.id)) return;
 
+  const messages = [...chat.messages, message].slice(-CAPS.messages);
+
   list[index] = {
     ...chat,
-    messages: [...chat.messages, message].slice(-CAPS.messages),
-    unread: chat.unread + 1,
+    messages,
+    unread: messages.filter(
+      (item) => !item.fromMe && item.status !== "read",
+    ).length,
     updatedAt: Date.now(),
   };
   commitChats(bumpChat(list, sender), true);
@@ -1125,54 +1284,117 @@ return "added";
     }
   };
 
+    const deleteMessage = async (
+    username: string,
+    messageId: string,
+  ): Promise<boolean> => {
+    const token = emailSessionRef.current;
+    const ownUsername = normalizeUsername(piUsername || "");
+    const peer = normalizeUsername(username);
+
+    if (!token || !ownUsername) {
+      pushToast("Please sign in before deleting messages.", "error");
+      return false;
+    }
+
+    const chat = chatsRef.current.find(
+      (item) => !item.isGroup && item.username === peer,
+    );
+    const message = chat?.messages.find((item) => item.id === messageId);
+    if (!message) return true;
+
+    const sender = message.fromMe ? ownUsername : peer;
+
+    try {
+      await deleteChatMessage(token, sender, messageId);
+
+      if (emailSessionRef.current !== token) return false;
+        deletedChatMessagesRef.current.keys.add(`${sender}:${messageId}`);
+
+      const updated = chatsRef.current.map((item) => {
+        if (item.isGroup || item.username !== peer) return item;
+
+        const messages = item.messages.filter(
+          (entry) =>
+            entry.id !== messageId || entry.fromMe !== message.fromMe,
+        );
+
+        return {
+          ...item,
+          messages,
+          unread: messages.filter(
+            (entry) => !entry.fromMe && entry.status !== "read",
+          ).length,
+        };
+      });
+
+      commitChats(updated, true);
+      return true;
+    } catch (error) {
+      if (emailSessionRef.current !== token) return false;
+
+      pushToast(
+        error instanceof Error
+          ? error.message
+          : "Message could not be deleted.",
+        "error",
+      );
+      return false;
+    }
+  };
+
   const markChatRead = (username: string, messageIds: string[] = []) => {
-  if (
-    typeof document === "undefined" ||
-    document.visibilityState !== "visible" ||
-    messageIds.length === 0
-  ) {
-    return;
-  }
+    if (
+      typeof document === "undefined" ||
+      document.visibilityState !== "visible" ||
+      messageIds.length === 0
+    ) {
+      return;
+    }
 
-  const uname = normalizeUsername(username);
-  const chat = chatsRef.current.find(
-    (item) => !item.isGroup && item.username === uname,
-  );
-  if (!chat) return;
+    const uname = normalizeUsername(username);
+    const chat = chatsRef.current.find(
+      (item) => !item.isGroup && item.username === uname,
+    );
+    if (!chat) return;
 
-  const requested = new Set(messageIds);
-  const received = chat.messages.filter(
-    (message) => !message.fromMe && requested.has(message.id),
-  );
-  if (received.length === 0) return;
+    const requested = new Set(messageIds);
+    const received = chat.messages.filter(
+      (message) => !message.fromMe && requested.has(message.id),
+    );
+    if (received.length === 0) return;
 
-  const emitted = acknowledgeMessages(
-    uname,
-    received.map((message) => message.id),
-    "read",
-  );
-  if (!emitted) return;
+    const emitted = acknowledgeMessages(
+      uname,
+      received.map((message) => message.id),
+      "read",
+    );
+    if (!emitted) return;
 
-  const newlyRead = received.filter((message) => message.status !== "read");
-  if (newlyRead.length === 0) return;
+    const readIds = new Set(received.map((message) => message.id));
+    const messages = chat.messages.map((message) =>
+      readIds.has(message.id) && message.status !== "read"
+        ? { ...message, status: "read" as const }
+        : message,
+    );
 
-  const readIds = new Set(newlyRead.map((message) => message.id));
-  const updated = chatsRef.current.map((item) => {
-    if (item !== chat) return item;
+    const unread = messages.filter(
+      (message) => !message.fromMe && message.status !== "read",
+    ).length;
 
-    return {
-      ...item,
-      unread: Math.max(0, item.unread - newlyRead.length),
-      messages: item.messages.map((message) =>
-        readIds.has(message.id)
-          ? { ...message, status: "read" as const }
-          : message,
+    const changed =
+      unread !== chat.unread ||
+      messages.some((message, index) => message !== chat.messages[index]);
+
+    if (!changed) return;
+
+    commitChats(
+      chatsRef.current.map((item) =>
+        item === chat ? { ...item, messages, unread } : item,
       ),
-    };
-  });
-
-  commitChats(updated, true);
-};
+      true,
+    );
+  };
 
   const totalUnread = chats.reduce((sum, c) => sum + c.unread, 0);
 
@@ -1196,6 +1418,22 @@ return "added";
       at: Date.now(),
     };
     commitCalls([log, ...callsRef.current].slice(0, CAPS.calls), true);
+  };
+
+    const deleteCall = (id: string) => {
+    if (!ready || !isAuthenticated || !sessionToken) return;
+
+    const next = callsRef.current.filter((call) => call.id !== id);
+    if (next.length === callsRef.current.length) return;
+
+    commitCalls(next, true);
+  };
+
+  const clearCallHistory = () => {
+    if (!ready || !isAuthenticated || !sessionToken) return;
+    if (callsRef.current.length === 0) return;
+
+    commitCalls([], true);
   };
 
   // ---- emails ----
@@ -1470,8 +1708,11 @@ return "added";
     totalUnread,
     sendMessage,
     markChatRead,
+    deleteMessage,
     calls,
     logCall,
+    deleteCall,
+    clearCallHistory,
     emails,
     sendEmail,
     saveDraft,

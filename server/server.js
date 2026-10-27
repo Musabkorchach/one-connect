@@ -1520,6 +1520,63 @@ app.get("/api/calls/ice-servers", requireSession, async (req, res) => {
   });
 });
 
+app.delete(
+  "/api/chat/messages/:senderUsername/:messageId",
+  requireSession,
+  async (req, res) => {
+    const username = normalizeMessagingUsername(req.user.piUsername);
+    const sender = normalizeMessagingUsername(req.params.senderUsername);
+    const messageId = req.params.messageId;
+
+    if (
+      !username ||
+      !sender ||
+      typeof messageId !== "string" ||
+      !messageId.trim() ||
+      messageId.length > 120
+    ) {
+      return res.status(400).json({ error: "Invalid message details" });
+    }
+
+    const exactUsername = (value) => ({
+      $regex: `^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      $options: "i",
+    });
+
+    try {
+      const filter = {
+        id: messageId,
+        senderUsername: exactUsername(sender),
+        $or: [
+          { senderUsername: exactUsername(username) },
+          { recipientUsername: exactUsername(username) },
+        ],
+      };
+
+      const result = await messagesCollection.updateOne(
+        filter,
+        { $addToSet: { deletedFor: username } },
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "Message not found" });
+      }
+
+      io.to(`peer:${username}`).emit("message:deleted", {
+        id: messageId,
+        senderUsername: sender,
+      });
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("[MESSAGE DELETE ERROR]", error);
+      return res.status(500).json({
+        error: "Message could not be deleted",
+      });
+    }
+  },
+);
+
 // WebSocket handlers
 const liveCallsById = new Map();
 const liveCallIdByUsername = new Map();
@@ -1594,6 +1651,7 @@ io.on("connection", (socket) => {
     try {
       const messages = await messagesCollection
         .find({
+          deletedFor: { $ne: messagingUsername },
           $or: [
             {
               senderUsername: exactUsername(messagingUsername),
@@ -1610,10 +1668,33 @@ io.on("connection", (socket) => {
         .limit(200)
         .toArray();
 
+      const deletedMessages = await messagesCollection
+        .find({
+          deletedFor: messagingUsername,
+          $or: [
+            {
+              senderUsername: exactUsername(messagingUsername),
+              recipientUsername: exactUsername(peer),
+            },
+            {
+              senderUsername: exactUsername(peer),
+              recipientUsername: exactUsername(messagingUsername),
+            },
+          ],
+        })
+        .project({
+          _id: 0,
+          id: 1,
+          senderUsername: 1,
+        })
+        .toArray();
+
       socket.emit("conversation:messages", {
         username: peer,
         messages: messages.reverse(),
+        deletedMessages,
       });
+
     } catch (error) {
       console.error("[CONVERSATION LOAD ERROR]", error);
       socket.emit("conversation:error", {
