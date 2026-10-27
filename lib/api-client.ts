@@ -121,6 +121,9 @@ export function onEmailEvent<K extends keyof EmailEventMap>(
 
 const messageListeners = {
   newMessage: new Set<(message: Record<string, unknown>) => void>(),
+  deleted: new Set<
+    (data: { id: string; senderUsername: string }) => void
+  >(),
   saved: new Set<(data: { id: string; status: "sent" }) => void>(),
   status: new Set<
   (data: {
@@ -233,6 +236,10 @@ if (socket) disconnectSocket();
     socket.on("message:saved", callback);
   }
 
+  for (const callback of messageListeners.deleted) {
+    socket.on("message:deleted", callback);
+  }
+
   for (const callback of messageListeners.status) {
   socket.on("message:status", callback);
 }
@@ -273,6 +280,27 @@ if (socket) disconnectSocket();
  */
 export function getSocket() {
   return socket;
+}
+
+export function onMessageDeleted(
+  callback: (data: {
+    id: string;
+    senderUsername: string;
+  }) => void,
+) {
+  messageListeners.deleted.add(callback);
+
+  const attachedSocket = socket;
+  attachedSocket?.on("message:deleted", callback);
+
+  return () => {
+    messageListeners.deleted.delete(callback);
+    attachedSocket?.off("message:deleted", callback);
+
+    if (socket !== attachedSocket) {
+      socket?.off("message:deleted", callback);
+    }
+  };
 }
 
 export function onMessageStatus(
@@ -416,6 +444,45 @@ export async function addContact(userId: string, username: string, name: string,
 /**
  * Send message via REST (for persistence)
  */
+export async function deleteChatMessage(
+  sessionToken: string,
+  senderUsername: string,
+  messageId: string,
+): Promise<void> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before deleting messages.");
+  }
+
+  const sender = senderUsername.trim().replace(/^@/, "").toLowerCase();
+
+  if (
+    !/^[a-z0-9._-]{1,32}$/.test(sender) ||
+    !messageId.trim() ||
+    messageId.length > 120
+  ) {
+    throw new Error("Invalid message details.");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/chat/messages/${encodeURIComponent(sender)}/${encodeURIComponent(messageId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+    },
+  );
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    throw new Error(
+      typeof result?.error === "string"
+        ? result.error
+        : "Message could not be deleted.",
+    );
+  }
+}
 export async function sendMessage(userId: string, conversationId: string, message: Record<string, unknown>) {
   const response = await fetch(`${API_URL}/api/messages/${userId}`, {
     method: "POST",
