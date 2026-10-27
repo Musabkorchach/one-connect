@@ -5,6 +5,7 @@ import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, IconButton, EmptyState, cx } from "./ui";
 import { IconChat, IconSearch, IconCheck, IconDoubleCheck, IconImage, IconFile, IconClose } from "./icons";
 import { timeAgo, type Conversation } from "@/lib/connect/data";
+import { GroupsPanel } from "./groups-panel";
 
 export function ChatsView({ onOpen }: { onOpen: (username: string) => void }) {
   const { t, chats, lang } = useConnect();
@@ -48,6 +49,7 @@ export function ChatsView({ onOpen }: { onOpen: (username: string) => void }) {
         </div>
       )}
 
+      <GroupsPanel query={query} />
       {filtered.length === 0 ? (
         <EmptyState
           icon={<IconChat className="h-7 w-7" />}

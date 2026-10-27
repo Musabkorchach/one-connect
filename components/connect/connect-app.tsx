@@ -15,6 +15,7 @@ import { CallsView } from "./calls-view";
 import { EmailsView } from "./emails-view";
 import { ProfileView } from "./profile-view";
 import type { TabId } from "@/lib/connect/data";
+import { GroupProvider } from "@/contexts/group-context";
 
 const CALL_CONFIGURATION: RTCConfiguration = {
   iceServers: [
@@ -110,7 +111,9 @@ function AppInner() {
 export function ConnectApp() {
   return (
     <ConnectProvider>
-      <AppInner />
+      <GroupProvider>
+        <AppInner />
+      </GroupProvider>
     </ConnectProvider>
   );
 }
