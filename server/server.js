@@ -101,6 +101,19 @@ await groupMessagesCollection.createIndex(
   { groupId: 1, senderUsername: 1, id: 1 },
   { unique: true, name: "unique_group_sender_message" },
 );
+const groupMediaBucket = new GridFSBucket(db, {
+  bucketName: "group_media",
+});
+
+const groupMediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 1,
+    fields: 1,
+    parts: 3,
+  },
+});
 const messagesCollection = db.collection("messages");
 await messagesCollection.createIndex(
   { senderUsername: 1, id: 1 },
@@ -305,17 +318,155 @@ function requireSession(req, res, next) {
   next();
 }
 
-function groupForClient(group) {
-  return {
-    id: group._id.toString(),
-    name: group.name,
-    ownerUsername: group.ownerUsername,
-    members: group.members,
-    createdAt: group.createdAt,
-    updatedAt: group.updatedAt,
-    unreadCount: 0,
-  };
+async function requireGroupMember(req, res, next) {
+  const username = normalizeMessagingUsername(req.user.piUsername);
+  const groupId = req.params.groupId;
+
+  if (!username) {
+    return res.status(401).json({ error: "Invalid account" });
+  }
+
+  if (
+    typeof groupId !== "string" ||
+    !/^[a-f0-9]{24}$/.test(groupId)
+  ) {
+    return res.status(400).json({ error: "Invalid group ID" });
+  }
+
+  try {
+    const group = await groupsCollection.findOne({
+      _id: new ObjectId(groupId),
+      members: username,
+    });
+
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    req.chatGroup = group;
+    req.groupUsername = username;
+    next();
+  } catch (error) {
+    console.error("[GROUP MEMBERSHIP ERROR]", error);
+    return res.status(500).json({
+      error: "Group membership could not be verified",
+    });
+  }
 }
+
+app.post(
+  "/api/groups/:groupId/media",
+  requireSession,
+  requireGroupMember,
+  (req, res) => {
+    groupMediaUpload.single("file")(req, res, async (uploadError) => {
+      if (uploadError) {
+        return res.status(
+          uploadError.code === "LIMIT_FILE_SIZE" ? 413 : 400,
+        ).json({
+          error: uploadError.code === "LIMIT_FILE_SIZE"
+            ? "Media must be 25 MB or smaller"
+            : "Invalid media upload",
+        });
+      }
+
+      const kind = req.body?.kind;
+      const file = req.file;
+
+      if (!["image", "file", "video", "voice"].includes(kind)) {
+        return res.status(400).json({ error: "Invalid media kind" });
+      }
+
+      if (!file || !file.buffer?.length || file.size <= 0) {
+        return res.status(400).json({ error: "Media file is required" });
+      }
+
+      const maxSize =
+        (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+
+      if (file.size > maxSize) {
+        return res.status(413).json({
+          error: kind === "image" || kind === "voice"
+            ? "Images and voice messages must be 5 MB or smaller"
+            : "Videos and files must be 25 MB or smaller",
+        });
+      }
+
+      const mimeType =
+        kind === "image"
+          ? detectChatImageType(file.buffer)
+          : kind === "video"
+            ? detectChatVideoType(file.buffer)
+            : kind === "voice"
+              ? detectChatAudioType(file.buffer)
+              : "application/octet-stream";
+
+      if (!mimeType) {
+        return res.status(415).json({
+          error: "Unsupported media format",
+        });
+      }
+
+      const fileName = file.originalname
+        .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
+        .slice(0, 120) || kind;
+
+      let uploadStream;
+
+      try {
+        const groupId = req.chatGroup._id.toString();
+
+        // Recheck membership after receiving the file.
+        const group = await groupsCollection.findOne({
+          _id: req.chatGroup._id,
+          members: req.groupUsername,
+        });
+
+        if (!group) {
+          return res.status(404).json({ error: "Group not found" });
+        }
+
+        uploadStream = groupMediaBucket.openUploadStream(fileName, {
+          metadata: {
+            groupId,
+            ownerUserId: req.user.userId,
+            senderUsername: req.groupUsername,
+            kind,
+            mimeType,
+            uploadedAt: Date.now(),
+          },
+        });
+
+        await new Promise((resolve, reject) => {
+          uploadStream.once("error", reject);
+          uploadStream.once("finish", resolve);
+          uploadStream.end(file.buffer);
+        });
+
+        return res.status(201).json({
+          mediaId: uploadStream.id.toString(),
+          groupId,
+          kind,
+          fileName,
+          mimeType,
+          fileSize: file.size,
+        });
+      } catch (error) {
+        if (uploadStream) {
+          await uploadStream.abort().catch(() => {});
+        }
+
+        console.error("[GROUP MEDIA UPLOAD ERROR]", error);
+
+        if (!res.headersSent) {
+          return res.status(500).json({
+            error: "Group media could not be uploaded",
+          });
+        }
+      }
+    });
+  },
+);
 
 app.post("/api/groups", requireSession, async (req, res) => {
   const ownerUsername = normalizeMessagingUsername(req.user.piUsername);
@@ -441,6 +592,124 @@ app.get("/api/groups", requireSession, async (req, res) => {
   }
 });
 
+app.get(
+  "/api/groups/:groupId/media/:mediaId",
+  requireSession,
+  requireGroupMember,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+
+    const { mediaId } = req.params;
+    const groupId = req.chatGroup._id.toString();
+
+    if (!/^[a-f0-9]{24}$/.test(mediaId)) {
+      return res.status(400).json({ error: "Invalid media ID" });
+    }
+
+    try {
+      const id = new ObjectId(mediaId);
+
+      const media = await groupMediaBucket.find({
+        _id: id,
+        "metadata.groupId": groupId,
+      }).next();
+
+      if (!media) {
+        return res.status(404).json({ error: "Media not found" });
+      }
+
+      const message = await groupMessagesCollection.findOne({
+        groupId,
+        mediaId,
+        senderUsername: media.metadata?.senderUsername,
+        kind: media.metadata?.kind,
+        deletedFor: { $ne: req.groupUsername },
+      });
+
+      if (!message) {
+        return res.status(404).json({ error: "Media not found" });
+      }
+
+      const kind = media.metadata.kind;
+      const mimeType = media.metadata.mimeType;
+
+      const allowedTypes = {
+        image: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        video: ["video/mp4", "video/webm"],
+        voice: ["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"],
+        file: ["application/octet-stream"],
+      };
+
+      const maxSize =
+        (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+
+      if (
+        !Object.hasOwn(allowedTypes, kind) ||
+        !allowedTypes[kind].includes(mimeType) ||
+        !Number.isSafeInteger(media.length) ||
+        media.length <= 0 ||
+        media.length > maxSize
+      ) {
+        return res.status(415).json({ error: "Invalid media format" });
+      }
+
+      const encodedName = encodeURIComponent(
+        media.filename || kind,
+      ).replace(
+        /['()*]/g,
+        (character) =>
+          `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+      );
+
+      res.set({
+        "Content-Type": mimeType,
+        "Content-Length": String(media.length),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition":
+          `${kind === "file" ? "attachment" : "inline"}; ` +
+          `filename="media"; filename*=UTF-8''${encodedName}`,
+      });
+
+      const downloadStream = groupMediaBucket.openDownloadStream(id);
+
+      downloadStream.on("error", (error) => {
+        console.error("[GROUP MEDIA READ ERROR]", error);
+
+        if (!res.headersSent) {
+          res.removeHeader("Content-Length");
+          res.removeHeader("Content-Disposition");
+          res.status(500).end();
+        } else {
+          res.destroy();
+        }
+      });
+
+      res.on("close", () => downloadStream.destroy());
+      downloadStream.pipe(res);
+    } catch (error) {
+      console.error("[GROUP MEDIA LOAD ERROR]", error);
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          error: "Group media could not be loaded",
+        });
+      }
+    }
+  },
+);
+
+function groupForClient(group) {
+  return {
+    id: group._id.toString(),
+    name: group.name,
+    ownerUsername: group.ownerUsername,
+    members: group.members,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+    unreadCount: 0,
+  };
+}
+
 function groupMessageForClient(message) {
   return {
     id: message.id,
@@ -450,6 +719,10 @@ function groupMessageForClient(message) {
     text: message.text,
     at: message.at,
     readBy: message.readBy || [],
+    mediaId: message.mediaId,
+    fileName: message.fileName,
+    mimeType: message.mimeType,
+    fileSize: message.fileSize,
   };
 }
 
@@ -518,97 +791,131 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
   }
 });
 
-app.post("/api/groups/:groupId/messages", requireSession, async (req, res) => {
-  const senderUsername = normalizeMessagingUsername(req.user.piUsername);
-  const groupId = req.params.groupId;
-  const data = req.body;
+app.post(
+  "/api/groups/:groupId/messages",
+  requireSession,
+  requireGroupMember,
+  async (req, res) => {
+    const senderUsername = req.groupUsername;
+    const group = req.chatGroup;
+    const groupId = group._id.toString();
+    const data = req.body;
 
-  if (!senderUsername) {
-    return res.status(401).json({ error: "Invalid account" });
-  }
-
-  if (!/^[a-f0-9]{24}$/.test(groupId)) {
-    return res.status(400).json({ error: "Invalid group ID" });
-  }
-
-  if (
-    !data ||
-    typeof data.id !== "string" ||
-    !data.id.trim() ||
-    data.id.length > 120 ||
-    data.kind !== "text" ||
-    typeof data.text !== "string" ||
-    !data.text.trim() ||
-    data.text.length > 2000
-  ) {
-    return res.status(400).json({ error: "Invalid group message" });
-  }
-
-  try {
-    const group = await groupsCollection.findOne({
-      _id: new ObjectId(groupId),
-      members: senderUsername,
-    });
-
-    if (!group) {
-      return res.status(404).json({ error: "Group not found" });
+    if (
+      !data ||
+      typeof data.id !== "string" ||
+      !data.id.trim() ||
+      data.id.length > 120 ||
+      !["text", "image", "file", "video", "voice"].includes(data.kind) ||
+      typeof data.text !== "string" ||
+      data.text.length > 2000 ||
+      (data.kind === "text" && !data.text.trim())
+    ) {
+      return res.status(400).json({ error: "Invalid group message" });
     }
 
-    const identity = {
-      groupId,
-      senderUsername,
-      id: data.id,
-    };
+    if (
+      data.kind !== "text" &&
+      (
+        typeof data.mediaId !== "string" ||
+        !/^[a-f0-9]{24}$/.test(data.mediaId)
+      )
+    ) {
+      return res.status(400).json({ error: "Invalid media ID" });
+    }
 
-    let message = await groupMessagesCollection.findOne(identity);
-    let created = false;
-
-    if (!message) {
-      const candidate = {
-        _id: new ObjectId(),
-        ...identity,
-        kind: "text",
-        text: data.text.trim(),
-        at: Date.now(),
-        readBy: [senderUsername],
-        deletedFor: [],
+    try {
+      const identity = {
+        groupId,
+        senderUsername,
+        id: data.id,
       };
 
-      try {
-        await groupMessagesCollection.insertOne(candidate);
-        message = candidate;
-        created = true;
-      } catch (error) {
-        if (error?.code !== 11000) throw error;
+      let message = await groupMessagesCollection.findOne(identity);
+      let created = false;
 
-        message = await groupMessagesCollection.findOne(identity);
-        if (!message) throw error;
+      if (!message) {
+        let mediaFields = {};
+
+        if (data.kind !== "text") {
+          const media = await groupMediaBucket.find({
+            _id: new ObjectId(data.mediaId),
+            "metadata.groupId": groupId,
+            "metadata.ownerUserId": req.user.userId,
+            "metadata.senderUsername": senderUsername,
+            "metadata.kind": data.kind,
+          }).next();
+
+          const maxSize =
+            (data.kind === "image" || data.kind === "voice" ? 5 : 25) *
+            1024 * 1024;
+
+          if (
+            !media ||
+            !Number.isSafeInteger(media.length) ||
+            media.length <= 0 ||
+            media.length > maxSize
+          ) {
+            return res.status(400).json({
+              error: "Media is unavailable or does not match this message",
+            });
+          }
+
+          mediaFields = {
+            mediaId: media._id.toString(),
+            fileName: media.filename,
+            mimeType: media.metadata.mimeType,
+            fileSize: media.length,
+          };
+        }
+
+        const candidate = {
+          _id: new ObjectId(),
+          ...identity,
+          kind: data.kind,
+          text: data.text.trim(),
+          ...mediaFields,
+          at: Date.now(),
+          readBy: [senderUsername],
+          deletedFor: [],
+        };
+
+        try {
+          await groupMessagesCollection.insertOne(candidate);
+          message = candidate;
+          created = true;
+        } catch (error) {
+          if (error?.code !== 11000) throw error;
+
+          message = await groupMessagesCollection.findOne(identity);
+          if (!message) throw error;
+        }
       }
-    }
 
-    await groupsCollection.updateOne(
-      { _id: group._id },
-      { $max: { updatedAt: message.at } },
-    );
+      await groupsCollection.updateOne(
+        { _id: group._id },
+        { $max: { updatedAt: message.at } },
+      );
 
-    const result = groupMessageForClient(message);
+      const result = groupMessageForClient(message);
 
-    for (const username of group.members) {
-      io.to(`peer:${username}`).emit("group:message", {
+      for (const username of group.members) {
+        io.to(`peer:${username}`).emit("group:message", {
+          message: result,
+        });
+      }
+
+      return res.status(created ? 201 : 200).json({
         message: result,
       });
+    } catch (error) {
+      console.error("[GROUP MESSAGE SEND ERROR]", error);
+      return res.status(500).json({
+        error: "Group message could not be sent",
+      });
     }
-
-    return res.status(created ? 201 : 200).json({
-      message: result,
-    });
-  } catch (error) {
-    console.error("[GROUP MESSAGE SEND ERROR]", error);
-    return res.status(500).json({
-      error: "Group message could not be sent",
-    });
-  }
-});
+  },
+);
 
 app.post("/api/groups/:groupId/read", requireSession, async (req, res) => {
   const username = normalizeMessagingUsername(req.user.piUsername);

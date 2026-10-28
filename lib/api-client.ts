@@ -1269,14 +1269,20 @@ export interface GroupRecord {
   unreadCount: number;
 }
 
+export type GroupMediaKind = "image" | "file" | "video" | "voice";
+
 export interface GroupMessageRecord {
   id: string;
   groupId: string;
   senderUsername: string;
-  kind: "text";
+  kind: "text" | GroupMediaKind;
   text: string;
   at: number;
   readBy: string[];
+  mediaId?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
 }
 
 export interface GroupHistoryPage {
@@ -1436,4 +1442,156 @@ export function onGroupEvent<K extends keyof GroupEventMap>(
       groupListeners.delete(event);
     }
   };
+}
+
+export interface GroupMediaRecord {
+  mediaId: string;
+  groupId: string;
+  kind: GroupMediaKind;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+}
+
+function groupMediaTypes(kind: GroupMediaKind): string[] {
+  switch (kind) {
+    case "image":
+      return ["image/png", "image/jpeg", "image/gif", "image/webp"];
+    case "video":
+      return ["video/mp4", "video/webm"];
+    case "voice":
+      return ["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"];
+    case "file":
+      return ["application/octet-stream"];
+  }
+}
+
+export async function uploadGroupMedia(
+  sessionToken: string,
+  groupId: string,
+  kind: GroupMediaKind,
+  file: File,
+  signal?: AbortSignal,
+): Promise<GroupMediaRecord> {
+  if (!sessionToken) throw new Error("Authentication required");
+  if (!/^[a-f0-9]{24}$/.test(groupId)) {
+    throw new Error("Invalid group ID");
+  }
+
+  const maxSize =
+    (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+
+  if (!file.size || file.size > maxSize) {
+    throw new Error(
+      `Media must be between 1 byte and ${maxSize / 1024 / 1024} MB`,
+    );
+  }
+
+  const formData = new FormData();
+  formData.append("kind", kind);
+  formData.append("file", file);
+
+  const response = await fetch(
+    `${API_URL}/api/groups/${encodeURIComponent(groupId)}/media`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: formData,
+      signal,
+    },
+  );
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      typeof result?.error === "string"
+        ? result.error
+        : `Media upload failed (${response.status})`,
+    );
+  }
+
+  if (
+    !result ||
+    typeof result.mediaId !== "string" ||
+    !/^[a-f0-9]{24}$/.test(result.mediaId) ||
+    result.groupId !== groupId ||
+    result.kind !== kind ||
+    typeof result.fileName !== "string" ||
+    !groupMediaTypes(kind).includes(result.mimeType) ||
+    !Number.isSafeInteger(result.fileSize) ||
+    result.fileSize <= 0 ||
+    result.fileSize > maxSize
+  ) {
+    throw new Error("Invalid media upload response");
+  }
+
+  return result;
+}
+
+export async function fetchGroupMedia(
+  sessionToken: string,
+  groupId: string,
+  mediaId: string,
+  kind: GroupMediaKind,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (!sessionToken) throw new Error("Authentication required");
+  if (
+    !/^[a-f0-9]{24}$/.test(groupId) ||
+    !/^[a-f0-9]{24}$/.test(mediaId)
+  ) {
+    throw new Error("Invalid media details");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/groups/${encodeURIComponent(groupId)}/media/${encodeURIComponent(mediaId)}`,
+    {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Media load failed (${response.status})`);
+  }
+
+  const blob = await response.blob();
+  const maxSize =
+    (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+
+  if (
+    !blob.size ||
+    blob.size > maxSize ||
+    !groupMediaTypes(kind).includes(blob.type)
+  ) {
+    throw new Error("Invalid media response");
+  }
+
+  return blob;
+}
+
+export function sendGroupMediaMessage(
+  sessionToken: string,
+  groupId: string,
+  id: string,
+  media: GroupMediaRecord,
+  text = "",
+): Promise<{ message: GroupMessageRecord }> {
+  if (media.groupId !== groupId) {
+    throw new Error("Media belongs to a different group");
+  }
+
+  return groupRequest(
+    `/api/groups/${encodeURIComponent(groupId)}/messages`,
+    sessionToken,
+    "POST",
+    {
+      id,
+      kind: media.kind,
+      text,
+      mediaId: media.mediaId,
+    },
+  );
 }
