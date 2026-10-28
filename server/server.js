@@ -2286,6 +2286,118 @@ app.delete(
 // WebSocket handlers
 const liveCallsById = new Map();
 const liveCallIdByUsername = new Map();
+const MAX_GROUP_CALL_PARTICIPANTS = 5;
+
+const groupCallsById = new Map();
+const groupCallIdByGroup = new Map();
+const groupCallIdByUsername = new Map();
+
+function groupCallForClient(call) {
+  return {
+    callId: call.callId,
+    groupId: call.groupId,
+    groupName: call.groupName,
+    hostUsername: call.hostUsername,
+    kind: call.kind,
+    participants: [...call.participants.keys()],
+    maxParticipants: MAX_GROUP_CALL_PARTICIPANTS,
+  };
+}
+
+function removeGroupCallParticipant(
+  callId,
+  username,
+  socketId,
+  reason = "left",
+) {
+  const call = groupCallsById.get(callId);
+  const participant = call?.participants.get(username);
+
+  // Disconnecting another device must not remove the active device.
+  if (!call || !participant || participant.socketId !== socketId) return;
+
+  call.participants.delete(username);
+    if (call.links) {
+    for (const [key, link] of call.links) {
+      if (link.offerer === username || link.answerer === username) {
+        call.links.delete(key);
+      }
+    }
+  }
+
+  if (groupCallIdByUsername.get(username) === callId) {
+    groupCallIdByUsername.delete(username);
+  }
+
+  io.to(socketId).emit("group-call:left", {
+    callId,
+    groupId: call.groupId,
+    reason,
+  });
+
+  if (call.participants.size === 0) {
+    finishGroupCall(callId, "ended");
+    return;
+  }
+
+  if (call.hostUsername === username) {
+    call.hostUsername = call.participants.keys().next().value;
+  }
+
+  clearTimeout(call.idleTimer);
+  call.idleTimer = null;
+
+  if (call.participants.size === 1) {
+    call.idleTimer = setTimeout(() => {
+      if (
+        groupCallsById.get(callId) === call &&
+        call.participants.size === 1
+      ) {
+        finishGroupCall(callId, "alone");
+      }
+    }, 30000);
+  }
+
+  const event = {
+    ...groupCallForClient(call),
+    username,
+    reason,
+  };
+
+  for (const remaining of call.participants.values()) {
+    io.to(remaining.socketId).emit("group-call:participant-left", event);
+  }
+}
+
+function finishGroupCall(callId, reason = "ended") {
+  const call = groupCallsById.get(callId);
+  if (!call) return;
+
+  clearTimeout(call.ringTimer);
+  clearTimeout(call.idleTimer);
+
+  groupCallsById.delete(callId);
+
+  if (groupCallIdByGroup.get(call.groupId) === callId) {
+    groupCallIdByGroup.delete(call.groupId);
+  }
+
+  for (const username of call.participants.keys()) {
+    if (groupCallIdByUsername.get(username) === callId) {
+      groupCallIdByUsername.delete(username);
+    }
+  }
+
+  const event = {
+    callId,
+    groupId: call.groupId,
+    reason,
+  };
+
+  for (const username of call.members) {
+    io.to(`peer:${username}`).emit("group-call:ended", event);
+  }
+}
 function finishLiveCall(callId, reason = "ended") {
   const call = liveCallsById.get(callId);
   if (!call) return;
@@ -2668,7 +2780,443 @@ if (kind === "file" || kind === "video" || kind === "voice") {
     }
   });
 
-    socket.on("call:initiate", (data = {}) => {
+    socket.on("group-call:signal", (data = {}) => {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+
+    const { callId } = data;
+    const to = normalizeMessagingUsername(data.to);
+    const session = userSessions.get(socket.sessionToken);
+
+    if (
+      !session ||
+      session.expiresAt <= Date.now() ||
+      typeof callId !== "string" ||
+      !to ||
+      to === messagingUsername
+    ) return;
+
+    const call = groupCallsById.get(callId);
+    const sender = call?.participants.get(messagingUsername);
+    const recipient = call?.participants.get(to);
+
+    if (
+      !call ||
+      !sender ||
+      sender.socketId !== socket.id ||
+      !recipient
+    ) return;
+
+    const hasDescription = data.description !== undefined;
+    const hasCandidate = data.candidate !== undefined;
+
+    if (hasDescription === hasCandidate) return;
+
+    const pairKey = [messagingUsername, to].sort().join(":");
+    if (!call.links) call.links = new Map();
+
+    if (hasDescription) {
+      const description = data.description;
+
+      if (
+        !description ||
+        (description.type !== "offer" && description.type !== "answer") ||
+        typeof description.sdp !== "string" ||
+        !description.sdp.length ||
+        description.sdp.length > 100000
+      ) return;
+
+      const link = call.links.get(pairKey);
+
+      if (description.type === "offer") {
+        const order = [...call.participants.keys()];
+
+        // The newer participant offers to the existing participant.
+        if (
+          order.indexOf(messagingUsername) <= order.indexOf(to) ||
+          link
+        ) return;
+
+        call.links.set(pairKey, {
+          offerer: messagingUsername,
+          answerer: to,
+          answered: false,
+        });
+      } else {
+        if (
+          !link ||
+          link.offerer !== to ||
+          link.answerer !== messagingUsername ||
+          link.answered
+        ) return;
+
+        link.answered = true;
+      }
+
+      io.to(recipient.socketId).emit("group-call:signal", {
+        callId,
+        from: messagingUsername,
+        description: {
+          type: description.type,
+          sdp: description.sdp,
+        },
+      });
+
+      return;
+    }
+
+    const candidate = data.candidate;
+
+    if (
+      !candidate ||
+      typeof candidate.candidate !== "string" ||
+      candidate.candidate.length > 8192 ||
+      (
+        candidate.sdpMid != null &&
+        (
+          typeof candidate.sdpMid !== "string" ||
+          candidate.sdpMid.length > 256
+        )
+      ) ||
+      (
+        candidate.sdpMLineIndex != null &&
+        (
+          !Number.isInteger(candidate.sdpMLineIndex) ||
+          candidate.sdpMLineIndex < 0 ||
+          candidate.sdpMLineIndex > 65535
+        )
+      ) ||
+      (
+        candidate.usernameFragment != null &&
+        (
+          typeof candidate.usernameFragment !== "string" ||
+          candidate.usernameFragment.length > 256
+        )
+      )
+    ) return;
+
+    io.to(recipient.socketId).emit("group-call:signal", {
+      callId,
+      from: messagingUsername,
+      candidate: {
+        candidate: candidate.candidate,
+        sdpMid: candidate.sdpMid ?? null,
+        sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+        ...(candidate.usernameFragment != null
+          ? { usernameFragment: candidate.usernameFragment }
+          : {}),
+      },
+    });
+  });
+
+    let pendingGroupCallRequest = null;
+    socket.on("group-call:leave", (data = {}) => {
+    const callId = data?.callId;
+
+    if (
+      typeof callId !== "string" ||
+      !/^[a-zA-Z0-9_-]{16,80}$/.test(callId)
+    ) return;
+
+  if (pendingGroupCallRequest?.callId === callId) {
+    pendingGroupCallRequest.cancelled = true;
+  }
+
+    removeGroupCallParticipant(
+      callId,
+      messagingUsername,
+      socket.id,
+      "left",
+    );
+  });
+
+    socket.on("group-call:join", async (data = {}) => {
+    const callId = data?.callId;
+
+    const reject = (reason) => {
+      socket.emit("group-call:error", {
+        callId: typeof callId === "string" ? callId : undefined,
+        reason,
+      });
+    };
+
+    const validSession = () => {
+      const session = userSessions.get(socket.sessionToken);
+
+      return (
+        socket.connected &&
+        session &&
+        session.expiresAt > Date.now() &&
+        session.userId === socket.userId
+      );
+    };
+
+    if (!validSession()) {
+      reject("unauthorized");
+      return;
+    }
+
+    if (
+      typeof callId !== "string" ||
+      !/^[a-zA-Z0-9_-]{16,80}$/.test(callId)
+    ) {
+      reject("invalid");
+      return;
+    }
+
+    const call = groupCallsById.get(callId);
+
+    if (!call || !call.members.includes(messagingUsername)) {
+      reject("unavailable");
+      return;
+    }
+
+    if (pendingGroupCallRequest) {
+      reject("busy");
+      return;
+    }
+
+    const request = { callId, cancelled: false };
+    pendingGroupCallRequest = request;
+
+    try {
+      const group = await groupsCollection.findOne({
+        _id: new ObjectId(call.groupId),
+        members: messagingUsername,
+      });
+
+      if (request.cancelled) return;
+
+      if (!validSession()) {
+        reject("unauthorized");
+        return;
+      }
+
+      if (!group || groupCallsById.get(callId) !== call) {
+        reject("unavailable");
+        return;
+      }
+
+      const existing = call.participants.get(messagingUsername);
+
+      if (existing) {
+        if (existing.socketId === socket.id) {
+          socket.emit("group-call:joined", groupCallForClient(call));
+        } else {
+          reject("answered-elsewhere");
+        }
+        return;
+      }
+
+      if (
+        liveCallIdByUsername.has(messagingUsername) ||
+        groupCallIdByUsername.has(messagingUsername)
+      ) {
+        reject("busy");
+        return;
+      }
+
+      // No await between this check and adding the participant.
+      if (call.participants.size >= MAX_GROUP_CALL_PARTICIPANTS) {
+        reject("full");
+        return;
+      }
+
+      const previousParticipants = [...call.participants.values()];
+
+      call.participants.set(messagingUsername, {
+        socketId: socket.id,
+        joinedAt: Date.now(),
+      });
+      groupCallIdByUsername.set(messagingUsername, callId);
+
+      clearTimeout(call.ringTimer);
+      clearTimeout(call.idleTimer);
+      call.ringTimer = null;
+      call.idleTimer = null;
+
+      const event = groupCallForClient(call);
+
+      socket.emit("group-call:joined", event);
+
+      socket.to(`peer:${messagingUsername}`).emit(
+        "group-call:answered-elsewhere",
+        { callId },
+      );
+
+      for (const participant of previousParticipants) {
+        io.to(participant.socketId).emit("group-call:participant-joined", {
+          ...event,
+          username: messagingUsername,
+        });
+      }
+    } catch (error) {
+      console.error("[GROUP CALL JOIN ERROR]", error);
+      if (!request.cancelled) reject("server-error");
+    } finally {
+      if (pendingGroupCallRequest === request) {
+        pendingGroupCallRequest = null;
+      }
+    }
+  });
+
+  socket.on("group-call:start", async (data = {}) => {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+
+    const { callId, groupId, kind } = data;
+
+    const reject = (reason) => {
+      socket.emit("group-call:error", {
+        callId: typeof callId === "string" ? callId : undefined,
+        reason,
+      });
+    };
+
+    const validSession = () => {
+      const session = userSessions.get(socket.sessionToken);
+
+      return (
+        socket.connected &&
+        session &&
+        session.expiresAt > Date.now() &&
+        session.userId === socket.userId
+      );
+    };
+
+    if (!validSession()) {
+      reject("unauthorized");
+      return;
+    }
+
+    if (
+      typeof callId !== "string" ||
+      !/^[a-zA-Z0-9_-]{16,80}$/.test(callId) ||
+      typeof groupId !== "string" ||
+      !/^[a-f0-9]{24}$/.test(groupId) ||
+      (kind !== "voice" && kind !== "video")
+    ) {
+      reject("invalid");
+      return;
+    }
+
+    if (pendingGroupCallRequest) {
+      reject("busy");
+      return;
+    }
+
+    const request = { callId, cancelled: false };
+    pendingGroupCallRequest = request;
+
+    try {
+      const group = await groupsCollection.findOne({
+        _id: new ObjectId(groupId),
+        members: messagingUsername,
+      });
+
+      if (request.cancelled) return;
+      if (!validSession()) {
+        reject("unauthorized");
+        return;
+      }
+
+      if (!group) {
+        reject("not-member");
+        return;
+      }
+
+      // Check after the database request to avoid concurrent starts.
+      if (
+        liveCallIdByUsername.has(messagingUsername) ||
+        groupCallIdByUsername.has(messagingUsername)
+      ) {
+        reject("busy");
+        return;
+      }
+
+      const activeCallId = groupCallIdByGroup.get(groupId);
+
+      if (activeCallId) {
+        const activeCall = groupCallsById.get(activeCallId);
+
+        if (!activeCall) {
+          groupCallIdByGroup.delete(groupId);
+        } else {
+          if (!activeCall.members.includes(messagingUsername)) {
+            reject("not-member");
+            return;
+          }
+
+          if (
+            activeCall.participants.size >=
+            MAX_GROUP_CALL_PARTICIPANTS
+          ) {
+            reject("full");
+            return;
+          }
+
+          // Close the new local attempt before offering the existing call.
+          reject("join-existing");
+
+          socket.emit(
+            "group-call:incoming",
+            groupCallForClient(activeCall),
+          );
+          return;
+        }
+      }
+
+      if (groupCallsById.has(callId) || liveCallsById.has(callId)) {
+        reject("invalid");
+        return;
+      }
+
+      const call = {
+        callId,
+        groupId,
+        groupName: group.name,
+        hostUsername: messagingUsername,
+        kind,
+        members: [...group.members],
+        participants: new Map([
+          [
+            messagingUsername,
+            { socketId: socket.id, joinedAt: Date.now() },
+          ],
+        ]),
+        ringTimer: null,
+        idleTimer: null,
+      };
+
+      groupCallsById.set(callId, call);
+      groupCallIdByGroup.set(groupId, callId);
+      groupCallIdByUsername.set(messagingUsername, callId);
+
+      call.ringTimer = setTimeout(() => {
+        const current = groupCallsById.get(callId);
+
+        if (current === call && current.participants.size < 2) {
+          finishGroupCall(callId, "no-answer");
+        }
+      }, 45000);
+
+      const event = groupCallForClient(call);
+
+      socket.emit("group-call:started", event);
+
+      for (const username of call.members) {
+        if (username !== messagingUsername) {
+          io.to(`peer:${username}`).emit("group-call:incoming", event);
+        }
+      }
+        } catch (error) {
+      console.error("[GROUP CALL START ERROR]", error);
+      if (!request.cancelled) reject("server-error");
+    } finally {
+      if (pendingGroupCallRequest === request) {
+        pendingGroupCallRequest = null;
+      }
+    }
+  });
+  socket.on("call:initiate", (data = {}) => {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       return;
     }
@@ -2701,8 +3249,11 @@ if (kind === "file" || kind === "video" || kind === "voice") {
 
     if (
       liveCallsById.has(callId) ||
+      groupCallsById.has(callId) ||
       liveCallIdByUsername.has(messagingUsername) ||
-      liveCallIdByUsername.has(to)
+      liveCallIdByUsername.has(to) ||
+      groupCallIdByUsername.has(messagingUsername) ||
+      groupCallIdByUsername.has(to)
     ) {
       reject("busy");
       return;
@@ -2945,6 +3496,16 @@ if (kind === "file" || kind === "video" || kind === "voice") {
     finishLiveCall(callId, reason);
   });
   socket.on("disconnect", () => {
+    const groupCallId = groupCallIdByUsername.get(messagingUsername);
+
+    if (groupCallId) {
+      removeGroupCallParticipant(
+        groupCallId,
+        messagingUsername,
+        socket.id,
+        "disconnected",
+      );
+    }
     const callId = liveCallIdByUsername.get(messagingUsername);
     const call = callId ? liveCallsById.get(callId) : null;
 
