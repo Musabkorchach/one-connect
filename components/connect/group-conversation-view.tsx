@@ -10,8 +10,14 @@ import {
   sendGroupMessage,
   type GroupMessageRecord,
   type GroupRecord,
+  uploadGroupMedia,
+  sendGroupMediaMessage,
+  type GroupMediaKind,
+  type GroupMediaRecord,
 } from "@/lib/api-client";
 import { IconBack, IconSend } from "./icons";
+import { GroupMedia } from "./group-media";
+import { GroupAttachments } from "./group-attachments";
 
 function messageKey(message: GroupMessageRecord) {
   return `${message.senderUsername}:${message.id}`;
@@ -89,6 +95,13 @@ function GroupConversation({
   const aliveRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const sendingRef = useRef(false);
+  const mediaRetryRef = useRef<{
+    id: string;
+    file: File;
+    kind: GroupMediaKind;
+    text: string;
+    media: GroupMediaRecord | null;
+  } | null>(null);
   const retryRef = useRef<{ id: string; text: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -108,7 +121,22 @@ function GroupConversation({
       typeof message.id === "string" &&
       typeof message.senderUsername === "string" &&
       members.includes(message.senderUsername) &&
-      message.kind === "text" &&
+      ["text", "image", "file", "video", "voice"].includes(message.kind) &&
+      (
+        message.kind === "text" ||
+        (
+          typeof message.mediaId === "string" &&
+          /^[a-f0-9]{24}$/.test(message.mediaId) &&
+          typeof message.fileName === "string" &&
+          typeof message.mimeType === "string" &&
+          typeof message.fileSize === "number" &&
+          Number.isSafeInteger(message.fileSize) &&
+          message.fileSize > 0 &&
+          message.fileSize <= (
+            message.kind === "image" || message.kind === "voice" ? 5 : 25
+          ) * 1024 * 1024
+        )
+      ) &&
       typeof message.text === "string" &&
       Number.isFinite(message.at) &&
       Array.isArray(message.readBy) &&
@@ -296,6 +324,77 @@ function GroupConversation({
     }
   };
 
+    const sendMedia = async (
+    kind: GroupMediaKind,
+    file: File,
+  ): Promise<boolean> => {
+    if (!aliveRef.current || sendingRef.current) return false;
+
+    sendingRef.current = true;
+    setSending(true);
+    setError(null);
+
+    try {
+      let pending = mediaRetryRef.current;
+
+      if (!pending || pending.file !== file || pending.kind !== kind) {
+        pending = {
+          id: crypto.randomUUID(),
+          file,
+          kind,
+          text: text.trim(),
+          media: null,
+        };
+        mediaRetryRef.current = pending;
+      }
+
+      if (!pending.media) {
+        pending.media = await uploadGroupMedia(
+          token,
+          group.id,
+          kind,
+          file,
+        );
+      }
+
+      if (!aliveRef.current) return false;
+
+      const result = await sendGroupMediaMessage(
+        token,
+        group.id,
+        pending.id,
+        pending.media,
+        pending.text,
+      );
+
+      if (!aliveRef.current) return false;
+
+      followLatestRef.current = true;
+      setMessages((current) => mergeMessages(current, [result.message]));
+
+      const caption = pending.text;
+      setText((current) => current.trim() === caption ? "" : current);
+      mediaRetryRef.current = null;
+
+      return true;
+    } catch (error) {
+      if (aliveRef.current) {
+        setError(
+          error instanceof Error
+            ? error.message
+            : arabic
+              ? "تعذر إرسال الوسائط"
+              : "Media could not be sent",
+        );
+      }
+
+      return false;
+    } finally {
+      sendingRef.current = false;
+      if (aliveRef.current) setSending(false);
+    }
+  };
+
   const send = async () => {
     const body = text.trim();
     if (!body || sendingRef.current) return;
@@ -398,9 +497,15 @@ function GroupConversation({
                 <p className="mb-1 text-xs font-semibold" dir="ltr">
                   @{message.senderUsername}
                 </p>
-                <p className="whitespace-pre-wrap break-words text-sm">
-                  {message.text}
-                </p>
+                {message.kind !== "text" && (
+                  <GroupMedia message={message} />
+                )}
+
+                {message.text && (
+                  <p className="whitespace-pre-wrap break-words text-sm">
+                    {message.text}
+                  </p>
+                )}
                 <p className="mt-1 text-end text-[10px] opacity-70">
                   {new Date(message.at).toLocaleTimeString(lang, {
                     hour: "2-digit",
@@ -420,32 +525,40 @@ function GroupConversation({
         </p>
       )}
 
-      <form
-        className="flex items-end gap-2 border-t border-border p-3 pc-safe-bottom"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void send();
-        }}
-      >
-        <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          maxLength={2000}
+            <div className="flex items-end gap-2 border-t border-border p-3 pc-safe-bottom">
+        <GroupAttachments
           disabled={sending}
-          rows={2}
-          aria-label={arabic ? "رسالة" : "Message"}
-          placeholder={arabic ? "اكتب رسالة…" : "Write a message…"}
-          className="min-w-0 flex-1 resize-none rounded-xl border border-border bg-input/70 px-3 py-2 text-sm outline-none focus:border-primary"
+          onSend={sendMedia}
         />
-        <button
-          type="submit"
-          disabled={sending || !text.trim()}
-          aria-label={arabic ? "إرسال" : "Send"}
-          className="pc-press rounded-full bg-primary p-3 text-primary-foreground disabled:opacity-50"
+
+        <form
+          className="flex min-w-0 flex-1 items-end gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void send();
+          }}
         >
-          <IconSend className="h-5 w-5" />
-        </button>
-      </form>
+          <textarea
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            maxLength={2000}
+            disabled={sending}
+            rows={2}
+            aria-label={arabic ? "رسالة" : "Message"}
+            placeholder={arabic ? "اكتب رسالة…" : "Write a message…"}
+            className="min-w-0 flex-1 resize-none rounded-xl border border-border bg-input/70 px-3 py-2 text-sm outline-none focus:border-primary"
+          />
+
+          <button
+            type="submit"
+            disabled={sending || !text.trim()}
+            aria-label={arabic ? "إرسال" : "Send"}
+            className="pc-press rounded-full bg-primary p-3 text-primary-foreground disabled:opacity-50"
+          >
+            <IconSend className="h-5 w-5" />
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
