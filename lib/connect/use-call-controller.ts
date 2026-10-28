@@ -25,8 +25,13 @@ export interface CallViewState extends CallDetails {
   cameraSwitching: boolean;
 }
 
-export function useCallController(configuration: RTCConfiguration) {
+export function useCallController(
+  configuration: RTCConfiguration,
+  isOtherCallActive: () => boolean = () => false,
+) {
   const connect = useConnect();
+  const otherCallRef = useRef(isOtherCallActive);
+  otherCallRef.current = isOtherCallActive;
   const connectRef = useRef(connect);
   connectRef.current = connect;
   const [callState, setCallState] = useState<CallViewState | null>(null);
@@ -38,7 +43,7 @@ export function useCallController(configuration: RTCConfiguration) {
   } | null>(null);
 
     const createSession = (details: CallDetails): CallSession | null => {
-    if (sessionRef.current) return null;
+    if (sessionRef.current || otherCallRef.current()) return null;
 
     const updateState = (patch: Partial<CallViewState>) => {
       setCallState((current) =>
@@ -163,7 +168,12 @@ export function useCallController(configuration: RTCConfiguration) {
 
       const current = connectRef.current;
 
-      if (existing || !current.ready || !current.profile.setupDone) {
+      if (
+        existing ||
+        otherCallRef.current() ||
+        !current.ready ||
+        !current.profile.setupDone
+      ) {
         sendCallEvent("call:end", { callId: data.callId });
         return;
       }

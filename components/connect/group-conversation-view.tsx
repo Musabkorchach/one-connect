@@ -18,6 +18,8 @@ import {
 import { IconBack, IconSend } from "./icons";
 import { GroupMedia } from "./group-media";
 import { GroupAttachments } from "./group-attachments";
+import { useGroupCallActions } from "@/contexts/group-call-actions-context";
+import { IconPhone, IconVideo } from "./icons";
 
 function messageKey(message: GroupMessageRecord) {
   return `${message.senderUsername}:${message.id}`;
@@ -83,6 +85,7 @@ function GroupConversation({
   onBack: () => void;
 }) {
   const { lang } = useConnect();
+  const startGroupCall = useGroupCallActions();
   const arabic = lang === "ar";
 
   const [messages, setMessages] = useState<GroupMessageRecord[]>([]);
@@ -443,12 +446,29 @@ function GroupConversation({
         >
           <IconBack className="h-6 w-6" />
         </button>
-        <div className="min-w-0">
+          <div className="min-w-0 flex-1">
           <h2 className="truncate font-bold">{group.name}</h2>
           <p className="text-xs text-muted-foreground">
             {group.members.length} {arabic ? "أعضاء" : "members"}
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => startGroupCall(group, "voice")}
+          aria-label={arabic ? "مكالمة صوتية جماعية" : "Group voice call"}
+          className="pc-press shrink-0 rounded-full p-2 text-turquoise"
+        >
+          <IconPhone className="h-5 w-5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => startGroupCall(group, "video")}
+          aria-label={arabic ? "مكالمة فيديو جماعية" : "Group video call"}
+          className="pc-press shrink-0 rounded-full p-2 text-turquoise"
+        >
+          <IconVideo className="h-5 w-5" />
+        </button>
       </header>
 
       <div

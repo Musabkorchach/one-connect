@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ConnectProvider, useConnect } from "@/contexts/connect-context";
 import { useCallController } from "@/lib/connect/use-call-controller";
 import { useCallRingtone } from "@/lib/connect/use-call-ringtone";
@@ -16,6 +16,10 @@ import { EmailsView } from "./emails-view";
 import { ProfileView } from "./profile-view";
 import type { TabId } from "@/lib/connect/data";
 import { GroupProvider } from "@/contexts/group-context";
+import { useGroupCallController } from "@/lib/connect/use-group-call-controller";
+import { GroupCallScreen } from "./group-call-screen";
+import { GroupCallActionsProvider } from "@/contexts/group-call-actions-context";
+
 
 const CALL_CONFIGURATION: RTCConfiguration = {
   iceServers: [
@@ -27,6 +31,7 @@ function AppInner() {
   const { ready, profile, ensureChat, contacts, t } = useConnect();
   const [tab, setTab] = useState<TabId>("chats");
   const [openChat, setOpenChat] = useState<string | null>(null);
+  const groupCallBusyRef = useRef(false);
 
   const {
     callState,
@@ -36,9 +41,24 @@ function AppInner() {
     setVideoEnabled,
     switchCamera,
     endCall,
-  } = useCallController(CALL_CONFIGURATION);
+    } = useCallController(
+    CALL_CONFIGURATION,
+    () => groupCallBusyRef.current,
+  );
+
+  const {
+    groupCallState,
+    startGroupCall,
+    acceptGroupCall,
+    endGroupCall,
+    setGroupMuted,
+    setGroupVideoEnabled,
+  } = useGroupCallController(() => Boolean(callState));
+
+  groupCallBusyRef.current = Boolean(groupCallState);
   const { ringtoneBlocked, enableRingtone } = useCallRingtone(
-    callState?.phase === "incoming",
+    callState?.phase === "incoming" ||
+      groupCallState?.phase === "incoming",
   );
 
   if (!ready) return <LoadingScreen />;
@@ -60,8 +80,9 @@ function AppInner() {
     setTab("chats");
   };
 
-  return (
-    <div className="relative mx-auto min-h-[100dvh] max-w-md bg-background">
+    return (
+    <GroupCallActionsProvider value={startGroupCall}>
+      <div className="relative mx-auto min-h-[100dvh] max-w-md bg-background">
       {tab === "chats" && <ChatsView onOpen={(u) => setOpenChat(u)} />}
       {tab === "contacts" && (
         <ContactsView onMessage={startChat} onCall={startCall} />
@@ -92,6 +113,16 @@ function AppInner() {
         />
       )}
 
+      {groupCallState && (
+        <GroupCallScreen
+          key={groupCallState.callId}
+          call={groupCallState}
+          onAccept={acceptGroupCall}
+          onEnd={endGroupCall}
+          onMutedChange={setGroupMuted}
+          onVideoEnabledChange={setGroupVideoEnabled}
+        />
+      )}
       {ringtoneBlocked && (
         <button
           type="button"
@@ -102,9 +133,10 @@ function AppInner() {
         </button>
       )}
 
-      <StorageNotice />
+            <StorageNotice />
       <ToastHost />
-    </div>
+      </div>
+    </GroupCallActionsProvider>
   );
 }
 

@@ -212,6 +212,12 @@ if (socket) disconnectSocket();
   reconnectionAttempts: 5,
 });
 
+  for (const [event, listeners] of groupCallListeners) {
+    for (const listener of listeners) {
+      socket.on(String(event), listener);
+    }
+  }
+
 for (const [event, listeners] of groupListeners) {
   for (const listener of listeners) {
     socket.on(String(event), listener);
@@ -363,6 +369,11 @@ export function disconnectSocket() {
   socket = null;
   closingSocket.removeAllListeners();
   closingSocket.disconnect();
+  const groupDisconnectListeners = groupCallListeners.get("disconnect");
+
+  for (const listener of [...(groupDisconnectListeners ?? [])]) {
+    listener("client-disconnect");
+  }
 
   const listeners = callListeners.get("disconnect");
 
@@ -1594,4 +1605,115 @@ export function sendGroupMediaMessage(
       mediaId: media.mediaId,
     },
   );
+}
+
+export interface GroupCallSnapshot {
+  callId: string;
+  groupId: string;
+  groupName: string;
+  hostUsername: string;
+  kind: "voice" | "video";
+  participants: string[];
+  maxParticipants: number;
+}
+
+export interface GroupCallSignal {
+  callId: string;
+  from: string;
+  description?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+}
+
+export interface GroupCallEventMap {
+  "group-call:incoming": GroupCallSnapshot;
+  "group-call:started": GroupCallSnapshot;
+  "group-call:joined": GroupCallSnapshot;
+  "group-call:participant-joined": GroupCallSnapshot & {
+    username: string;
+  };
+  "group-call:participant-left": GroupCallSnapshot & {
+    username: string;
+    reason: string;
+  };
+  "group-call:signal": GroupCallSignal;
+  "group-call:answered-elsewhere": { callId: string };
+  "group-call:left": {
+    callId: string;
+    groupId: string;
+    reason: string;
+  };
+  "group-call:ended": {
+    callId: string;
+    groupId: string;
+    reason: string;
+  };
+  "group-call:error": {
+    callId?: string;
+    reason: string;
+  };
+  disconnect: string;
+}
+
+const groupCallListeners = new Map<
+  keyof GroupCallEventMap,
+  Set<(data: unknown) => void>
+>();
+
+export function onGroupCallEvent<K extends keyof GroupCallEventMap>(
+  event: K,
+  callback: (data: GroupCallEventMap[K]) => void,
+): () => void {
+  const listener = (data: unknown) => {
+    callback(data as GroupCallEventMap[K]);
+  };
+
+  const listeners =
+    groupCallListeners.get(event) ?? new Set<(data: unknown) => void>();
+
+  groupCallListeners.set(event, listeners);
+  listeners.add(listener);
+
+  const attachedSocket = socket;
+  attachedSocket?.on(String(event), listener);
+
+  return () => {
+    listeners.delete(listener);
+    attachedSocket?.off(String(event), listener);
+
+    if (socket !== attachedSocket) {
+      socket?.off(String(event), listener);
+    }
+
+    if (
+      listeners.size === 0 &&
+      groupCallListeners.get(event) === listeners
+    ) {
+      groupCallListeners.delete(event);
+    }
+  };
+}
+
+interface GroupCallOutgoingEvents {
+  "group-call:start": {
+    callId: string;
+    groupId: string;
+    kind: "voice" | "video";
+  };
+  "group-call:join": { callId: string };
+  "group-call:leave": { callId: string };
+  "group-call:signal": {
+    callId: string;
+    to: string;
+    description?: RTCSessionDescriptionInit;
+    candidate?: RTCIceCandidateInit;
+  };
+}
+
+export function sendGroupCallEvent<K extends keyof GroupCallOutgoingEvents>(
+  event: K,
+  data: GroupCallOutgoingEvents[K],
+): boolean {
+  if (!socket?.connected) return false;
+  socket.emit(event, data);
+  return true;
 }
