@@ -288,14 +288,65 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // cannot complete outside the Pi CDN wrapper and would hang indefinitely.
       const parentCredentials = await requestParentCredentials();
       if (parentCredentials) {
-  const authResult = await verifyPiAuth(parentCredentials.accessToken);
+        const authResult = await verifyPiAuth(
+          parentCredentials.accessToken,
+        );
 
-  setSessionToken(authResult.sessionToken);
-  setPiUsername(authResult.piUsername || "");
-  setIsAuthenticated(true);
-  initSocket(authResult.userId, authResult.piUsername, authResult.sessionToken);
-  return;
-}
+        setSessionToken(authResult.sessionToken);
+        setPiUsername(authResult.piUsername || "");
+        setSdk(null);
+        setProducts(null);
+        setIsAuthenticated(true);
+
+        initSocket(
+          authResult.userId,
+          authResult.piUsername,
+          authResult.sessionToken,
+        );
+
+        // Purchase services are initialized separately from app login.
+        try {
+          await loadPiSDK();
+          await window.Pi.init({
+            version: "2.0",
+            sandbox: PI_NETWORK_CONFIG.SANDBOX,
+          });
+
+          await loadSDKLite();
+          const purchaseSdk = await window.SDKLite.init();
+          setSdk(purchaseSdk);
+
+          const availableProducts = await fetchProducts(purchaseSdk);
+
+          try {
+            const { purchases } = await purchaseSdk.state.restore();
+            setRestoredPurchases(purchases);
+
+            const premiumProduct = availableProducts.find(
+              (product) =>
+                product.id ===
+                PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595,
+            );
+
+            await restorePremiumEntitlement(
+              purchaseSdk,
+              purchases,
+              premiumProduct?.slug,
+              authResult.piUsername,
+            );
+          } catch (error) {
+            console.error("[PiAuth] Purchase restore failed:", error);
+            setRestoredPurchases([]);
+          }
+        } catch (error) {
+          console.error("[PiAuth] Purchase initialization failed:", error);
+          setSdk(null);
+          setProducts([]);
+          setRestoredPurchases([]);
+        }
+
+        return;
+      }
       setAuthMessage("Loading Pi SDK...");
       await loadPiSDK();
       setAuthMessage("Initializing Pi Network...");
