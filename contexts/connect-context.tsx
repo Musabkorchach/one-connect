@@ -28,6 +28,7 @@ import {
   getInternalEmails,
   onEmailEvent,
   sendInternalEmail,
+  sendExternalEmail,
   markInternalEmailRead,
   deleteInternalEmail,
   uploadEmailAttachment,
@@ -439,8 +440,7 @@ if (cRec) {
         const savedEmails = emRec ? sanitizeEmails(emRec.blob) : [];
 
         let loadedEmails = savedEmails.filter(
-          (email) =>
-            email.folder === "drafts" || email.type === "external",
+        (email) => email.folder === "drafts",
         );
 
         try {
@@ -583,8 +583,7 @@ if (cRec) {
         }
 
         const savedEmails = emailsRef.current.filter(
-          (email) =>
-            email.folder === "drafts" || email.type === "external",
+          (email) => email.folder === "drafts",
         );
 
         const next = [...savedEmails, ...serverEmails]
@@ -1462,11 +1461,6 @@ return "added";
       return false;
     }
 
-    if (emailType === "external") {
-      pushToast("External email delivery is not configured yet.", "error");
-      return false;
-    }
-
     if (!body.trim()) {
       pushToast("Please enter an email message.", "error");
       return false;
@@ -1525,7 +1519,11 @@ return "added";
         }
       }
 
-      const record = await sendInternalEmail(token, {
+      const send = emailType === "external"
+        ? sendExternalEmail
+        : sendInternalEmail;
+
+      const record = await send(token, {
         id: requestId || crypto.randomUUID(),
         recipient: target,
         subject: subject.trim() || "(no subject)",
@@ -1551,7 +1549,12 @@ return "added";
       emailsRef.current = next;
       setEmails(next);
 
-      pushToast("Email sent.", "success");
+      pushToast(
+        emailType === "external"
+          ? "Email accepted for delivery."
+          : "Email sent.",
+        "success",
+      );
       return true;
     } catch (error) {
       if (emailSessionRef.current !== token) return false;
@@ -1604,7 +1607,7 @@ return "added";
     const email = emailsRef.current.find((item) => item.id === id);
     if (!email || email.read) return;
 
-    if (email.type !== "internal" || email.folder === "drafts") {
+    if (email.folder === "drafts") {
       commitEmails(
         emailsRef.current.map((item) =>
           item.id === id ? { ...item, read: true } : item,
@@ -1642,7 +1645,7 @@ return "added";
     const email = emailsRef.current.find((item) => item.id === id);
     if (!email) return true;
 
-    if (email.type !== "internal" || email.folder === "drafts") {
+    if (email.folder === "drafts") {
       commitEmails(
         emailsRef.current.filter((item) => item.id !== id),
         true,

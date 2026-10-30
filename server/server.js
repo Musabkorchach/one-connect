@@ -9,6 +9,8 @@ import dns from "dns";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import crypto from "node:crypto";
+import { registerExternalEmailRoutes } from "./external-email-routes.js";
+import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 
 config();
 
@@ -1007,22 +1009,30 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
     }
 
     const senderUsername = normalizeMessagingUsername(req.user.piUsername);
-    const recipient = req.body?.recipient;
+    const recipient = typeof req.body?.recipient === "string"
+      ? req.body.recipient.trim().toLowerCase()
+      : "";
     const file = req.file;
 
-    if (
-      !senderUsername ||
-      typeof recipient !== "string" ||
-      !/^@[a-z0-9._-]{1,32}$/i.test(recipient)
-    ) {
+    const isInternal = /^@[a-z0-9._-]{1,32}$/.test(recipient);
+    const isExternal =
+      recipient.length <= 254 &&
+      /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(recipient);
+
+    if (!senderUsername || (!isInternal && !isExternal)) {
       return res.status(400).json({
         error: "Invalid email attachment details",
       });
     }
 
-    const recipientUsername = normalizeMessagingUsername(recipient);
+    const recipientUsername = isInternal
+      ? normalizeMessagingUsername(recipient)
+      : null;
 
-    if (!recipientUsername || recipientUsername === senderUsername) {
+    if (
+      isInternal &&
+      (!recipientUsername || recipientUsername === senderUsername)
+    ) {
       return res.status(400).json({
         error: "Invalid email recipient",
       });
@@ -1041,21 +1051,28 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
     let uploadStream;
 
     try {
-      const registered = await emailUsersCollection.findOne({
-        _id: recipientUsername,
-      });
-
-      if (!registered) {
-        return res.status(404).json({
-          error: "Recipient has not registered for One Connect email",
+      if (isInternal) {
+        const registered = await emailUsersCollection.findOne({
+          _id: recipientUsername,
         });
+
+        if (!registered) {
+          return res.status(404).json({
+            error: "Recipient has not registered for One Connect email",
+          });
+        }
       }
 
       uploadStream = emailAttachmentsBucket.openUploadStream(fileName, {
         metadata: {
           ownerUserId: req.user.userId,
           senderUsername,
-          recipientUsername,
+          ...(isInternal
+            ? { recipientUsername }
+            : {
+                ownerUsername: senderUsername,
+                externalAddress: recipient,
+              }),
           mimeType: "application/octet-stream",
           uploadedAt: new Date(),
         },
@@ -1089,6 +1106,35 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
 });
 
 function emailForUser(record, username) {
+    if (record.type === "external") {
+    if (record.ownerUsername !== username) {
+      throw new Error("External email owner does not match session");
+    }
+
+    const fromMe = record.direction === "outgoing";
+
+    return {
+      id: record._id.toString(),
+      threadId: record.threadId,
+      type: "external",
+      ownerUsername: record.ownerUsername,
+      folder: fromMe ? "sent" : "inbox",
+      fromMe,
+      senderUsername: fromMe ? username : undefined,
+      recipientUsername: fromMe ? undefined : username,
+      recipient: record.externalAddress,
+      senderName: record.externalAddress,
+      color: 0,
+      subject: record.subject,
+      body: record.body,
+      attachmentId: record.attachmentId,
+      attachmentName: record.attachmentName,
+      attachmentSize: record.attachmentSize,
+      deliveryStatus: record.deliveryStatus || "pending",
+      read: fromMe || record.recipientRead === true,
+      at: record.at,
+    };
+  }
   const fromMe = record.senderUsername === username;
 
   return {
@@ -1114,6 +1160,23 @@ function emailForUser(record, username) {
   };
 }
 
+await registerMailgunInboundRoutes({
+  app,
+  db,
+  io,
+  emailForUser,
+  emailAttachmentsBucket,
+});
+
+registerExternalEmailRoutes({
+  app,
+  db,
+  io,
+  requireSession,
+  normalizeMessagingUsername,
+  emailForUser,
+  emailAttachmentsBucket,
+});
 app.post("/api/emails/internal", requireSession, async (req, res) => {
   const data = req.body;
   const senderUsername = normalizeMessagingUsername(req.user.piUsername);
@@ -1306,15 +1369,24 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
   try {
     const email = await emailsCollection.findOne({
       _id: new ObjectId(emailId),
-      type: "internal",
       $or: [
         {
-          senderUsername: username,
-          senderDeleted: { $ne: true },
+          type: "internal",
+          $or: [
+            {
+              senderUsername: username,
+              senderDeleted: { $ne: true },
+            },
+            {
+              recipientUsername: username,
+              recipientDeleted: { $ne: true },
+            },
+          ],
         },
         {
-          recipientUsername: username,
-          recipientDeleted: { $ne: true },
+          type: "external",
+          ownerUsername: username,
+          senderDeleted: { $ne: true },
         },
       ],
     });
@@ -1331,8 +1403,15 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
 
     const attachment = await emailAttachmentsBucket.find({
       _id: id,
-      "metadata.senderUsername": email.senderUsername,
-      "metadata.recipientUsername": email.recipientUsername,
+      ...(email.type === "external"
+        ? {
+            "metadata.ownerUsername": username,
+            "metadata.externalAddress": email.externalAddress,
+          }
+        : {
+            "metadata.senderUsername": email.senderUsername,
+            "metadata.recipientUsername": email.recipientUsername,
+          }),
     }).next();
 
     if (
@@ -1404,15 +1483,24 @@ app.get("/api/emails", requireSession, async (req, res) => {
   try {
     const records = await emailsCollection
       .find({
-        type: "internal",
         $or: [
           {
-            senderUsername: username,
-            senderDeleted: { $ne: true },
+            type: "internal",
+            $or: [
+              {
+                senderUsername: username,
+                senderDeleted: { $ne: true },
+              },
+              {
+                recipientUsername: username,
+                recipientDeleted: { $ne: true },
+              },
+            ],
           },
           {
-            recipientUsername: username,
-            recipientDeleted: { $ne: true },
+            type: "external",
+            ownerUsername: username,
+            senderDeleted: { $ne: true },
           },
         ],
       })
@@ -1447,9 +1535,19 @@ app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
     const result = await emailsCollection.updateOne(
       {
         _id: new ObjectId(id),
-        type: "internal",
-        recipientUsername: username,
-        recipientDeleted: { $ne: true },
+        $or: [
+          {
+            type: "internal",
+            recipientUsername: username,
+            recipientDeleted: { $ne: true },
+          },
+          {
+            type: "external",
+            direction: "incoming",
+            ownerUsername: username,
+            senderDeleted: { $ne: true },
+          },
+        ],
       },
       {
         $set: { recipientRead: true },
@@ -1486,10 +1584,19 @@ app.delete("/api/emails/:id", requireSession, async (req, res) => {
   try {
     const record = await emailsCollection.findOne({
       _id: new ObjectId(id),
-      type: "internal",
       $or: [
-        { senderUsername: username },
-        { recipientUsername: username },
+        {
+          type: "internal",
+          $or: [
+            { senderUsername: username },
+            { recipientUsername: username },
+          ],
+        },
+        {
+          type: "external",
+          ownerUsername: username,
+          senderDeleted: { $ne: true },
+        },
       ],
     });
 
@@ -1497,14 +1604,18 @@ app.delete("/api/emails/:id", requireSession, async (req, res) => {
       return res.status(404).json({ error: "Email not found" });
     }
 
-    const fromMe = record.senderUsername === username;
+    const fromMe =
+      record.type === "external" ||
+      record.senderUsername === username;
 
     await emailsCollection.updateOne(
       {
         _id: record._id,
-        ...(fromMe
-          ? { senderUsername: username }
-          : { recipientUsername: username }),
+        ...(record.type === "external"
+          ? { ownerUsername: username }
+          : fromMe
+            ? { senderUsername: username }
+            : { recipientUsername: username }),
       },
       {
         $set: fromMe

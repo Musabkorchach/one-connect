@@ -1120,6 +1120,50 @@ export async function sendInternalEmail(
   return data.email;
 }
 
+export async function sendExternalEmail(
+  sessionToken: string,
+  email: {
+    id: string;
+    recipient: string;
+    subject: string;
+    body: string;
+    attachmentId?: string;
+  },
+): Promise<Record<string, unknown>> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before sending email.");
+  }
+
+  const response = await fetch(`${API_URL}/api/emails/external`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(email),
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      typeof data?.error === "string"
+        ? data.error
+        : "Unable to submit external email.",
+    );
+  }
+
+  if (
+    !data?.email ||
+    typeof data.email !== "object" ||
+    Array.isArray(data.email)
+  ) {
+    throw new Error("Invalid external email response.");
+  }
+
+  return data.email;
+}
+
 async function updateInternalEmail(
   sessionToken: string,
   id: string,
