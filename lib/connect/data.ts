@@ -606,6 +606,105 @@ export function emailsToBlob(items: Email[]): Record<string, unknown> {
   return { items: items.slice(0, CAPS.emails) };
 }
 
+function parseExternalEmail(
+  value: unknown,
+  ownUsername: string,
+): Email | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const e = value as Record<string, unknown>;
+  const me = ownUsername.trim().replace(/^@/, "").toLowerCase();
+
+  if (
+    !/^[a-z0-9._-]{1,32}$/.test(me) ||
+    e.type !== "external" ||
+    e.ownerUsername !== me ||
+    typeof e.id !== "string" ||
+    !/^[a-f0-9]{24}$/i.test(e.id) ||
+    typeof e.threadId !== "string" ||
+    !e.threadId ||
+    e.threadId.length > 80 ||
+    typeof e.fromMe !== "boolean" ||
+    typeof e.recipient !== "string" ||
+    e.recipient.length > 254 ||
+    !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(e.recipient) ||
+    typeof e.subject !== "string" ||
+    e.subject.length > 120 ||
+    typeof e.body !== "string" ||
+    e.body.length > 4000 ||
+    typeof e.read !== "boolean" ||
+    typeof e.at !== "number" ||
+    !Number.isSafeInteger(e.at) ||
+    e.at <= 0 ||
+    !["pending", "sent", "failed", "spam"].includes(
+      String(e.deliveryStatus),
+    )
+  ) {
+    return null;
+  }
+
+  const fromMe = e.fromMe;
+
+  if (
+    (fromMe && e.senderUsername !== me) ||
+    (!fromMe && e.recipientUsername !== me)
+  ) {
+    return null;
+  }
+
+  let attachment: Pick<
+    Email,
+    "attachmentId" | "attachmentName" | "attachmentSize"
+  > = {};
+
+  if (
+    e.attachmentId !== undefined ||
+    e.attachmentName !== undefined ||
+    e.attachmentSize !== undefined
+  ) {
+    if (
+      typeof e.attachmentId !== "string" ||
+      !/^[a-f0-9]{24}$/i.test(e.attachmentId) ||
+      typeof e.attachmentName !== "string" ||
+      !e.attachmentName.trim() ||
+      e.attachmentName.length > 120 ||
+      typeof e.attachmentSize !== "number" ||
+      !Number.isSafeInteger(e.attachmentSize) ||
+      e.attachmentSize <= 0 ||
+      e.attachmentSize > 10 * 1024 * 1024
+    ) {
+      return null;
+    }
+
+    attachment = {
+      attachmentId: e.attachmentId.toLowerCase(),
+      attachmentName: e.attachmentName,
+      attachmentSize: e.attachmentSize,
+    };
+  }
+
+  return {
+    id: e.id,
+    threadId: e.threadId,
+    type: "external",
+    folder: fromMe ? "sent" : "inbox",
+    fromMe,
+    senderUsername: fromMe ? me : undefined,
+    recipientUsername: fromMe ? undefined : me,
+    recipient: e.recipient,
+    senderName: e.recipient,
+    color: 0,
+    subject: e.subject,
+    body: e.body,
+    ...attachment,
+    deliveryStatus: e.deliveryStatus as Email["deliveryStatus"],
+    read: fromMe || e.read,
+    at: e.at,
+  };
+}
+
 export function parseInternalEmail(
   value: unknown,
   ownUsername: string,
@@ -615,6 +714,9 @@ export function parseInternalEmail(
   }
 
   const e = value as Record<string, unknown>;
+  if (e.type === "external") {
+    return parseExternalEmail(value, ownUsername);
+  }
   const me = ownUsername.trim().replace(/^@/, "").toLowerCase();
   const usernamePattern = /^[a-z0-9._-]{1,32}$/;
 
