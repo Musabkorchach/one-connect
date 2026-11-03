@@ -1761,3 +1761,80 @@ export function sendGroupCallEvent<K extends keyof GroupCallOutgoingEvents>(
   socket.emit(event, data);
   return true;
 }
+
+export interface PreparedPstnCall {
+  attemptId: string;
+  phone: string;
+  token: string;
+  expiresAt: number;
+  maxDurationSeconds: number;
+}
+
+export async function preparePstnCall(
+  sessionToken: string,
+  phone: string,
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PreparedPstnCall> {
+  if (!sessionToken) {
+    throw new Error("Please sign in before making a phone call.");
+  }
+
+  const response = await fetch(`${API_URL}/api/calls/pstn/prepare`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ phone, requestId }),
+    cache: "no-store",
+    signal,
+  });
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const message =
+      data &&
+      typeof data === "object" &&
+      "error" in data &&
+      typeof data.error === "string"
+        ? data.error
+        : "Unable to prepare the phone call.";
+
+    throw new Error(message);
+  }
+
+  if (!data || typeof data !== "object") {
+    throw new Error("Invalid phone call response.");
+  }
+
+  const call = data as Record<string, unknown>;
+
+  if (
+    typeof call.attemptId !== "string" ||
+    !/^oc_[a-f0-9]{32}$/.test(call.attemptId) ||
+    typeof call.phone !== "string" ||
+    !/^\+33[1-79]\d{8}$/.test(call.phone) ||
+    typeof call.token !== "string" ||
+    call.token.length > 10000 ||
+    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(call.token) ||
+    typeof call.expiresAt !== "number" ||
+    !Number.isSafeInteger(call.expiresAt) ||
+    call.expiresAt <= Date.now() ||
+    typeof call.maxDurationSeconds !== "number" ||
+    !Number.isInteger(call.maxDurationSeconds) ||
+    call.maxDurationSeconds < 1 ||
+    call.maxDurationSeconds > 120
+  ) {
+    throw new Error("Invalid phone call response.");
+  }
+
+  return {
+    attemptId: call.attemptId,
+    phone: call.phone,
+    token: call.token,
+    expiresAt: call.expiresAt,
+    maxDurationSeconds: call.maxDurationSeconds,
+  };
+}

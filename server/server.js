@@ -11,6 +11,8 @@ import { dirname } from "path";
 import crypto from "node:crypto";
 import { registerExternalEmailRoutes } from "./external-email-routes.js";
 import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
+import { registerPstnRoutes } from "./pstn-routes.js";
+import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
 
 config();
 
@@ -149,6 +151,7 @@ const allowedStateKeys = new Set([
   "connect.calls",
   "connect.emails",
   "connect.groups",
+  "phone-contacts",
 ]);
 
 const allowedOrigins = [
@@ -1166,6 +1169,18 @@ await registerMailgunInboundRoutes({
   io,
   emailForUser,
   emailAttachmentsBucket,
+});
+
+await registerPstnRoutes({
+  app,
+  db,
+  requireSession,
+  normalizeMessagingUsername,
+});
+
+registerPstnVoiceWebhook({
+  app,
+  db,
 });
 
 registerExternalEmailRoutes({
