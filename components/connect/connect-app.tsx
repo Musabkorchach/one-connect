@@ -19,6 +19,8 @@ import { GroupProvider } from "@/contexts/group-context";
 import { useGroupCallController } from "@/lib/connect/use-group-call-controller";
 import { GroupCallScreen } from "./group-call-screen";
 import { GroupCallActionsProvider } from "@/contexts/group-call-actions-context";
+import { usePstnCallController } from "@/lib/connect/use-pstn-call-controller";
+import { PstnCallScreen } from "./pstn-call-screen";
 
 
 const CALL_CONFIGURATION: RTCConfiguration = {
@@ -32,6 +34,7 @@ function AppInner() {
   const [tab, setTab] = useState<TabId>("chats");
   const [openChat, setOpenChat] = useState<string | null>(null);
   const groupCallBusyRef = useRef(false);
+  const pstnBusyRef = useRef<() => boolean>(() => false);
 
   const {
     callState,
@@ -43,7 +46,7 @@ function AppInner() {
     endCall,
     } = useCallController(
     CALL_CONFIGURATION,
-    () => groupCallBusyRef.current,
+    () => groupCallBusyRef.current || pstnBusyRef.current(),
   );
 
   const {
@@ -53,9 +56,24 @@ function AppInner() {
     endGroupCall,
     setGroupMuted,
     setGroupVideoEnabled,
-  } = useGroupCallController(() => Boolean(callState));
+  } = useGroupCallController(
+  () => Boolean(callState) || pstnBusyRef.current(),
+);
 
   groupCallBusyRef.current = Boolean(groupCallState);
+const {
+  pstnCallState,
+  pstnError,
+  startPstnCall,
+  endPstnCall,
+  setPstnMuted,
+  clearPstnError,
+  isPstnBusy,
+} = usePstnCallController(
+  () => Boolean(callState) || Boolean(groupCallState),
+);
+
+pstnBusyRef.current = isPstnBusy;
   const { ringtoneBlocked, enableRingtone } = useCallRingtone(
     callState?.phase === "incoming" ||
       groupCallState?.phase === "incoming",
@@ -87,7 +105,17 @@ function AppInner() {
       {tab === "contacts" && (
         <ContactsView onMessage={startChat} onCall={startCall} />
       )}
-      {tab === "calls" && <CallsView onCall={startCall} />}
+      {tab === "calls" && (
+        <CallsView
+          onCall={startCall}
+          onPhoneCall={(phone) => void startPstnCall(phone)}
+          phoneCallDisabled={
+            Boolean(callState) ||
+            Boolean(groupCallState) ||
+            Boolean(pstnCallState)
+          }
+        />
+      )}
       {tab === "emails" && <EmailsView />}
       {tab === "profile" && <ProfileView />}
 
@@ -133,6 +161,29 @@ function AppInner() {
         </button>
       )}
 
+      {pstnCallState && (
+       <PstnCallScreen
+         call={pstnCallState}
+         onEnd={endPstnCall}
+         onMutedChange={setPstnMuted}
+       />
+      )}
+
+      {pstnError && (
+        <div
+           role="alert"
+           className="fixed bottom-24 left-1/2 z-[80] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl border border-destructive bg-card p-4 shadow-lg"
+        >
+          <p className="text-sm text-destructive">{pstnError}</p>
+          <button
+            type="button"
+            onClick={clearPstnError}
+            className="mt-3 rounded-lg border border-border px-3 py-2 text-sm"
+          >
+            {t.cancel}
+          </button>
+        </div>
+      )}
             <StorageNotice />
       <ToastHost />
       </div>

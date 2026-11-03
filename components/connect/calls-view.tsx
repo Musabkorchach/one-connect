@@ -14,11 +14,16 @@ import {
   IconTrash,
 } from "./icons";
 import { formatDuration, timeAgo, type CallLog, type Contact } from "@/lib/connect/data";
+import { PstnDialer } from "./pstn-dialer";
 
 export function CallsView({
   onCall,
+  onPhoneCall,
+  phoneCallDisabled = false,
 }: {
   onCall: (username: string, name: string, color: number, kind: "voice" | "video") => void;
+  onPhoneCall?: (phone: string) => void;
+  phoneCallDisabled?: boolean;
 }) {
   const { t, calls, contacts, deleteCall, clearCallHistory } = useConnect();
   const [pickOpen, setPickOpen] = useState(false);
@@ -28,6 +33,18 @@ export function CallsView({
   return (
     <div className="pb-24">
       <Header title={t.callsTitle} />
+      {onPhoneCall && (
+        <details className="mt-4">
+          <summary className="mx-5 cursor-pointer rounded-xl border border-border bg-card px-4 py-3 font-semibold">
+            اتصال هاتفي
+          </summary>
+
+          <PstnDialer
+            onCall={onPhoneCall}
+            disabled={phoneCallDisabled}
+          />
+        </details>
+      )}
       {calls.length > 0 && (
         <div className="flex justify-end px-5 pt-3">
           <button
