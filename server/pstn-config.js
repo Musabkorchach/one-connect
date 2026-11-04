@@ -29,8 +29,6 @@ export function getPstnConfig() {
 
   const allowedUsers = readList(process.env.PSTN_ALLOWED_USERS)
     .map((username) => username.replace(/^@/, "").toLowerCase());
-  const allowedNumbers = readList(process.env.PSTN_ALLOWED_NUMBERS)
-    .map(normalizeFrancePhone);
 
   if (
     !/^AC[a-f0-9]{32}$/i.test(accountSid || "") ||
@@ -40,9 +38,7 @@ export function getPstnConfig() {
     !/^AP[a-f0-9]{32}$/i.test(applicationSid || "") ||
     !/^\+[1-9]\d{7,14}$/.test(callerId || "") ||
     allowedUsers.length === 0 ||
-    allowedUsers.some((username) => !/^[a-z0-9._-]{1,32}$/.test(username)) ||
-    allowedNumbers.length === 0 ||
-    allowedNumbers.some((phone) => phone === null)
+    allowedUsers.some((username) => !/^[a-z0-9._-]{1,32}$/.test(username))
   ) {
     throw new Error("Invalid PSTN server configuration");
   }
@@ -55,7 +51,6 @@ export function getPstnConfig() {
     applicationSid,
     callerId,
     allowedUsers: new Set(allowedUsers),
-    allowedNumbers: new Set(allowedNumbers),
     maxDurationSeconds: 120,
     dailyCallLimit: 5,
   };
