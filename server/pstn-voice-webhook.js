@@ -1,5 +1,5 @@
 import twilio from "twilio";
-import { getPstnConfig, normalizeFrancePhone } from "./pstn-config.js";
+import { getPstnConfig, normalizePstnPhone } from "./pstn-config.js";
 
 const WEBHOOK_PATH = "/api/calls/pstn/voice";
 const WEBHOOK_URL =
@@ -54,7 +54,7 @@ export function registerPstnVoiceWebhook({ app, db }) {
         !record ||
         !config.allowedUsers.has(record.ownerUsername) ||
         typeof record.phone !== "string" ||
-        normalizeFrancePhone(record.phone) !== record.phone
+        normalizePstnPhone(record.phone) !== record.phone
       ) {
         return res.sendStatus(403);
       }

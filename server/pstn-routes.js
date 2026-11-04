@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { getPstnConfig, normalizeFrancePhone } from "./pstn-config.js";
+import { getPstnConfig, normalizePstnPhone } from "./pstn-config.js";
 import { createPstnAccessToken } from "./pstn-token.js";
 
 async function reserveQuota(collection, key, limit) {
@@ -51,7 +51,7 @@ export async function registerPstnRoutes({
       }
 
       const data = req.body;
-      const phone = normalizeFrancePhone(data?.phone);
+      const phone = normalizePstnPhone(data?.phone);
 
       if (
         !data ||
@@ -62,7 +62,7 @@ export async function registerPstnRoutes({
         !phone
       ) {
         return res.status(400).json({
-          error: "Invalid request or unsupported French phone number.",
+          error: "Invalid request or unsupported phone number.",
         });
       }
 
@@ -91,7 +91,7 @@ export async function registerPstnRoutes({
       const appQuota = userQuota && await reserveQuota(
         usage,
         `app:${day}`,
-        10,
+        50,
       );
 
       if (!appQuota) {

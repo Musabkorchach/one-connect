@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { loadPhoneContacts, savePhoneContacts, type PhoneContact } from "@/lib/connect/phone-contacts";
 import { Phone } from "lucide-react";
+import { normalizePstnPhone } from "@/lib/connect/pstn-phone.js";
 
 export function PstnDialer({
   onCall,
@@ -47,17 +48,7 @@ export function PstnDialer({
     };
   }, [contactSession]);
 
-    const normalizePhone = () => {
-    let normalized = phone.trim().replace(/[\s().-]/g, "");
-
-    if (normalized.startsWith("0033")) {
-      normalized = `+33${normalized.slice(4)}`;
-    } else if (/^0[1-79]\d{8}$/.test(normalized)) {
-      normalized = `+33${normalized.slice(1)}`;
-    }
-
-    return /^\+33[1-79]\d{8}$/.test(normalized) ? normalized : null;
-  };
+  const normalizePhone = () => normalizePstnPhone(phone);
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -65,7 +56,7 @@ export function PstnDialer({
 
     const normalized = normalizePhone();
     if (!normalized) {
-      setError("Enter a French phone number. Short numbers and 08 are excluded.");
+      setError("أدخل رقمًا صالحًا لدولة مدعومة مع رمز الدولة، مثل +249 أو +20.");
       return;
     }
 
@@ -81,7 +72,7 @@ export function PstnDialer({
     if (!name) return;
 
     if (!normalized) {
-      setContactMessage("أدخل رقم هاتف فرنسي صالحًا للحفظ.");
+    setContactMessage("أدخل رقمًا صالحًا لدولة مدعومة مع رمز الدولة.");
       return;
     }
 
@@ -105,8 +96,7 @@ export function PstnDialer({
     } finally {
       setSavingContact(false);
     }
-  };
-
+    };
   return (
     <form
       onSubmit={submit}
@@ -117,7 +107,7 @@ export function PstnDialer({
       </label>
 
       <p className="mt-1 text-xs text-muted-foreground">
-        France · Approved test numbers only · Maximum 2 minutes
+        فرنسا، السودان، إريتريا، مصر، إثيوبيا، أوغندا · دقيقتان كحد أقصى
       </p>
 
             {currentContacts?.failed && (
@@ -159,7 +149,7 @@ export function PstnDialer({
             setPhone(event.target.value);
             setError(null);
           }}
-          placeholder="+33 …"
+          placeholder="+249 … / +33 …"
           aria-invalid={Boolean(error)}
           aria-describedby={error ? "pstn-phone-error" : undefined}
           className="min-w-0 flex-1 rounded-xl border border-border bg-input px-3 py-3 outline-none focus:border-primary disabled:opacity-50"
