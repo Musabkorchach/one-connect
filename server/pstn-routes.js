@@ -59,11 +59,10 @@ export async function registerPstnRoutes({
         Array.isArray(data) ||
         typeof data.requestId !== "string" ||
         !/^[a-zA-Z0-9_-]{16,80}$/.test(data.requestId) ||
-        !phone ||
-        !config.allowedNumbers.has(phone)
+        !phone
       ) {
         return res.status(400).json({
-          error: "Invalid request or phone number is not allowed for testing.",
+          error: "Invalid request or unsupported French phone number.",
         });
       }
 
