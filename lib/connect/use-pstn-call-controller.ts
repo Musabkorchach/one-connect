@@ -110,7 +110,7 @@ export function usePstnCallController(
     }, 30_000);
 
     try {
-      const { Device } = await import("@twilio/voice-sdk");
+      const { Device } = require("@twilio/voice-sdk") as typeof import("@twilio/voice-sdk");
 
       if (!isCurrent()) return;
 
