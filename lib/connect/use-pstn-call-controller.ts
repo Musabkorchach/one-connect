@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Call, Device } from "@twilio/voice-sdk";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { preparePstnCall } from "@/lib/api-client";
+import { loadTwilioVoice } from "@/lib/connect/load-twilio-voice";
 
 export interface PstnCallState {
   phone: string;
@@ -110,7 +111,7 @@ export function usePstnCallController(
     }, 30_000);
 
     try {
-      const { Device } = require("@twilio/voice-sdk") as typeof import("@twilio/voice-sdk");
+      const Device = await loadTwilioVoice();
 
       if (!isCurrent()) return;
 
