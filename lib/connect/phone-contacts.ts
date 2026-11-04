@@ -1,4 +1,5 @@
 import { getAppState, saveAppState } from "@/lib/api-client";
+import { normalizePstnPhone } from "@/lib/connect/pstn-phone.js";
 
 const STATE_KEY = "phone-contacts";
 
@@ -20,7 +21,7 @@ export async function loadPhoneContacts(
       item &&
       typeof item.name === "string" &&
       typeof item.phone === "string" &&
-      /^\+33[1-79]\d{8}$/.test(item.phone) &&
+      normalizePstnPhone(item.phone) === item.phone &&
       item.name.trim() &&
       !contacts.has(item.phone)
     ) {

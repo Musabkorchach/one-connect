@@ -1,17 +1,4 @@
-export function normalizeFrancePhone(value) {
-  if (typeof value !== "string" || value.length > 40) return null;
-
-  let phone = value.trim().replace(/[\s().-]/g, "");
-
-  if (phone.startsWith("0033")) {
-    phone = `+33${phone.slice(4)}`;
-  } else if (/^0[1-79]\d{8}$/.test(phone)) {
-    phone = `+33${phone.slice(1)}`;
-  }
-
-  // Initial test policy excludes 08 and short numbers.
-  return /^\+33[1-79]\d{8}$/.test(phone) ? phone : null;
-}
+export { normalizePstnPhone } from "../lib/connect/pstn-phone.js";
 
 function readList(value) {
   return (value || "").split(",").map((item) => item.trim()).filter(Boolean);
@@ -52,6 +39,6 @@ export function getPstnConfig() {
     callerId,
     allowedUsers: new Set(allowedUsers),
     maxDurationSeconds: 120,
-    dailyCallLimit: 5,
+    dailyCallLimit: 10,
   };
 }
