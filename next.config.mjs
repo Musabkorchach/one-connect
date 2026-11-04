@@ -1,3 +1,7 @@
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: {
@@ -9,6 +13,13 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-}
+  webpack(config) {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "@twilio/voice-sdk$": require.resolve("@twilio/voice-sdk"),
+    };
+    return config;
+  },
+};
 
-export default nextConfig
+export default nextConfig;
