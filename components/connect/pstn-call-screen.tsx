@@ -71,6 +71,43 @@ export function PstnCallScreen({
         Test call · Maximum 2 minutes
       </p>
 
+      {call.phase === "connected" && (
+        <div className="mt-6 w-full max-w-xs space-y-4 text-start" dir="rtl">
+          <p className="text-sm font-semibold">فحص الصوت</p>
+
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">
+              الميكروفون — صوتك
+              {" · "}
+              {call.inputVolume === undefined
+                ? "بانتظار القياس"
+                : `${Math.round(call.inputVolume * 100)}%`}
+            </p>
+            <progress
+              aria-label="مستوى صوت الميكروفون"
+              max={1}
+              value={call.inputVolume ?? 0}
+              className="h-3 w-full accent-teal-400"
+            />
+          </div>
+
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">
+              الصوت المستقبَل — الطرف الآخر
+              {" · "}
+              {call.outputVolume === undefined
+                ? "بانتظار القياس"
+                : `${Math.round(call.outputVolume * 100)}%`}
+            </p>
+            <progress
+              aria-label="مستوى الصوت المستقبَل"
+              max={1}
+              value={call.outputVolume ?? 0}
+              className="h-3 w-full accent-teal-400"
+            />
+          </div>
+         </div>
+       )}
       <div className="mt-12 flex items-center justify-center gap-8">
         <button
           type="button"

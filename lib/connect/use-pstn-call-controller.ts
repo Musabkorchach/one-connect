@@ -11,6 +11,8 @@ export interface PstnCallState {
   phase: "preparing" | "connecting" | "ringing" | "connected";
   muted: boolean;
   connectedAt: number | null;
+  inputVolume?: number;
+  outputVolume?: number;
 }
 
 interface CallRun {
@@ -158,6 +160,25 @@ export function usePstnCallController(
       }
 
       run.call = call;
+      let lastVolumeUpdate = 0;
+
+      call.on("volume", (inputVolume: number, outputVolume: number) => {
+        if (!isCurrent()) return;
+
+        const now = Date.now();
+        if (now - lastVolumeUpdate < 250) return;
+        lastVolumeUpdate = now;
+
+        setCallState((state) => state && ({
+          ...state,
+          inputVolume: Number.isFinite(inputVolume)
+            ? Math.max(0, Math.min(1, inputVolume))
+            : undefined,
+          outputVolume: Number.isFinite(outputVolume)
+            ? Math.max(0, Math.min(1, outputVolume))
+            : undefined,
+        }));
+      });
       if (run.timer) clearTimeout(run.timer);
 
       run.timer = setTimeout(() => {
