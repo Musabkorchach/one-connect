@@ -125,6 +125,7 @@ interface PiAuthContextType {
   authMessage: string;
   hasError: boolean;
   piUsername: string;
+  userId: string | null;
   sessionToken: string | null;
   sdk: SDKLiteInstance | null;
   products: Product[] | null;
@@ -199,6 +200,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [authMessage, setAuthMessage] = useState("Initializing Pi Network...");
   const [hasError, setHasError] = useState(false);
   const [piUsername, setPiUsername] = useState("");
+  const [userId, setUserId] = useState<string | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sdk, setSdk] = useState<SDKLiteInstance | null>(null);
   const [products, setProducts] = useState<Product[] | null>(null);
@@ -215,6 +217,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   disconnectSocket();
   setIsAuthenticated(false);
   setSessionToken(null);
+  setUserId(null);
   setPiUsername("");
   setSdk(null);
   setProducts(null);
@@ -293,6 +296,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         );
 
         setSessionToken(authResult.sessionToken);
+        setUserId(authResult.userId);
         setPiUsername(authResult.piUsername || "");
         setSdk(null);
         setProducts(null);
@@ -374,6 +378,7 @@ if (!renderSession) {
 }
 
 setSessionToken(renderSession.sessionToken);
+setUserId(renderSession.userId);
 setPiUsername(renderSession.piUsername);
 
 initSocket(
@@ -427,6 +432,7 @@ initSocket(
     authMessage,
     hasError,
     piUsername,
+    userId,
     sessionToken,
     sdk,
     products,

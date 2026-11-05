@@ -1839,3 +1839,148 @@ export async function preparePstnCall(
     maxDurationSeconds: call.maxDurationSeconds,
   };
 }
+
+export interface InvoiceDraftStateRecord {
+  blob: Record<string, unknown> | null;
+  revision: number;
+}
+
+export async function getInvoiceDraftState(
+  sessionToken: string,
+  signal?: AbortSignal,
+): Promise<InvoiceDraftStateRecord> {
+  if (!sessionToken.trim()) {
+    throw new Error("An authenticated session is required");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/state/connect.invoice-drafts`,
+    {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      cache: "no-store",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Draft load failed (${response.status})`,
+    );
+  }
+
+  const payload: unknown = await response.json();
+
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    throw new Error("Invalid draft state response");
+  }
+
+  const record = payload as Record<string, unknown>;
+  const revision = record.revision;
+  const blob = record.blob;
+
+  if (
+    typeof revision !== "number" ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0
+  ) {
+    throw new Error("Invalid draft state revision");
+  }
+
+  if (blob === null && revision === 0) {
+    return { blob: null, revision: 0 };
+  }
+
+  if (
+    revision === 0 ||
+    !blob ||
+    typeof blob !== "object" ||
+    Array.isArray(blob)
+  ) {
+    throw new Error("Invalid stored draft state");
+  }
+
+  return {
+    blob: blob as Record<string, unknown>,
+    revision,
+  };
+}
+
+export class InvoiceDraftConflictError extends Error {
+  constructor() {
+    super("Drafts changed. Reload before saving.");
+    this.name = "InvoiceDraftConflictError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export async function saveInvoiceDraftState(
+  blob: Record<string, unknown>,
+  expectedRevision: number,
+  sessionToken: string,
+): Promise<number> {
+  if (!sessionToken.trim()) {
+    throw new Error("An authenticated session is required");
+  }
+
+  if (
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 0 ||
+    expectedRevision >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error("Invalid expected draft revision");
+  }
+
+  const response = await fetch(
+    `${API_URL}/api/state/connect.invoice-drafts`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        blob,
+        expectedRevision,
+      }),
+    },
+  );
+
+  if (response.status === 409) {
+    throw new InvoiceDraftConflictError();
+  }
+
+  if (response.status !== 200) {
+    throw new Error(
+      `Draft save failed (${response.status})`,
+    );
+  }
+
+  const payload: unknown = await response.json();
+
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    throw new Error("Invalid draft save response");
+  }
+
+  const revision = (
+    payload as Record<string, unknown>
+  ).revision;
+
+  if (
+    typeof revision !== "number" ||
+    revision !== expectedRevision + 1
+  ) {
+    throw new Error("Unexpected saved draft revision");
+  }
+
+  return revision;
+}
