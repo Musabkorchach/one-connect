@@ -13,6 +13,13 @@ export interface Dict {
   invoicesEmpty: string;
   invoicesEmptySub: string;
   invoicesPaymentNote: string;
+  invoicesLoading: string;
+  invoicesLoadError: string;
+  invoicesRetry: string;
+  invoicesCreateDraft: string;
+  invoicesSaving: string;
+  invoicesSaveError: string;
+  invoicesConflict: string;
   // setup
   welcome: string;
   welcomeSub: string;
@@ -118,6 +125,13 @@ export interface Dict {
 }
 
 const en: Dict = {
+  invoicesCreateDraft: "Create draft",
+  invoicesSaving: "Saving...",
+  invoicesSaveError: "Saving could not be confirmed. Reload the list before trying again.",
+  invoicesConflict: "Your drafts changed elsewhere. Reload the list before continuing.",
+  invoicesLoading: "Loading invoices...",
+  invoicesLoadError: "Unable to load invoices. Please try again.",
+  invoicesRetry: "Try again",
   tabInvoices: "Invoices",
   invoicesEmpty: "No invoices to display",
   invoicesEmptySub: "Your invoices and payment details in one place.",
@@ -243,6 +257,13 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  invoicesCreateDraft: "Créer un brouillon",
+  invoicesSaving: "Enregistrement...",
+  invoicesSaveError: "L’enregistrement n’a pas pu être confirmé. Rechargez la liste avant de réessayer.",
+  invoicesConflict: "Vos brouillons ont été modifiés ailleurs. Rechargez la liste avant de continuer.",
+  invoicesLoading: "Chargement des factures...",
+  invoicesLoadError: "Impossible de charger les factures. Veuillez réessayer.",
+  invoicesRetry: "Réessayer",
   tabInvoices: "Factures",
   invoicesEmpty: "Aucune facture à afficher",
   invoicesEmptySub: "Vos factures et les détails de paiement au même endroit.",
@@ -260,6 +281,13 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  invoicesCreateDraft: "إنشاء مسودة",
+  invoicesSaving: "جارٍ الحفظ...",
+  invoicesSaveError: "تعذّر تأكيد الحفظ. أعد تحميل القائمة قبل المحاولة مجددًا.",
+  invoicesConflict: "تغيّرت مسوداتك من جلسة أخرى. أعد تحميل القائمة قبل المتابعة.",
+  invoicesLoading: "جارٍ تحميل الفواتير...",
+  invoicesLoadError: "تعذّر تحميل الفواتير. حاول مرة أخرى.",
+  invoicesRetry: "إعادة المحاولة",
   tabInvoices: "الفواتير",
   invoicesEmpty: "لا توجد فواتير للعرض",
   invoicesEmptySub: "فواتيرك وتفاصيل الدفع في مكان واحد.",

@@ -144,6 +144,7 @@ export const KEYS = {
   calls: "connect.calls",
   emails: "connect.emails",
   groups: "connect.groups",
+  invoiceDrafts: "connect.invoice-drafts",
 } as const;
 
 export const CAPS = {

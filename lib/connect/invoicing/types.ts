@@ -6,6 +6,17 @@
 
 export type InvoiceDate = string; // YYYY-MM-DD
 export type InvoiceTimestamp = string; // ISO 8601 UTC
+export type InvoicePartyKind =
+  | "individual"
+  | "business"
+  | "public_body"
+  | "nonprofit";
+
+export type InvoiceIssuerCapacity =
+  | "private_individual"
+  | "professional"
+  | "public_body"
+  | "nonprofit";
 
 export type InvoiceAsset =
   | {
@@ -46,7 +57,8 @@ export interface InvoiceRegistration {
 
 export interface InvoicePartySnapshot {
   partyId: string; // Stable identifier, independent of display name
-  kind: "individual" | "business";
+  kind: InvoicePartyKind;
+  issuerCapacity?: InvoiceIssuerCapacity;
   piIdentity?: {
     userId: string; // Verified Pi user identifier
     username: string; // Stored without @
@@ -98,8 +110,32 @@ export interface InvoicePaymentTerms {
   instructions?: string;
 }
 
+export type CommercialDocumentKind =
+  | "invoice"
+  | "credit_note"
+  | "quote"
+  | "proforma";
+
+export type InvoiceDocumentKind = Extract<
+  CommercialDocumentKind,
+  "invoice" | "credit_note"
+>;
+
+export type InvoiceBillingStage =
+  | "standard"
+  | "advance"
+  | "progress"
+  | "final";
+
+export type InvoiceOperationCategory =
+  | "goods"
+  | "services"
+  | "mixed";
+
 export interface InvoiceContent {
-  documentType: "invoice" | "credit_note";
+  documentType: InvoiceDocumentKind;
+  billingStage?: InvoiceBillingStage;
+  operationCategory?: InvoiceOperationCategory;
   countryProfile: InvoiceCountryProfileRef;
   language: string; // BCP 47, e.g. fr-FR
   asset: InvoiceAsset;

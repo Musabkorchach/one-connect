@@ -151,6 +151,7 @@ const allowedStateKeys = new Set([
   "connect.calls",
   "connect.emails",
   "connect.groups",
+  "connect.invoice-drafts",
   "phone-contacts",
 ]);
 
@@ -1661,9 +1662,29 @@ app.get("/api/state/:key", requireSession, async (req, res) => {
   try {
     const record = await appStateCollection.findOne(
       { ownerUserId: req.user.userId, key },
-      { projection: { _id: 0, blob: 1 } }
+      { projection: { _id: 0, blob: 1, revision: 1 } }
     );
 
+        if (key === "connect.invoice-drafts") {
+      if (!record) {
+        return res.json({
+          blob: null,
+          revision: 0,
+        });
+      }
+
+      if (
+        !Number.isSafeInteger(record.revision) ||
+        record.revision < 1
+      ) {
+        throw new Error("Invalid stored draft revision");
+      }
+
+      return res.json({
+        blob: record.blob,
+        revision: record.revision,
+      });
+    }
     return res.json(record ? { blob: record.blob } : null);
   } catch (error) {
     console.error("[APP STATE LOAD ERROR]", error);
@@ -1688,6 +1709,67 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
   }
 
   try {
+        if (key === "connect.invoice-drafts") {
+      const expectedRevision = req.body?.expectedRevision;
+
+      if (
+        !Number.isSafeInteger(expectedRevision) ||
+        expectedRevision < 0 ||
+        expectedRevision >= Number.MAX_SAFE_INTEGER
+      ) {
+        return res.status(400).json({
+          error: "A valid expectedRevision is required",
+        });
+      }
+
+      const nextRevision = expectedRevision + 1;
+      const ownerUserId = req.user.userId;
+
+      if (expectedRevision === 0) {
+        try {
+          await appStateCollection.insertOne({
+            ownerUserId,
+            key,
+            blob,
+            revision: nextRevision,
+            updatedAt: new Date(),
+          });
+        } catch (error) {
+          if (error?.code === 11000) {
+            return res.status(409).json({
+              error: "Drafts changed. Reload before saving.",
+            });
+          }
+
+          throw error;
+        }
+      } else {
+        const result = await appStateCollection.updateOne(
+          {
+            ownerUserId,
+            key,
+            revision: expectedRevision,
+          },
+          {
+            $set: {
+              blob,
+              revision: nextRevision,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(409).json({
+            error: "Drafts changed. Reload before saving.",
+          });
+        }
+      }
+
+      return res.status(200).json({
+        revision: nextRevision,
+      });
+    }
     await appStateCollection.updateOne(
       { ownerUserId: req.user.userId, key },
       {
