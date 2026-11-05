@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { loadPhoneContacts, savePhoneContacts, type PhoneContact } from "@/lib/connect/phone-contacts";
 import { Phone } from "lucide-react";
-import { normalizePstnPhone } from "@/lib/connect/pstn-phone.js";
+import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 
 export function PstnDialer({
   onCall,
