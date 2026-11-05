@@ -1,4 +1,5 @@
 import io from "socket.io-client";
+import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 
 const API_URL =
   process.env.REACT_APP_API_URL ||
@@ -1815,7 +1816,7 @@ export async function preparePstnCall(
     typeof call.attemptId !== "string" ||
     !/^oc_[a-f0-9]{32}$/.test(call.attemptId) ||
     typeof call.phone !== "string" ||
-    !/^\+33[1-79]\d{8}$/.test(call.phone) ||
+    normalizePstnPhone(call.phone) !== call.phone ||
     typeof call.token !== "string" ||
     call.token.length > 10000 ||
     !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(call.token) ||
