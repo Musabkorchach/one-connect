@@ -9,6 +9,10 @@ export interface Dict {
   tabCalls: string;
   tabEmails: string;
   tabProfile: string;
+  tabInvoices: string;
+  invoicesEmpty: string;
+  invoicesEmptySub: string;
+  invoicesPaymentNote: string;
   // setup
   welcome: string;
   welcomeSub: string;
@@ -114,6 +118,10 @@ export interface Dict {
 }
 
 const en: Dict = {
+  tabInvoices: "Invoices",
+  invoicesEmpty: "No invoices to display",
+  invoicesEmptySub: "Your invoices and payment details in one place.",
+  invoicesPaymentNote: "Invoice in your chosen currency. Pay in Pi.",
   appName: "One Connect",
   tagline: "Your Pi username. One universal ID.",
   tabChats: "Chats",
@@ -235,6 +243,10 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  tabInvoices: "Factures",
+  invoicesEmpty: "Aucune facture à afficher",
+  invoicesEmptySub: "Vos factures et les détails de paiement au même endroit.",
+  invoicesPaymentNote: "Facturez dans la devise de votre choix. Paiement en Pi.",
   tagline: "Votre nom Pi. Une identité universelle.",
   tabChats: "Messages", tabContacts: "Contacts", tabCalls: "Appels", tabEmails: "Emails", tabProfile: "Profil",
   welcome: "Bienvenue sur One Connect", welcomeSub: "Votre nom Pi devient votre ID universel pour les messages, appels et emails — sans numéro de téléphone ni email.",
@@ -248,6 +260,10 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  tabInvoices: "الفواتير",
+  invoicesEmpty: "لا توجد فواتير للعرض",
+  invoicesEmptySub: "فواتيرك وتفاصيل الدفع في مكان واحد.",
+  invoicesPaymentNote: "الفاتورة بالعملة التي تختارها، والدفع بـPi.",
   tagline: "اسم Pi الخاص بك. هوية عالمية واحدة.",
   tabChats: "الرسائل", tabContacts: "جهات الاتصال", tabCalls: "المكالمات", tabEmails: "رسائل البريد الإلكتروني", tabProfile: "الملف الشخصي",
   welcome: "مرحبا بك في One Connect", welcomeSub: "يصبح اسم Pi الخاص بك معرّفك العالمي للرسائل والمكالمات والبريد الإلكتروني — بدون رقم هاتف أو بريد إلكتروني.",

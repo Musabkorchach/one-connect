@@ -5,6 +5,7 @@ import { cx } from "./ui";
 import { useConnect } from "@/contexts/connect-context";
 import { useGroups } from "@/contexts/group-context";
 import type { TabId } from "@/lib/connect/data";
+import { FileText } from "lucide-react";
 import {
   IconChat,
   IconContacts,
@@ -33,6 +34,11 @@ export function BottomNav({
     { id: "contacts", label: t.tabContacts, icon: <IconContacts className="h-[22px] w-[22px]" /> },
     { id: "calls", label: t.tabCalls, icon: <IconPhone className="h-[22px] w-[22px]" /> },
     { id: "emails", label: t.tabEmails, icon: <IconMail className="h-[22px] w-[22px]" />, badge: unreadEmails },
+    {
+      id: "invoices",
+      label: t.tabInvoices,
+      icon: <FileText className="h-[22px] w-[22px]" />,
+    },
     { id: "profile", label: t.tabProfile, icon: <IconUser className="h-[22px] w-[22px]" /> },
   ];
 
