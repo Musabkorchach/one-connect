@@ -13,6 +13,7 @@ import { ConversationView } from "./conversation-view";
 import { ContactsView } from "./contacts-view";
 import { CallsView } from "./calls-view";
 import { EmailsView } from "./emails-view";
+import { InvoicesView } from "./invoices-view";
 import { ProfileView } from "./profile-view";
 import type { TabId } from "@/lib/connect/data";
 import { GroupProvider } from "@/contexts/group-context";
@@ -117,6 +118,7 @@ pstnBusyRef.current = isPstnBusy;
         />
       )}
       {tab === "emails" && <EmailsView />}
+      {tab === "invoices" && <InvoicesView />}
       {tab === "profile" && <ProfileView />}
 
       <BottomNav tab={tab} onChange={setTab} />

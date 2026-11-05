@@ -1,5 +1,11 @@
 // ---------- Types ----------
-export type TabId = "chats" | "contacts" | "calls" | "emails" | "profile";
+export type TabId =
+  | "chats"
+  | "contacts"
+  | "calls"
+  | "emails"
+  | "invoices"
+  | "profile";
 
 export type LangId =
   | "en" | "zh" | "es" | "fr" | "ar" | "hi" | "ru" | "ja"
