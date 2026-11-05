@@ -1,5 +1,5 @@
 import { getAppState, saveAppState } from "@/lib/api-client";
-import { normalizePstnPhone } from "@/lib/connect/pstn-phone.js";
+import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 
 const STATE_KEY = "phone-contacts";
 
