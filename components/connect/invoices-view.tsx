@@ -1,13 +1,26 @@
 "use client";
 
+import { useState } from "react";
+import { usePiAuth } from "@/contexts/pi-auth-context";
+import { InvoiceDraftEditor } from "./invoice-draft-editor";
+import type { InvoiceDraftSnapshot } from "@/lib/connect/invoicing/draft-repository";
 import { FileText } from "lucide-react";
 import { useConnect } from "@/contexts/connect-context";
 import { useInvoiceDrafts } from "@/lib/connect/invoicing/use-invoice-drafts";
 
 export function InvoicesView() {
   const { t, profile } = useConnect();
+  const { userId, sessionToken } = usePiAuth();
+
+  const [opened, setOpened] = useState<{
+    ownerUserId: string;
+    sessionToken: string;
+    draftId: string;
+    snapshot: InvoiceDraftSnapshot;
+  } | null>(null);
   const {
     drafts,
+    revision,
     ready,
     loading,
     loadError,
@@ -16,7 +29,48 @@ export function InvoicesView() {
     createError,
     canCreate,
     createDraft,
+    updateDraft,
   } = useInvoiceDrafts();
+
+  const activeEditor =
+    opened &&
+    opened.ownerUserId === userId &&
+    opened.sessionToken === sessionToken
+      ? opened
+      : null;
+
+  const editingDraft = activeEditor?.snapshot.drafts.find(
+    (draft) => draft.id === activeEditor.draftId,
+  );
+
+  if (activeEditor && editingDraft) {
+    return (
+      <div className="fixed inset-0 z-40 overflow-y-auto bg-background">
+        <div className="mx-auto max-w-md">
+          <InvoiceDraftEditor
+            key={`${activeEditor.draftId}:${activeEditor.snapshot.revision}`}
+            draft={editingDraft}
+            saving={saving}
+            blocked={!canCreate}
+            saveError={createError}
+            onSave={async (patch) => {
+              const saved = await updateDraft(
+                activeEditor.snapshot,
+                activeEditor.draftId,
+                patch,
+              );
+              return saved !== null;
+            }}
+            onBack={() => setOpened(null)}
+            onReload={() => {
+              setOpened(null);
+              reload();
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <section
@@ -143,6 +197,33 @@ export function InvoicesView() {
                     )}
                   </time>
                 </div>
+                                <button
+                  type="button"
+                  disabled={!canCreate || revision === null}
+                  onClick={() => {
+                    if (
+                      !canCreate ||
+                      revision === null ||
+                      !userId ||
+                      !sessionToken
+                    ) {
+                      return;
+                    }
+
+                    setOpened({
+                      ownerUserId: userId,
+                      sessionToken,
+                      draftId: draft.id,
+                      snapshot: structuredClone({
+                        drafts,
+                        revision,
+                      }),
+                    });
+                  }}
+                  className="mt-4 rounded-xl border border-border px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {t.invoicesEditDraft}
+                </button>
               </li>
             ))}
           </ul>
