@@ -7,8 +7,11 @@ import {
   parseInvoiceDraftCollection,
 } from "./draft-collection";
 import type { LangId } from "../data";
-import { createInvoiceDraft } from "./drafts";
-import type { InvoiceDraft } from "./types";
+import {
+  createInvoiceDraft,
+  updateInvoiceDraftContent,
+} from "./drafts";
+import type { InvoiceContent, InvoiceDraft } from "./types";
 
 export interface InvoiceDraftSnapshot {
   drafts: InvoiceDraft[];
@@ -88,6 +91,53 @@ export async function createAndSaveInvoiceDraft(
 
   return {
     draft: saved.drafts[0],
+    snapshot: saved,
+  };
+}
+
+export async function updateAndSaveInvoiceDraft(
+  snapshot: InvoiceDraftSnapshot,
+  draftId: string,
+  patch: Partial<InvoiceContent>,
+  sessionToken: string,
+  ownerUserId: string,
+): Promise<{
+  draft: InvoiceDraft;
+  snapshot: InvoiceDraftSnapshot;
+}> {
+  const blob = invoiceDraftsToBlob(
+    snapshot.drafts,
+    ownerUserId,
+  );
+
+  const drafts = parseInvoiceDraftCollection(
+    blob,
+    ownerUserId,
+  );
+
+  const index = drafts.findIndex(
+    (draft) => draft.id === draftId,
+  );
+
+  if (index === -1) {
+    throw new Error("Draft not found in the loaded snapshot");
+  }
+
+  drafts[index] = updateInvoiceDraftContent(
+    drafts[index],
+    ownerUserId,
+    patch,
+  );
+
+  const saved = await saveInvoiceDrafts(
+    drafts,
+    snapshot.revision,
+    sessionToken,
+    ownerUserId,
+  );
+
+  return {
+    draft: saved.drafts[index],
     snapshot: saved,
   };
 }

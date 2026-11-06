@@ -4,10 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { InvoiceDraftConflictError } from "@/lib/api-client";
 import type { LangId } from "../data";
-import type { InvoiceDraft } from "./types";
+import type { InvoiceContent, InvoiceDraft } from "./types";
 import {
   createAndSaveInvoiceDraft,
   loadInvoiceDrafts,
+  updateAndSaveInvoiceDraft,
   type InvoiceDraftSnapshot,
 } from "./draft-repository";
 
@@ -184,6 +185,86 @@ export function useInvoiceDrafts() {
     }
   };
 
+  const updateDraft = async (
+    snapshotAtOpen: InvoiceDraftSnapshot,
+    draftId: string,
+    patch: Partial<InvoiceContent>,
+  ): Promise<InvoiceDraft | null> => {
+    const scope = scopeRef.current;
+
+    if (
+      !isAuthenticated ||
+      !scope ||
+      scope.ownerUserId !== userId ||
+      scope.sessionToken !== sessionToken ||
+      scope.requestId !== requestId ||
+      !scope.snapshot ||
+      scope.busy ||
+      scope.blocked
+    ) {
+      return null;
+    }
+
+    scope.busy = true;
+
+    setState((previous) =>
+      previous && scopeRef.current === scope
+        ? { ...previous, saving: true, createError: null }
+        : previous,
+    );
+
+    try {
+      if (snapshotAtOpen.revision !== scope.snapshot.revision) {
+        throw new InvoiceDraftConflictError();
+      }
+
+      const result = await updateAndSaveInvoiceDraft(
+        snapshotAtOpen,
+        draftId,
+        patch,
+        scope.sessionToken,
+        scope.ownerUserId,
+      );
+
+      if (scopeRef.current !== scope) return null;
+
+      scope.snapshot = result.snapshot;
+
+      setState({
+        ownerUserId: scope.ownerUserId,
+        sessionToken: scope.sessionToken,
+        requestId: scope.requestId,
+        status: "ready",
+        snapshot: result.snapshot,
+        saving: false,
+        createError: null,
+      });
+
+      return result.draft;
+    } catch (error) {
+      if (scopeRef.current !== scope) return null;
+
+      scope.blocked = true;
+
+      setState((previous) =>
+        previous && scopeRef.current === scope
+          ? {
+              ...previous,
+              saving: false,
+              createError:
+                error instanceof InvoiceDraftConflictError
+                  ? "conflict"
+                  : "save",
+            }
+          : previous,
+      );
+
+      return null;
+    } finally {
+      scope.busy = false;
+    }
+  };
+
   return {
     drafts: current?.snapshot?.drafts ?? [],
     revision: current?.snapshot?.revision ?? null,
@@ -197,6 +278,7 @@ export function useInvoiceDrafts() {
       !current.saving &&
       current.createError === null,
     createDraft,
+    updateDraft,
     reload: () => {
       if (scopeRef.current?.busy) return;
       setRequestId((value) => value + 1);

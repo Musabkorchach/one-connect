@@ -1,5 +1,6 @@
 import type { LangId } from "../data";
-import type { InvoiceDraft } from "./types";
+import type { InvoiceContent, InvoiceDraft } from "./types";
+import { parseInvoiceDraft } from "./draft-schema";
 
 export interface CreateInvoiceDraftInput {
   ownerUserId: string;
@@ -42,4 +43,24 @@ export function createInvoiceDraft(
       relatedDocumentIds: [],
     },
   };
+}
+
+export function updateInvoiceDraftContent(
+  draft: InvoiceDraft,
+  ownerUserId: string,
+  patch: Partial<InvoiceContent>,
+): InvoiceDraft {
+  const current = parseInvoiceDraft(draft, ownerUserId);
+
+  return parseInvoiceDraft(
+    {
+      ...current,
+      updatedAt: new Date().toISOString(),
+      content: {
+        ...current.content,
+        ...patch,
+      },
+    },
+    ownerUserId,
+  );
 }

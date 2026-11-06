@@ -20,6 +20,11 @@ export interface Dict {
   invoicesSaving: string;
   invoicesSaveError: string;
   invoicesConflict: string;
+  invoicesEditDraft: string;
+  invoicesNotes: string;
+  invoicesDraftHint: string;
+  invoicesInvalidDraft: string;
+  invoicesDiscardChanges: string;
   // setup
   welcome: string;
   welcomeSub: string;
@@ -125,6 +130,11 @@ export interface Dict {
 }
 
 const en: Dict = {
+  invoicesEditDraft: "Edit draft",
+  invoicesNotes: "Notes",
+  invoicesDraftHint: "This document is an editable draft. It has not been issued as a final invoice.",
+  invoicesInvalidDraft: "Check the entered information before saving.",
+  invoicesDiscardChanges: "Leave without saving your changes?",
   invoicesCreateDraft: "Create draft",
   invoicesSaving: "Saving...",
   invoicesSaveError: "Saving could not be confirmed. Reload the list before trying again.",
@@ -257,6 +267,11 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  invoicesEditDraft: "Modifier le brouillon",
+  invoicesNotes: "Notes",
+  invoicesDraftHint: "Ce document est un brouillon modifiable. Il n’a pas été émis comme facture définitive.",
+  invoicesInvalidDraft: "Vérifiez les informations saisies avant d’enregistrer.",
+  invoicesDiscardChanges: "Quitter sans enregistrer vos modifications ?",
   invoicesCreateDraft: "Créer un brouillon",
   invoicesSaving: "Enregistrement...",
   invoicesSaveError: "L’enregistrement n’a pas pu être confirmé. Rechargez la liste avant de réessayer.",
@@ -281,6 +296,11 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  invoicesEditDraft: "تعديل المسودة",
+  invoicesNotes: "ملاحظات",
+  invoicesDraftHint: "هذا المستند مسودة قابلة للتعديل، ولم يُصدر كفاتورة نهائية.",
+  invoicesInvalidDraft: "راجع البيانات المدخلة قبل الحفظ.",
+  invoicesDiscardChanges: "هل تريد المغادرة دون حفظ تعديلاتك؟",
   invoicesCreateDraft: "إنشاء مسودة",
   invoicesSaving: "جارٍ الحفظ...",
   invoicesSaveError: "تعذّر تأكيد الحفظ. أعد تحميل القائمة قبل المحاولة مجددًا.",
