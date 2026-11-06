@@ -35,7 +35,7 @@ const addressSchema = z.object({
   countryCode,
 }).strict();
 
-const partySchema = z.object({
+export const invoicePartySchema = z.object({
   partyId: identifier,
   kind: z.enum([
     "individual",
@@ -105,8 +105,8 @@ const contentSchema = z.object({
   }).strict(),
   language: z.string().min(1).max(35),
   asset: invoiceAssetSchema,
-  seller: partySchema,
-  buyer: partySchema,
+  seller: invoicePartySchema,
+  buyer: invoicePartySchema,
   supplyDate: dateSchema,
   lines: z.array(lineSchema).max(100),
   paymentTerms: z.object({

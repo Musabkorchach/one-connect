@@ -25,6 +25,26 @@ export interface Dict {
   invoicesDraftHint: string;
   invoicesInvalidDraft: string;
   invoicesDiscardChanges: string;
+  invoiceSeller: string;
+  invoiceBuyer: string;
+  invoicePartyKind: string;
+  invoiceChoose: string;
+  invoiceIndividual: string;
+  invoiceBusiness: string;
+  invoicePublicBody: string;
+  invoiceNonprofit: string;
+  invoiceIssuerCapacity: string;
+  invoicePrivateIndividual: string;
+  invoiceProfessional: string;
+  invoiceLegalName: string;
+  invoiceTradingName: string;
+  invoiceAddressLine1: string;
+  invoiceAddressLine2: string;
+  invoiceCity: string;
+  invoicePostalCode: string;
+  invoiceRegion: string;
+  invoiceCountryCode: string;
+  invoiceCountryCodeHint: string;
   // setup
   welcome: string;
   welcomeSub: string;
@@ -130,6 +150,26 @@ export interface Dict {
 }
 
 const en: Dict = {
+  invoiceSeller: "Seller",
+  invoiceBuyer: "Buyer",
+  invoicePartyKind: "Party type",
+  invoiceChoose: "Choose",
+  invoiceIndividual: "Individual",
+  invoiceBusiness: "Business",
+  invoicePublicBody: "Public body",
+  invoiceNonprofit: "Nonprofit organization",
+  invoiceIssuerCapacity: "Seller capacity",
+  invoicePrivateIndividual: "Private individual",
+  invoiceProfessional: "Professional",
+  invoiceLegalName: "Full name or legal name",
+  invoiceTradingName: "Trading name (optional)",
+  invoiceAddressLine1: "Address",
+  invoiceAddressLine2: "Additional address (optional)",
+  invoiceCity: "City",
+  invoicePostalCode: "Postal code",
+  invoiceRegion: "Region",
+  invoiceCountryCode: "Country code",
+  invoiceCountryCodeHint: "Two-letter country code, for example FR for France.",
   invoicesEditDraft: "Edit draft",
   invoicesNotes: "Notes",
   invoicesDraftHint: "This document is an editable draft. It has not been issued as a final invoice.",
@@ -267,6 +307,26 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  invoiceSeller: "Vendeur",
+  invoiceBuyer: "Acheteur",
+  invoicePartyKind: "Type de partie",
+  invoiceChoose: "Choisir",
+  invoiceIndividual: "Personne physique",
+  invoiceBusiness: "Entreprise",
+  invoicePublicBody: "Organisme public",
+  invoiceNonprofit: "Organisme à but non lucratif",
+  invoiceIssuerCapacity: "Qualité du vendeur",
+  invoicePrivateIndividual: "Particulier",
+  invoiceProfessional: "Professionnel",
+  invoiceLegalName: "Nom complet ou dénomination légale",
+  invoiceTradingName: "Nom commercial (facultatif)",
+  invoiceAddressLine1: "Adresse",
+  invoiceAddressLine2: "Complément d’adresse (facultatif)",
+  invoiceCity: "Ville",
+  invoicePostalCode: "Code postal",
+  invoiceRegion: "Région",
+  invoiceCountryCode: "Code pays",
+  invoiceCountryCodeHint: "Code pays à deux lettres, par exemple FR pour la France.",
   invoicesEditDraft: "Modifier le brouillon",
   invoicesNotes: "Notes",
   invoicesDraftHint: "Ce document est un brouillon modifiable. Il n’a pas été émis comme facture définitive.",
@@ -296,6 +356,26 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  invoiceSeller: "البائع",
+  invoiceBuyer: "المشتري",
+  invoicePartyKind: "نوع الطرف",
+  invoiceChoose: "اختر",
+  invoiceIndividual: "شخص",
+  invoiceBusiness: "شركة أو نشاط تجاري",
+  invoicePublicBody: "جهة عامة",
+  invoiceNonprofit: "منظمة غير ربحية",
+  invoiceIssuerCapacity: "صفة البائع",
+  invoicePrivateIndividual: "فرد بصفة شخصية",
+  invoiceProfessional: "مهني",
+  invoiceLegalName: "الاسم الكامل أو الاسم القانوني",
+  invoiceTradingName: "الاسم التجاري (اختياري)",
+  invoiceAddressLine1: "العنوان",
+  invoiceAddressLine2: "تكملة العنوان (اختياري)",
+  invoiceCity: "المدينة",
+  invoicePostalCode: "الرمز البريدي",
+  invoiceRegion: "المنطقة",
+  invoiceCountryCode: "رمز الدولة",
+  invoiceCountryCodeHint: "رمز الدولة من حرفين، مثل FR لفرنسا.",
   invoicesEditDraft: "تعديل المسودة",
   invoicesNotes: "ملاحظات",
   invoicesDraftHint: "هذا المستند مسودة قابلة للتعديل، ولم يُصدر كفاتورة نهائية.",
