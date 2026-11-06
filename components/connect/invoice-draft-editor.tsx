@@ -2,6 +2,11 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
+import { InvoicePartyFields } from "./invoice-party-fields";
+import {
+  invoicePartyToForm,
+  invoicePartyFromForm,
+} from "@/lib/connect/invoicing/draft-party";
 import type {
   InvoiceContent,
   InvoiceDraft,
@@ -33,7 +38,24 @@ export function InvoiceDraftEditor({
   const [invalid, setInvalid] = useState(false);
   const [unexpectedFailure, setUnexpectedFailure] = useState(false);
   const submitting = useRef(false);
-  const dirty = notes !== initialNotes;
+  const [seller, setSeller] = useState(() =>
+    invoicePartyToForm(draft.content.seller),
+  );
+
+  const [buyer, setBuyer] = useState(() =>
+    invoicePartyToForm(draft.content.buyer),
+  );
+
+  const sellerDirty =
+    JSON.stringify(seller) !==
+    JSON.stringify(invoicePartyToForm(draft.content.seller));
+
+  const buyerDirty =
+    JSON.stringify(buyer) !==
+    JSON.stringify(invoicePartyToForm(draft.content.buyer));
+
+  const notesDirty = notes !== initialNotes;
+  const dirty = notesDirty || sellerDirty || buyerDirty;
 
   useEffect(() => {
     if (!dirty) return;
@@ -60,12 +82,36 @@ export function InvoiceDraftEditor({
       return;
     }
 
+   const patch: Partial<InvoiceContent> = {};
+
+    try {
+      if (notesDirty) {
+        patch.notes = notes;
+      }
+
+      if (sellerDirty) {
+        patch.seller = invoicePartyFromForm(
+          seller,
+          draft.content.seller,
+        );
+      }
+
+      if (buyerDirty) {
+        patch.buyer = invoicePartyFromForm(
+          buyer,
+          draft.content.buyer,
+        );
+      }
+    } catch {
+      setInvalid(true);
+      return;
+    }
     submitting.current = true;
     setInvalid(false);
     setUnexpectedFailure(false);
 
     try {
-      const saved = await onSave({ notes });
+      const saved = await onSave(patch);
       if (saved) onBack();
     } catch {
       setUnexpectedFailure(true);
@@ -110,6 +156,26 @@ export function InvoiceDraftEditor({
         aria-busy={saving}
         className="space-y-5"
       >
+        <InvoicePartyFields
+          title={t.invoiceSeller}
+          value={seller}
+          disabled={saving}
+          showIssuerCapacity
+          onChange={(value) => {
+            setSeller(value);
+            setInvalid(false);
+          }}
+        />
+
+        <InvoicePartyFields
+          title={t.invoiceBuyer}
+          value={buyer}
+          disabled={saving}
+          onChange={(value) => {
+            setBuyer(value);
+            setInvalid(false);
+          }}
+        />
         <div>
           <label
             htmlFor={notesId}
