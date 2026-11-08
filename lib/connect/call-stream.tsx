@@ -83,24 +83,86 @@ export function CallStream({
     }
   };
 
-  useEffect(() => {
+    useEffect(() => {
     const element = videoRef.current;
     if (!element) return;
 
     let cancelled = false;
-    element.srcObject = stream;
-    setPlaybackBlocked(false);
+    let playPending = false;
 
-    if (stream) {
-      void element.play().catch(() => {
-        if (!cancelled && !muted) {
+    element.srcObject = stream;
+    element.muted = muted;
+    element.volume = 1;
+    setPlaybackBlocked(false);
+    setOutputMessage(null);
+
+    const attemptPlayback = () => {
+      if (cancelled || !stream || playPending) return;
+      playPending = true;
+
+      void element.play().then(
+        () => {
+          playPending = false;
+          if (cancelled) return;
+
+          setPlaybackBlocked(false);
+          setOutputMessage(null);
+        },
+        (error: unknown) => {
+          playPending = false;
+          if (cancelled || muted) return;
+
+          if (error instanceof Error && error.name === "AbortError") {
+            return;
+          }
+
           setPlaybackBlocked(true);
-        }
-      });
-    }
+          setOutputMessage(
+            error instanceof Error
+              ? `Audio playback failed: ${error.name} — ${error.message}`
+              : "Audio playback failed.",
+          );
+        },
+      );
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") attemptPlayback();
+    };
+
+    const watchedTracks = new Set<MediaStreamTrack>();
+
+    const watchTracks = () => {
+      for (const track of stream?.getTracks() ?? []) {
+        if (watchedTracks.has(track)) continue;
+        watchedTracks.add(track);
+        track.addEventListener("unmute", attemptPlayback);
+      }
+
+      attemptPlayback();
+    };
+
+    element.addEventListener("loadedmetadata", attemptPlayback);
+    element.addEventListener("canplay", attemptPlayback);
+    stream?.addEventListener("addtrack", watchTracks);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", attemptPlayback);
+
+    watchTracks();
 
     return () => {
       cancelled = true;
+
+      element.removeEventListener("loadedmetadata", attemptPlayback);
+      element.removeEventListener("canplay", attemptPlayback);
+      stream?.removeEventListener("addtrack", watchTracks);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", attemptPlayback);
+
+      for (const track of watchedTracks) {
+        track.removeEventListener("unmute", attemptPlayback);
+      }
+
       element.pause();
       element.srcObject = null;
     };
