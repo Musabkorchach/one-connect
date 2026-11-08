@@ -160,6 +160,18 @@ export function usePstnCallController(
       }
 
       run.call = call;
+      call.on("audio", (remoteAudio: HTMLAudioElement) => {
+        if (!isCurrent() || !remoteAudio.paused) return;
+
+        void remoteAudio.play().catch((error: unknown) => {
+          if (!isCurrent()) return;
+
+          console.warn(
+            "[PSTN] Remote audio playback failed:",
+            error instanceof Error ? `${error.name}: ${error.message}` : error,
+          );
+        });
+      });
       let lastVolumeUpdate = 0;
 
       call.on("volume", (inputVolume: number, outputVolume: number) => {
