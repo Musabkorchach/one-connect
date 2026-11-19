@@ -13,7 +13,7 @@
 import { createPiSDK } from "@swetate/core";
 import { authPlugin } from "@swetate/auth";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
-import { verifyPiAuth } from "@/lib/api-client";
+import { revokeSession, verifyPiAuth } from "@/lib/api-client";
 import type { RestoreOptions, SDKLiteInstance, UserStateRecord } from "@/lib/sdklite-types";
 
 type OneConnectAuthPlugin = ReturnType<typeof authPlugin>;
@@ -26,7 +26,7 @@ interface PiUser {
 // The public surfaces the @pi-sdk plugins mount on the instance. createPiSDK types the
 // instance as an open record, so we narrow the two namespaces we use.
 interface PiAuthApi {
-  login: (scopes?: string[]) => Promise<PiUser>;
+  login: (scopes?: string[], signal?: AbortSignal) => Promise<PiUser>;
   getUser: () => PiUser | null;
   isLoggedIn: () => boolean;
   getRenderSession: () => {
@@ -64,7 +64,9 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
 
       async function login(
         scopes: string[] = ["username", "payments"],
+        signal?: AbortSignal,
       ): Promise<PiUser> {
+        signal?.throwIfAborted();
         if (user) return user;
 
         const result = await Pi.authenticate(
@@ -72,9 +74,19 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
           incompletePaymentHandler,
         );
 
+        signal?.throwIfAborted();
         const verifiedRenderSession = await verifyPiAuth(
           result.accessToken,
         );
+
+        if (signal?.aborted) {
+          if (verifiedRenderSession?.sessionToken) {
+            void revokeSession(verifiedRenderSession.sessionToken).catch((error) => {
+              console.error("[SESSION REVOCATION ERROR]", error);
+            });
+          }
+          signal.throwIfAborted();
+        }
 
         if (
           !verifiedRenderSession?.sessionToken ||
