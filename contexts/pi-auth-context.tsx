@@ -5,9 +5,11 @@ import React, {
   useContext,
   useState,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
+import { LANGUAGES, type LangId } from "@/lib/connect/data";
 import { PRODUCT_CONFIG } from "@/lib/product-config";
 import { buildPiSdk, createSdk } from "@/lib/pi";
 import { verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
@@ -16,6 +18,34 @@ import type {
   SDKLiteInstance,
   UserPurchaseBalance,
 } from "@/lib/sdklite-types";
+
+const SIGNED_OUT_KEY = "oneconnect.explicit-logout";
+
+function readSignedOutLanguage(): LangId | null | undefined {
+  try {
+    const value = window.sessionStorage.getItem(SIGNED_OUT_KEY);
+    if (value === null) return null;
+    return LANGUAGES.find((language) => language.id === value)?.id ?? "en";
+  } catch {
+    // Unlike a missing marker, an unreadable store requires explicit sign-in.
+    return undefined;
+  }
+}
+
+function writeSignedOutLanguage(language: LangId | null) {
+  try {
+    if (language === null) window.sessionStorage.removeItem(SIGNED_OUT_KEY);
+    else window.sessionStorage.setItem(SIGNED_OUT_KEY, language);
+  } catch {
+    // The in-memory state still controls login when storage is unavailable.
+  }
+}
+
+function revokeOneConnectSession(token: string) {
+  void revokeSession(token).catch((error) => {
+    console.error("[SESSION REVOCATION ERROR]", error);
+  });
+}
 
 const COMMUNICATION_REQUEST_TYPE = '@pi:app:sdk:communication_information_request';
 
@@ -56,9 +86,9 @@ function parseJsonSafely(value: any): any {
  *
  * @returns {Promise<{accessToken: string, appId: string}|null>} Resolves with credentials or null
  */
-function requestParentCredentials(): Promise<{ accessToken: string; appId: string | null } | null> {
+function requestParentCredentials(signal: AbortSignal): Promise<{ accessToken: string; appId: string | null } | null> {
   // Early return if not in an iframe
-  if (!isInIframe()) {
+  if (signal.aborted || !isInIframe()) {
     return Promise.resolve(null);
   }
 
@@ -71,6 +101,7 @@ function requestParentCredentials(): Promise<{ accessToken: string; appId: strin
     // Cleanup function to remove listener and clear timeout
     const cleanup = (listener: (event: MessageEvent) => void) => {
       window.removeEventListener('message', listener);
+      signal.removeEventListener('abort', abort);
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
       }
@@ -78,7 +109,7 @@ function requestParentCredentials(): Promise<{ accessToken: string; appId: strin
 
     const messageListener = (event: MessageEvent) => {
       // Security: only accept messages from parent window
-      if (event.source !== window.parent) {
+      if (signal.aborted || event.source !== window.parent) {
         return;
       }
 
@@ -98,6 +129,12 @@ function requestParentCredentials(): Promise<{ accessToken: string; appId: strin
       // Return credentials or null if missing token
       resolve(accessToken ? { accessToken, appId } : null);
     };
+
+    const abort = () => {
+      cleanup(messageListener);
+      resolve(null);
+    };
+    signal.addEventListener('abort', abort, { once: true });
 
     // Set timeout handler (resolve with null on timeout)
     timeoutId = setTimeout(() => {
@@ -120,7 +157,9 @@ function requestParentCredentials(): Promise<{ accessToken: string; appId: strin
 }
 
 interface PiAuthContextType {
-  endLocalSession: () => void;
+  endLocalSession: (language: LangId) => void;
+  signedOutLanguage: LangId | null;
+  signIn: () => void;
   isAuthenticated: boolean;
   authMessage: string;
   hasError: boolean;
@@ -208,23 +247,29 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     UserPurchaseBalance[] | null
   >(null);
   const [premiumActive, setPremiumActiveState] = useState(false);
-  const endLocalSession = () => {
-    if (sessionToken) {
-  void revokeSession(sessionToken).catch((error) => {
-    console.error("[SESSION REVOCATION ERROR]", error);
-  });
-}
-  disconnectSocket();
-  setIsAuthenticated(false);
-  setSessionToken(null);
-  setUserId(null);
-  setPiUsername("");
-  setSdk(null);
-  setProducts(null);
-  setRestoredPurchases(null);
-  setPremiumActiveState(false);
-  setAuthMessage("Session ended");
-};
+  const [signedOutLanguage, setSignedOutLanguage] = useState<LangId | null>(null);
+  const authAttempt = useRef<AbortController | null>(null);
+  const activeSessionToken = useRef<string | null>(null);
+
+  const endLocalSession = (language: LangId) => {
+    writeSignedOutLanguage(language);
+    authAttempt.current?.abort();
+    authAttempt.current = null;
+    const token = activeSessionToken.current;
+    activeSessionToken.current = null;
+    if (token) revokeOneConnectSession(token);
+    disconnectSocket();
+    setIsAuthenticated(false);
+    setSessionToken(null);
+    setUserId(null);
+    setPiUsername("");
+    setSdk(null);
+    setProducts(null);
+    setRestoredPurchases(null);
+    setPremiumActiveState(false);
+    setHasError(false);
+    setSignedOutLanguage(language);
+  };
 
   const setPremiumActive = async (active: boolean) => {
     setPremiumActiveState(active);
@@ -245,6 +290,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     purchases: UserPurchaseBalance[],
     productSlug: string | undefined,
     authenticatedUsername: string,
+    signal: AbortSignal,
   ) => {
     const premium = purchases.some(
       (purchase) =>
@@ -253,6 +299,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     );
     try {
       const saved = await sdkInstance.state.get("oneconnect.premium");
+      if (signal.aborted) return;
       const savedBlob = saved?.blob as { active?: unknown; piUsername?: unknown } | undefined;
       const savedActive = savedBlob?.active === true && savedBlob.piUsername === authenticatedUsername;
       setPremiumActiveState(premium || savedActive);
@@ -265,23 +312,27 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error("Failed to restore Premium entitlement:", error);
-      setPremiumActiveState(premium);
+      if (!signal.aborted) setPremiumActiveState(premium);
     }
   };
 
-  const fetchProducts = async (sdkInstance: SDKLiteInstance): Promise<Product[]> => {
+  const fetchProducts = async (sdkInstance: SDKLiteInstance, signal: AbortSignal): Promise<Product[]> => {
     try {
       const { products } = await sdkInstance.state.products();
-      setProducts(products);
+      if (!signal.aborted) setProducts(products);
       return products;
     } catch (e) {
       console.error("Failed to load products:", e);
-      setProducts([]);
+      if (!signal.aborted) setProducts([]);
       return [];
     }
   };
 
-  const initialize = async () => {
+  const initialize = async (explicit = false) => {
+    if (authAttempt.current || activeSessionToken.current) return;
+    const attempt = new AbortController();
+    authAttempt.current = attempt;
+    const { signal } = attempt;
     setHasError(false);
     setRestoredPurchases(null);
     setPremiumActiveState(false);
@@ -289,41 +340,53 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // Probe for parent credentials (App Studio iframe environment).
       // When running inside App Studio's restore-preview iframe, SDKLite.login()
       // cannot complete outside the Pi CDN wrapper and would hang indefinitely.
-      const parentCredentials = await requestParentCredentials();
+      const parentCredentials = await requestParentCredentials(signal);
+      if (signal.aborted) return;
       if (parentCredentials) {
         const authResult = await verifyPiAuth(
           parentCredentials.accessToken,
         );
 
+        if (signal.aborted) {
+          revokeOneConnectSession(authResult.sessionToken);
+          return;
+        }
+        activeSessionToken.current = authResult.sessionToken;
         setSessionToken(authResult.sessionToken);
         setUserId(authResult.userId);
         setPiUsername(authResult.piUsername || "");
         setSdk(null);
         setProducts(null);
-        setIsAuthenticated(true);
-
         initSocket(
           authResult.userId,
           authResult.piUsername,
           authResult.sessionToken,
         );
+        setIsAuthenticated(true);
+        if (explicit) writeSignedOutLanguage(null);
 
         // Purchase services are initialized separately from app login.
         try {
           await loadPiSDK();
+          if (signal.aborted) return;
           await window.Pi.init({
             version: "2.0",
             sandbox: PI_NETWORK_CONFIG.SANDBOX,
           });
+          if (signal.aborted) return;
 
           await loadSDKLite();
+          if (signal.aborted) return;
           const purchaseSdk = await window.SDKLite.init();
+          if (signal.aborted) return;
           setSdk(purchaseSdk);
 
-          const availableProducts = await fetchProducts(purchaseSdk);
+          const availableProducts = await fetchProducts(purchaseSdk, signal);
+          if (signal.aborted) return;
 
           try {
             const { purchases } = await purchaseSdk.state.restore();
+            if (signal.aborted) return;
             setRestoredPurchases(purchases);
 
             const premiumProduct = availableProducts.find(
@@ -337,12 +400,15 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
               purchases,
               premiumProduct?.slug,
               authResult.piUsername,
+              signal,
             );
           } catch (error) {
+            if (signal.aborted) return;
             console.error("[PiAuth] Purchase restore failed:", error);
             setRestoredPurchases([]);
           }
         } catch (error) {
+          if (signal.aborted) return;
           console.error("[PiAuth] Purchase initialization failed:", error);
           setSdk(null);
           setProducts([]);
@@ -353,47 +419,57 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       }
       setAuthMessage("Loading Pi SDK...");
       await loadPiSDK();
+      if (signal.aborted) return;
       setAuthMessage("Initializing Pi Network...");
       await window.Pi.init({
         version: "2.0",
         sandbox: PI_NETWORK_CONFIG.SANDBOX,
       });
+      if (signal.aborted) return;
       setAuthMessage("Loading SDKLite...");
       await loadSDKLite();
+      if (signal.aborted) return;
 
       setAuthMessage("Initializing SDKLite...");
       const sdkLite = await window.SDKLite.init();
+      if (signal.aborted) return;
 
       // Auth + user-state are served by the @pi-sdk npm packages; SDKLite still backs
       // payments, ads, products and restore until those packages ship. The adapter keeps
       // the SDKLiteInstance surface so nothing downstream changes.
       setAuthMessage("Logging in...");
       const pi = buildPiSdk();
-      const authenticatedUser = await pi.auth.login();
+      const authenticatedUser = await pi.auth.login(undefined, signal);
+      const renderSession = pi.auth.getRenderSession();
+      if (signal.aborted) {
+        if (renderSession) revokeOneConnectSession(renderSession.sessionToken);
+        return;
+      }
+      if (!renderSession) {
+        throw new Error("Render session unavailable after Pi login");
+      }
 
-const renderSession = pi.auth.getRenderSession();
+      activeSessionToken.current = renderSession.sessionToken;
+      setSessionToken(renderSession.sessionToken);
+      setUserId(renderSession.userId);
+      setPiUsername(renderSession.piUsername);
 
-if (!renderSession) {
-  throw new Error("Render session unavailable after Pi login");
-}
-
-setSessionToken(renderSession.sessionToken);
-setUserId(renderSession.userId);
-setPiUsername(renderSession.piUsername);
-
-initSocket(
-  renderSession.userId,
-  renderSession.piUsername,
-  renderSession.sessionToken,
-);
+      initSocket(
+        renderSession.userId,
+        renderSession.piUsername,
+        renderSession.sessionToken,
+      );
       const sdkInstance = createSdk(sdkLite, pi);
       setSdk(sdkInstance);
       setIsAuthenticated(true);
+      if (explicit) writeSignedOutLanguage(null);
       setAuthMessage("Loading products...");
-      const availableProducts = await fetchProducts(sdkInstance);
+      const availableProducts = await fetchProducts(sdkInstance, signal);
+      if (signal.aborted) return;
 
       try {
         const { purchases } = await sdkInstance.state.restore();
+        if (signal.aborted) return;
         setRestoredPurchases(purchases);
         const premiumProduct = availableProducts.find(
           (product) => product.id === PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595,
@@ -403,13 +479,16 @@ initSocket(
           purchases,
           premiumProduct?.slug,
           authenticatedUser.username || "",
+          signal,
         );
         console.log("[PiAuth] Purchases restored", purchases);
       } catch (e) {
+        if (signal.aborted) return;
         console.error("[PiAuth] Failed to restore purchases:", e);
         setRestoredPurchases([]);
       }
     } catch (err) {
+      if (signal.aborted) return;
       console.error("SDKLite initialization failed:", err);
       setHasError(true);
       setAuthMessage((currentStage) =>
@@ -419,15 +498,32 @@ initSocket(
             : "Authentication failed. Please try again."
         }`
       );
+    } finally {
+      if (authAttempt.current === attempt) authAttempt.current = null;
     }
   };
 
+  const signIn = () => {
+    if (authAttempt.current || activeSessionToken.current) return;
+    setSignedOutLanguage(null);
+    void initialize(true);
+  };
+
   useEffect(() => {
-    initialize();
+    const language = readSignedOutLanguage();
+    if (language === null) void initialize();
+    else setSignedOutLanguage(language ?? "en");
+
+    return () => {
+      authAttempt.current?.abort();
+      authAttempt.current = null;
+    };
   }, []);
 
   const value: PiAuthContextType = {
     endLocalSession,
+    signedOutLanguage,
+    signIn,
     isAuthenticated,
     authMessage,
     hasError,
@@ -439,7 +535,7 @@ initSocket(
     restoredPurchases,
     premiumActive,
     setPremiumActive,
-    reinitialize: initialize,
+    reinitialize: () => initialize(true),
   };
 
   return (

@@ -1095,7 +1095,7 @@ useEffect(() => {
     commitProfile({ ...profileRef.current, language: lang }, true);
   };
   const logout = () => {
-    endLocalSession();
+    endLocalSession(profileRef.current.language);
     setProfile(defaultProfile());
     setContacts([]);
     setRequests([]);

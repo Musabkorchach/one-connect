@@ -1,9 +1,31 @@
 "use client";
 
 import { usePiAuth } from "@/contexts/pi-auth-context";
+import { RTL_LANGS } from "@/lib/connect/data";
+import { getDict } from "@/lib/connect/i18n";
 
 export function AuthLoadingScreen() {
-  const { authMessage, hasError, reinitialize } = usePiAuth();
+  const { authMessage, hasError, reinitialize, signedOutLanguage, signIn } = usePiAuth();
+
+  if (signedOutLanguage !== null) {
+    const t = getDict(signedOutLanguage);
+    return (
+      <div
+        className="min-h-screen flex flex-col items-center justify-center gap-4 bg-background p-6 text-center"
+        lang={signedOutLanguage}
+        dir={RTL_LANGS.includes(signedOutLanguage) ? "rtl" : "ltr"}
+      >
+        <h1 className="text-2xl font-bold">{t.signedOut}</h1>
+        <button
+          type="button"
+          onClick={signIn}
+          className="rounded-xl bg-primary px-6 py-3 font-semibold text-primary-foreground"
+        >
+          {t.signInWithPi}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[#0a0410] via-[#1a0a2e] to-[#0f0520]">

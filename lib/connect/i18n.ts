@@ -1,6 +1,8 @@
 import type { LangId } from "./data";
 
 export interface Dict {
+  signedOut: string;
+  signInWithPi: string;
   appName: string;
   tagline: string;
   // tabs
@@ -150,6 +152,7 @@ export interface Dict {
 }
 
 const en: Dict = {
+  signedOut: "Signed out", signInWithPi: "Sign in with Pi",
   invoiceSeller: "Seller",
   invoiceBuyer: "Buyer",
   invoicePartyKind: "Party type",
@@ -281,6 +284,7 @@ const en: Dict = {
 };
 
 const zh: Partial<Dict> = {
+  signedOut: "已退出登录", signInWithPi: "使用 Pi 登录",
   tagline: "你的 Pi 用户名，一个通用身份。",
   tabChats: "聊天", tabContacts: "联系人", tabCalls: "通话", tabEmails: "邮件", tabProfile: "我的",
   welcome: "欢迎使用 One Connect", welcomeSub: "你的 Pi 用户名成为消息、通话和邮件的通用身份 — 无需电话号码或邮箱。",
@@ -294,6 +298,7 @@ const zh: Partial<Dict> = {
 };
 
 const es: Partial<Dict> = {
+  signedOut: "Sesión cerrada", signInWithPi: "Iniciar sesión con Pi",
   tagline: "Tu nombre Pi. Una identidad universal.",
   tabChats: "Chats", tabContacts: "Contactos", tabCalls: "Llamadas", tabEmails: "Correos", tabProfile: "Perfil",
   welcome: "Bienvenido a One Connect", welcomeSub: "Tu nombre Pi se convierte en tu ID universal para mensajes, llamadas y correo — sin número de teléfono ni email.",
@@ -307,6 +312,7 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  signedOut: "Vous êtes déconnecté", signInWithPi: "Se connecter avec Pi",
   invoiceSeller: "Vendeur",
   invoiceBuyer: "Acheteur",
   invoicePartyKind: "Type de partie",
@@ -356,6 +362,7 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  signedOut: "تم تسجيل الخروج", signInWithPi: "تسجيل الدخول باستخدام Pi",
   invoiceSeller: "البائع",
   invoiceBuyer: "المشتري",
   invoicePartyKind: "نوع الطرف",
@@ -405,6 +412,7 @@ const ar: Partial<Dict> = {
 };
 
 const hi: Partial<Dict> = {
+  signedOut: "आप साइन आउट हो गए हैं", signInWithPi: "Pi से साइन इन करें",
   tagline: "आपकी Pi उपयोगकर्ता नाम। एक सार्वभौमिक ID।",
   tabChats: "चैट", tabContacts: "संपर्क", tabCalls: "कॉल", tabEmails: "ईमेल", tabProfile: "प्रोफ़ाइल",
   welcome: "One Connect में आपका स्वागत है", welcomeSub: "आपकी Pi उपयोगकर्ता नाम संदेश, कॉल और ईमेल के लिए आपकी सार्वभौमिक ID बन जाती है — कोई फ़ोन नंबर या ईमेल की आवश्यकता नहीं।",
@@ -418,6 +426,7 @@ const hi: Partial<Dict> = {
 };
 
 const ru: Partial<Dict> = {
+  signedOut: "Вы вышли из аккаунта", signInWithPi: "Войти через Pi",
   tagline: "Ваше имя Pi. Один универсальный ID.",
   tabChats: "Сообщения", tabContacts: "Контакты", tabCalls: "Вызовы", tabEmails: "Электронная почта", tabProfile: "Профиль",
   welcome: "Добро пожаловать в One Connect", welcomeSub: "Ваше имя Pi становится вашим универсальным ID для сообщений, звонков и электронной почты — без номера телефона или электронной почты.",
@@ -431,6 +440,7 @@ const ru: Partial<Dict> = {
 };
 
 const ja: Partial<Dict> = {
+  signedOut: "ログアウトしました", signInWithPi: "Pi でログイン",
   tagline: "あなたのPi名。 1つの普遍的なID。",
   tabChats: "チャット", tabContacts: "連絡先", tabCalls: "通話", tabEmails: "メール", tabProfile: "プロフィール",
   welcome: "One Connectへようこそ", welcomeSub: "あなたのPi名は、メッセージ、通話、メールのための普遍的なIDになります。電話番号やメールは不要です。",
@@ -444,6 +454,7 @@ const ja: Partial<Dict> = {
 };
 
 const ko: Partial<Dict> = {
+  signedOut: "로그아웃되었습니다", signInWithPi: "Pi로 로그인",
   tagline: "당신의 Pi 사용자 이름. 하나의 통합 ID.",
   tabChats: "채팅", tabContacts: "연락처", tabCalls: "통화", tabEmails: "이메일", tabProfile: "프로필",
   welcome: "One Connect에 오신 것을 환영합니다", welcomeSub: "Pi 사용자 이름이 메시지, 통화, 이메일을 위한 통합 ID가 됩니다. 전화번호나 이메일이 필요 없습니다.",
@@ -457,6 +468,7 @@ const ko: Partial<Dict> = {
 };
 
 const pt: Partial<Dict> = {
+  signedOut: "Sessão encerrada", signInWithPi: "Entrar com Pi",
   tagline: "Seu usuário Pi. Uma identidade universal.",
   tabChats: "Conversas", tabContacts: "Contatos", tabCalls: "Chamadas", tabEmails: "E-mails", tabProfile: "Perfil",
   welcome: "Bem-vindo ao One Connect", welcomeSub: "Seu usuário Pi vira sua identidade universal para mensagens, chamadas e e-mail — sem telefone ou e-mail.",
@@ -470,6 +482,7 @@ const pt: Partial<Dict> = {
 };
 
 const de: Partial<Dict> = {
+  signedOut: "Abgemeldet", signInWithPi: "Mit Pi anmelden",
   tagline: "Dein Pi-Nutzername. Eine universelle ID.",
   tabChats: "Chats", tabContacts: "Kontakte", tabCalls: "Anrufe", tabEmails: "E-Mails", tabProfile: "Profil",
   welcome: "Willkommen bei One Connect", welcomeSub: "Dein Pi-Nutzername wird deine universelle ID für Nachrichten, Anrufe und E-Mail – ohne Telefonnummer oder E-Mail.",
@@ -483,6 +496,7 @@ const de: Partial<Dict> = {
 };
 
 const it: Partial<Dict> = {
+  signedOut: "Disconnessione effettuata", signInWithPi: "Accedi con Pi",
   tagline: "Il tuo nome Pi. Un'identità universale.",
   tabChats: "Chat", tabContacts: "Contatti", tabCalls: "Chiamate", tabEmails: "E-mail", tabProfile: "Profilo",
   welcome: "Benvenuto su One Connect", welcomeSub: "Il tuo nome Pi diventa la tua identità universale per messaggi, chiamate e e-mail — senza telefono né e-mail.",
@@ -496,6 +510,7 @@ const it: Partial<Dict> = {
 };
 
 const tr: Partial<Dict> = {
+  signedOut: "Oturum kapatıldı", signInWithPi: "Pi ile giriş yap",
   tagline: "Pi kullanıcı adın. Tek evrensel kimlik.",
   tabChats: "Sohbetler", tabContacts: "Kişiler", tabCalls: "Aramalar", tabEmails: "E-posta", tabProfile: "Profil",
   welcome: "One Connect'e hoş geldin", welcomeSub: "Pi kullanıcı adın mesaj, arama ve e-posta için evrensel kimliğin olur; telefon ya da e-posta gerekmez.",
@@ -509,6 +524,7 @@ const tr: Partial<Dict> = {
 };
 
 const vi: Partial<Dict> = {
+  signedOut: "Đã đăng xuất", signInWithPi: "Đăng nhập bằng Pi",
   tagline: "Tên Pi của bạn. Một danh tính chung.",
   tabChats: "Trò chuyện", tabContacts: "Danh bạ", tabCalls: "Cuộc gọi", tabEmails: "Email", tabProfile: "Hồ sơ",
   welcome: "Chào mừng đến One Connect", welcomeSub: "Tên Pi trở thành danh tính chung cho tin nhắn, cuộc gọi và email — không cần số điện thoại hay email.",
@@ -522,6 +538,7 @@ const vi: Partial<Dict> = {
 };
 
 const am: Partial<Dict> = {
+  signedOut: "ወጥተዋል", signInWithPi: "በ Pi ይግቡ",
   tagline: "የእርስዎ Pi ስም። አንድ ሁሉን አቀፍ መለያ።",
   tabChats: "ውይይቶች", tabContacts: "እውቂያዎች", tabCalls: "ጥሪዎች", tabEmails: "ኢሜይሎች", tabProfile: "መገለጫ",
   welcome: "ወደ One Connect እንኳን በደህና መጡ", welcomeSub: "የእርስዎ Pi ስም ለመልዕክቶች፣ ጥሪዎች እና ኢሜይል ሁሉን አቀፍ መለያዎ ይሆናል።",
@@ -535,6 +552,7 @@ const am: Partial<Dict> = {
 };
 
 const ti: Partial<Dict> = {
+  signedOut: "ወጺእኩም", signInWithPi: "ብ Pi እቶ",
   tagline: "ናይ እርስኻ Pi ስም። ሓደ ዓለምለኻዊ መንነት።",
   tabChats: "ዕላል", tabContacts: "ተራኸብቲ", tabCalls: "ጻውዒት", tabEmails: "ኢመይል", tabProfile: "መግለጺ",
   welcome: "እንቋዕ ናብ One Connect ብደሓን መጻእኩም", welcomeSub: "ናይ እርስኻ Pi ስም ንመልእኽቲ፣ ጻውዒትን ኢመይልን ዓለምለኻዊ መንነትካ ይኸውን።",
@@ -548,6 +566,7 @@ const ti: Partial<Dict> = {
 };
 
 const id: Partial<Dict> = {
+  signedOut: "Anda telah keluar", signInWithPi: "Masuk dengan Pi",
   tagline: "Nama Pi Anda. Satu identitas universal.",
   tabChats: "Obrolan", tabContacts: "Kontak", tabCalls: "Panggilan", tabEmails: "Email", tabProfile: "Profil",
   welcome: "Selamat datang di One Connect", welcomeSub: "Nama Pi Anda menjadi identitas universal untuk pesan, panggilan, dan email — tanpa nomor telepon atau email.",
