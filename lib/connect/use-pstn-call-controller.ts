@@ -11,6 +11,7 @@ export interface PstnCallState {
   phase: "preparing" | "connecting" | "ringing" | "connected";
   muted: boolean;
   connectedAt: number | null;
+  quotaResetsAt?: number;
   inputVolume?: number;
   outputVolume?: number;
 }
@@ -146,6 +147,7 @@ export function usePstnCallController(
       setCallState((state) => state && ({
         ...state,
         phone: prepared.phone,
+        quotaResetsAt: prepared.quotaResetsAt,
         phase: "connecting",
       }));
 

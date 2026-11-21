@@ -6,6 +6,7 @@ import React, {
   useState,
   useEffect,
   useRef,
+  useCallback,
   type ReactNode,
 } from "react";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
@@ -20,6 +21,17 @@ import type {
 } from "@/lib/sdklite-types";
 
 const SIGNED_OUT_KEY = "oneconnect.explicit-logout";
+type SignedOutNotice = "accepted" | "deleting";
+const DELETION_NOTICE_KEY = "oneconnect.deletion-notice";
+
+function readDeletionNotice(): SignedOutNotice | null {
+  try {
+    const notice = window.sessionStorage.getItem(DELETION_NOTICE_KEY);
+    return notice === "accepted" || notice === "deleting" ? notice : null;
+  } catch {
+    return null;
+  }
+}
 
 function readSignedOutLanguage(): LangId | null | undefined {
   try {
@@ -32,10 +44,12 @@ function readSignedOutLanguage(): LangId | null | undefined {
   }
 }
 
-function writeSignedOutLanguage(language: LangId | null) {
+function writeSignedOutLanguage(language: LangId | null, notice: SignedOutNotice | null = null) {
   try {
     if (language === null) window.sessionStorage.removeItem(SIGNED_OUT_KEY);
     else window.sessionStorage.setItem(SIGNED_OUT_KEY, language);
+    if (notice) window.sessionStorage.setItem(DELETION_NOTICE_KEY, notice);
+    else window.sessionStorage.removeItem(DELETION_NOTICE_KEY);
   } catch {
     // The in-memory state still controls login when storage is unavailable.
   }
@@ -159,10 +173,20 @@ function requestParentCredentials(signal: AbortSignal): Promise<{ accessToken: s
 interface PiAuthContextType {
   endLocalSession: (language: LangId) => void;
   signedOutLanguage: LangId | null;
+  signedOutNotice: SignedOutNotice | null;
+  accountDeletionSupported: boolean;
+  getDeletionPiToken: (token: string, signal: AbortSignal) => Promise<string>;
+  finishAccountDeletion: (token: string, language: LangId) => void;
   signIn: () => void;
   isAuthenticated: boolean;
   authMessage: string;
   hasError: boolean;
+  accountMigrationRequired: boolean;
+  privateDataOwner: string | null;
+  emailSocketMode: "legacy" | "account";
+  chatSocketMode: "legacy" | "account";
+  groupSocketMode: "legacy" | "account";
+  isCurrentSession: (token: string) => boolean;
   piUsername: string;
   userId: string | null;
   sessionToken: string | null;
@@ -238,6 +262,11 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authMessage, setAuthMessage] = useState("Initializing Pi Network...");
   const [hasError, setHasError] = useState(false);
+  const [privateDataOwner, setPrivateDataOwner] = useState<string | null>(null);
+  const [accountMigrationRequired, setAccountMigrationRequired] = useState(false);
+  const [groupSocketMode, setGroupSocketMode] = useState<"legacy" | "account">("legacy");
+  const [chatSocketMode, setChatSocketMode] = useState<"legacy" | "account">("legacy");
+  const [emailSocketMode, setEmailSocketMode] = useState<"legacy" | "account">("legacy");
   const [piUsername, setPiUsername] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -248,18 +277,29 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   >(null);
   const [premiumActive, setPremiumActiveState] = useState(false);
   const [signedOutLanguage, setSignedOutLanguage] = useState<LangId | null>(null);
+  const [signedOutNotice, setSignedOutNotice] = useState<SignedOutNotice | null>(null);
+  const [accountDeletionSupported, setAccountDeletionSupported] = useState(false);
+  const authSource = useRef<"pi" | "parent" | null>(null);
   const authAttempt = useRef<AbortController | null>(null);
   const activeSessionToken = useRef<string | null>(null);
+  const isCurrentSession = useCallback((token: string) => activeSessionToken.current === token, []);
 
-  const endLocalSession = (language: LangId) => {
-    writeSignedOutLanguage(language);
+  const endLocalSession = (language: LangId, notice: SignedOutNotice | null = null) => {
+    writeSignedOutLanguage(language, notice);
     authAttempt.current?.abort();
     authAttempt.current = null;
     const token = activeSessionToken.current;
     activeSessionToken.current = null;
-    if (token) revokeOneConnectSession(token);
+    authSource.current = null;
+    if (token && notice !== "accepted") revokeOneConnectSession(token);
     disconnectSocket();
     setIsAuthenticated(false);
+    setAccountMigrationRequired(false);
+    setAccountDeletionSupported(false);
+    setPrivateDataOwner(null);
+    setEmailSocketMode("legacy");
+    setChatSocketMode("legacy");
+    setGroupSocketMode("legacy");
     setSessionToken(null);
     setUserId(null);
     setPiUsername("");
@@ -269,7 +309,23 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     setPremiumActiveState(false);
     setHasError(false);
     setSignedOutLanguage(language);
+    setSignedOutNotice(notice);
   };
+
+  function finishAccountDeletion(token: string, language: LangId) {
+    if (isCurrentSession(token)) endLocalSession(language, "accepted");
+  }
+
+  async function getDeletionPiToken(token: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (!isCurrentSession(token)) throw new Error("Session changed");
+    const accessToken = authSource.current === "parent"
+      ? (await requestParentCredentials(signal))?.accessToken
+      : (await Pi.authenticate(["username"], () => {})).accessToken;
+    signal.throwIfAborted();
+    if (!accessToken || !isCurrentSession(token)) throw new Error("Pi verification unavailable");
+    return accessToken;
+  }
 
   const setPremiumActive = async (active: boolean) => {
     setPremiumActiveState(active);
@@ -328,7 +384,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const initialize = async (explicit = false) => {
+  const initialize = async (explicit = false, requestedLanguage?: LangId) => {
     if (authAttempt.current || activeSessionToken.current) return;
     const attempt = new AbortController();
     authAttempt.current = attempt;
@@ -351,12 +407,25 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
           revokeOneConnectSession(authResult.sessionToken);
           return;
         }
+        authSource.current = "parent";
+        setAccountDeletionSupported(authResult.accountDeletionSupported === true);
+        setSignedOutNotice(null);
         activeSessionToken.current = authResult.sessionToken;
         setSessionToken(authResult.sessionToken);
         setUserId(authResult.userId);
         setPiUsername(authResult.piUsername || "");
         setSdk(null);
         setProducts(null);
+        if (authResult.emailSocketMode === "account") setEmailSocketMode("account");
+        if (authResult.chatSocketMode === "account") setChatSocketMode("account");
+        if (authResult.groupSocketMode === "account") setGroupSocketMode("account");
+        if (typeof authResult.privateDataOwner === "string" && /^account-[0-9a-f]{64}$/.test(authResult.privateDataOwner)) setPrivateDataOwner(authResult.privateDataOwner);
+        if (authResult.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || authResult.emailSocketMode === "account" || authResult.chatSocketMode === "account" || authResult.groupSocketMode === "account") {
+          setAccountMigrationRequired(true);
+          setIsAuthenticated(true);
+          if (explicit) writeSignedOutLanguage(null);
+          return;
+        }
         initSocket(
           authResult.userId,
           authResult.piUsername,
@@ -449,10 +518,23 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         throw new Error("Render session unavailable after Pi login");
       }
 
+      authSource.current = "pi";
+      setAccountDeletionSupported(renderSession.accountDeletionSupported === true);
+      setSignedOutNotice(null);
       activeSessionToken.current = renderSession.sessionToken;
       setSessionToken(renderSession.sessionToken);
       setUserId(renderSession.userId);
       setPiUsername(renderSession.piUsername);
+      if (renderSession.emailSocketMode === "account") setEmailSocketMode("account");
+      if (renderSession.chatSocketMode === "account") setChatSocketMode("account");
+      if (renderSession.groupSocketMode === "account") setGroupSocketMode("account");
+      if (typeof renderSession.privateDataOwner === "string" && /^account-[0-9a-f]{64}$/.test(renderSession.privateDataOwner)) setPrivateDataOwner(renderSession.privateDataOwner);
+      if (renderSession.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || renderSession.emailSocketMode === "account" || renderSession.chatSocketMode === "account" || renderSession.groupSocketMode === "account") {
+        setAccountMigrationRequired(true);
+        setIsAuthenticated(true);
+        if (explicit) writeSignedOutLanguage(null);
+        return;
+      }
 
       initSocket(
         renderSession.userId,
@@ -489,6 +571,13 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (err) {
       if (signal.aborted) return;
+      if (err instanceof Error && "code" in err && err.code === "ACCOUNT_DELETING") {
+        const browserLanguage = window.navigator?.language?.split("-")[0];
+        const language = requestedLanguage ?? readSignedOutLanguage() ??
+          LANGUAGES.find(({ id }) => id === browserLanguage)?.id ?? "en";
+        endLocalSession(language, "deleting");
+        return;
+      }
       console.error("SDKLite initialization failed:", err);
       setHasError(true);
       setAuthMessage((currentStage) =>
@@ -506,13 +595,16 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const signIn = () => {
     if (authAttempt.current || activeSessionToken.current) return;
     setSignedOutLanguage(null);
-    void initialize(true);
+    void initialize(true, signedOutLanguage ?? undefined);
   };
 
   useEffect(() => {
     const language = readSignedOutLanguage();
     if (language === null) void initialize();
-    else setSignedOutLanguage(language ?? "en");
+    else {
+      setSignedOutLanguage(language ?? "en");
+      setSignedOutNotice(readDeletionNotice());
+    }
 
     return () => {
       authAttempt.current?.abort();
@@ -523,10 +615,20 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const value: PiAuthContextType = {
     endLocalSession,
     signedOutLanguage,
+    signedOutNotice,
+    accountDeletionSupported,
+    getDeletionPiToken,
+    finishAccountDeletion,
     signIn,
     isAuthenticated,
     authMessage,
     hasError,
+    accountMigrationRequired,
+    privateDataOwner,
+    emailSocketMode,
+    chatSocketMode,
+    groupSocketMode,
+    isCurrentSession,
     piUsername,
     userId,
     sessionToken,
@@ -535,7 +637,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     restoredPurchases,
     premiumActive,
     setPremiumActive,
-    reinitialize: () => initialize(true),
+    reinitialize: () => initialize(true, signedOutLanguage ?? undefined),
   };
 
   return (

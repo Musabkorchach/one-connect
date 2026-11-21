@@ -6,11 +6,18 @@ import { InvoiceDraftEditor } from "./invoice-draft-editor";
 import type { InvoiceDraftSnapshot } from "@/lib/connect/invoicing/draft-repository";
 import { FileText } from "lucide-react";
 import { useConnect } from "@/contexts/connect-context";
+import { getDict } from "@/lib/connect/i18n";
+import type { LangId } from "@/lib/connect/data";
 import { useInvoiceDrafts } from "@/lib/connect/invoicing/use-invoice-drafts";
 
 export function InvoicesView() {
   const { t, profile } = useConnect();
-  const { userId, sessionToken } = usePiAuth();
+  return <InvoicesPanel language={profile.language} t={t} />;
+}
+
+export function InvoicesPanel({ language, t = getDict(language) }: { language: LangId; t?: ReturnType<typeof getDict> }) {
+  const { userId, privateDataOwner, sessionToken, isCurrentSession } = usePiAuth();
+  const owner = privateDataOwner ?? userId;
 
   const [opened, setOpened] = useState<{
     ownerUserId: string;
@@ -34,7 +41,8 @@ export function InvoicesView() {
 
   const activeEditor =
     opened &&
-    opened.ownerUserId === userId &&
+    opened.ownerUserId === owner &&
+    isCurrentSession(opened.sessionToken) &&
     opened.sessionToken === sessionToken
       ? opened
       : null;
@@ -74,7 +82,7 @@ export function InvoicesView() {
 
   return (
     <section
-      dir={profile.language === "ar" ? "rtl" : "ltr"}
+      dir={language === "ar" ? "rtl" : "ltr"}
       aria-labelledby="invoices-title"
       aria-busy={loading}
       className="min-h-[100dvh] px-4 pb-28 pt-6"
@@ -95,7 +103,7 @@ export function InvoicesView() {
         disabled={!canCreate}
         aria-busy={saving}
         onClick={() => {
-          void createDraft(profile.language);
+          void createDraft(language);
         }}
         className="mb-6 w-full rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -188,7 +196,7 @@ export function InvoicesView() {
                   <span>{t.drafts}</span>
                   <time dateTime={draft.updatedAt}>
                     {new Date(draft.updatedAt).toLocaleDateString(
-                      profile.language,
+                      language,
                       {
                         year: "numeric",
                         month: "short",
@@ -204,14 +212,14 @@ export function InvoicesView() {
                     if (
                       !canCreate ||
                       revision === null ||
-                      !userId ||
+                      !owner ||
                       !sessionToken
                     ) {
                       return;
                     }
 
                     setOpened({
-                      ownerUserId: userId,
+                      ownerUserId: owner,
                       sessionToken,
                       draftId: draft.id,
                       snapshot: structuredClone({

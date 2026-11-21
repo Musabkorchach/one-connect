@@ -81,7 +81,6 @@ import {
 } from "@/lib/connect/data";
 
 // ---- Fallback in-memory store (App Studio preview: sdk is null) ----
-const memStore = new Map<string, Record<string, unknown>>();
 
 interface StateApi {
   get: (key: string) => Promise<{ blob: Record<string, unknown> } | null>;
@@ -151,7 +150,7 @@ interface ConnectContextType {
 const ConnectContext = createContext<ConnectContextType | undefined>(undefined);
 
 export function ConnectProvider({ children }: { children: ReactNode }) {
-  const { sdk, isAuthenticated, piUsername, sessionToken, endLocalSession } = usePiAuth();
+  const { sdk, isAuthenticated, piUsername, sessionToken, endLocalSession, isCurrentSession } = usePiAuth();
 
   const [ready, setReady] = useState(false);
   const [chatsLoaded, setChatsLoaded] = useState(false);
@@ -490,14 +489,27 @@ if (cRec) {
     return () => { cancelled = true; };
   }, [sdk, isAuthenticated, piUsername, sessionToken]);
 
+  useEffect(() => () => {
+    stateApi.current = null;
+    for (const saver of Object.values(savers.current)) {
+      if (saver.timer) clearTimeout(saver.timer);
+    }
+    savers.current = {};
+    saveQueues.current.clear();
+  }, []);
+
   // flush on hide
   useEffect(() => {
     const onHide = () => flushAll();
     window.addEventListener("pagehide", onHide);
-    document.addEventListener("visibilitychange", () => {
+    const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") flushAll();
-    });
-    return () => window.removeEventListener("pagehide", onHide);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   // sync <html> lang/dir with language
@@ -563,12 +575,13 @@ if (cRec) {
     let revision = 0;
 
     const refresh = async (): Promise<void> => {
+      if (cancelled || !isCurrentSession(sessionToken)) return;
       const requestRevision = ++revision;
 
       try {
         const records = await getInternalEmails(sessionToken);
 
-        if (cancelled || requestRevision !== revision) return;
+        if (cancelled || !isCurrentSession(sessionToken) || requestRevision !== revision) return;
 
         const serverEmails: Email[] = [];
 
@@ -593,7 +606,7 @@ if (cRec) {
         emailsRef.current = next;
         setEmails(next);
       } catch (error) {
-        if (cancelled || requestRevision !== revision) return;
+        if (cancelled || !isCurrentSession(sessionToken) || requestRevision !== revision) return;
 
         console.error("[EMAIL SYNC ERROR]", error);
         setStorageNotice(true);
@@ -628,7 +641,7 @@ if (cRec) {
 
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [isAuthenticated, sessionToken, piUsername, emailsLoadedFor]);
+  }, [isAuthenticated, sessionToken, piUsername, emailsLoadedFor, isCurrentSession]);
 
   useEffect(() => {
     if (!isAuthenticated || !chatsLoaded || !sessionToken || !piUsername) {

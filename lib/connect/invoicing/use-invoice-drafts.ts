@@ -31,16 +31,18 @@ interface DraftScope extends DraftIdentity {
   snapshot: InvoiceDraftSnapshot | null;
   busy: boolean;
   blocked: boolean;
+  signal: AbortSignal;
 }
 
 export function useInvoiceDrafts() {
-  const { isAuthenticated, sessionToken, userId } = usePiAuth();
+  const { isAuthenticated, sessionToken, userId, privateDataOwner, isCurrentSession } = usePiAuth();
+  const owner = privateDataOwner ?? userId;
   const [requestId, setRequestId] = useState(0);
   const [state, setState] = useState<DraftLoadState | null>(null);
   const scopeRef = useRef<DraftScope | null>(null);
 
   useEffect(() => {
-    if (!isAuthenticated || !sessionToken || !userId) {
+    if (!isAuthenticated || !sessionToken || !owner) {
       scopeRef.current = null;
       setState(null);
       return;
@@ -48,7 +50,7 @@ export function useInvoiceDrafts() {
 
     const controller = new AbortController();
     const identity: DraftIdentity = {
-      ownerUserId: userId,
+      ownerUserId: owner,
       sessionToken,
       requestId,
     };
@@ -58,17 +60,19 @@ export function useInvoiceDrafts() {
       snapshot: null,
       busy: false,
       blocked: false,
+      signal: controller.signal,
     };
 
     scopeRef.current = scope;
 
     void loadInvoiceDrafts(
       sessionToken,
-      userId,
+      owner,
       controller.signal,
+      Boolean(privateDataOwner),
     ).then(
       (snapshot) => {
-        if (scopeRef.current !== scope) return;
+        if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return;
 
         scope.snapshot = snapshot;
         setState({
@@ -80,7 +84,7 @@ export function useInvoiceDrafts() {
         });
       },
       () => {
-        if (scopeRef.current !== scope) return;
+        if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return;
 
         setState({
           ...identity,
@@ -98,15 +102,15 @@ export function useInvoiceDrafts() {
       }
       controller.abort();
     };
-  }, [isAuthenticated, sessionToken, userId, requestId]);
+  }, [isAuthenticated, sessionToken, owner, privateDataOwner, isCurrentSession, requestId]);
 
   const authenticated = Boolean(
-    isAuthenticated && sessionToken && userId,
+    isAuthenticated && sessionToken && owner && isCurrentSession(sessionToken),
   );
 
   const current =
     authenticated &&
-    state?.ownerUserId === userId &&
+    state?.ownerUserId === owner &&
     state?.sessionToken === sessionToken &&
     state?.requestId === requestId
       ? state
@@ -120,7 +124,8 @@ export function useInvoiceDrafts() {
     if (
       !isAuthenticated ||
       !scope ||
-      scope.ownerUserId !== userId ||
+      scope.ownerUserId !== owner ||
+      !isCurrentSession(scope.sessionToken) ||
       scope.sessionToken !== sessionToken ||
       scope.requestId !== requestId ||
       !scope.snapshot ||
@@ -144,9 +149,10 @@ export function useInvoiceDrafts() {
         scope.sessionToken,
         scope.ownerUserId,
         language,
+        scope.signal,
       );
 
-      if (scopeRef.current !== scope) return null;
+      if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return null;
 
       scope.snapshot = result.snapshot;
 
@@ -162,7 +168,7 @@ export function useInvoiceDrafts() {
 
       return result.draft;
     } catch (error) {
-      if (scopeRef.current !== scope) return null;
+      if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return null;
 
       scope.blocked = true;
 
@@ -195,7 +201,8 @@ export function useInvoiceDrafts() {
     if (
       !isAuthenticated ||
       !scope ||
-      scope.ownerUserId !== userId ||
+      scope.ownerUserId !== owner ||
+      !isCurrentSession(scope.sessionToken) ||
       scope.sessionToken !== sessionToken ||
       scope.requestId !== requestId ||
       !scope.snapshot ||
@@ -224,9 +231,10 @@ export function useInvoiceDrafts() {
         patch,
         scope.sessionToken,
         scope.ownerUserId,
+        scope.signal,
       );
 
-      if (scopeRef.current !== scope) return null;
+      if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return null;
 
       scope.snapshot = result.snapshot;
 
@@ -242,7 +250,7 @@ export function useInvoiceDrafts() {
 
       return result.draft;
     } catch (error) {
-      if (scopeRef.current !== scope) return null;
+      if (scopeRef.current !== scope || !isCurrentSession(scope.sessionToken)) return null;
 
       scope.blocked = true;
 

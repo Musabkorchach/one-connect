@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
+import { formatPstnQuotaReset } from "@/lib/api-client";
 import type { PstnCallState } from "@/lib/connect/use-pstn-call-controller";
 
 export function PstnCallScreen({
@@ -71,6 +72,11 @@ export function PstnCallScreen({
         Test call · Maximum 2 minutes
       </p>
 
+      {call.quotaResetsAt !== undefined && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Daily quota resets at {formatPstnQuotaReset(call.quotaResetsAt)}
+        </p>
+      )}
       {call.phase === "connected" && (
         <div className="mt-6 w-full max-w-xs space-y-4 text-start" dir="rtl">
           <p className="text-sm font-semibold">فحص الصوت</p>

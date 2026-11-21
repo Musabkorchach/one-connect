@@ -33,6 +33,12 @@ interface PiAuthApi {
     sessionToken: string;
     userId: string;
     piUsername: string;
+    accountDeletionSupported?: boolean;
+    accountDataStatus?: "ACCOUNT_MIGRATION_REQUIRED";
+    emailSocketMode?: "account";
+    chatSocketMode?: "account";
+    groupSocketMode?: "account";
+    privateDataOwner?: string;
   } | null;
 }
 interface PiUserStateApi {
@@ -54,11 +60,7 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
 
     install(ctx) {
       let user: PiUser | null = null;
-      let renderSession: {
-        sessionToken: string;
-        userId: string;
-        piUsername: string;
-      } | null = null;
+      let renderSession: ReturnType<PiAuthApi["getRenderSession"]> = null;
 
       let incompletePaymentHandler = (_payment: unknown) => {};
 
@@ -100,6 +102,12 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
           sessionToken: verifiedRenderSession.sessionToken,
           userId: verifiedRenderSession.userId,
           piUsername: verifiedRenderSession.piUsername,
+          accountDeletionSupported: verifiedRenderSession.accountDeletionSupported === true,
+          accountDataStatus: verifiedRenderSession.accountDataStatus,
+          emailSocketMode: verifiedRenderSession.emailSocketMode,
+          chatSocketMode: verifiedRenderSession.chatSocketMode,
+          groupSocketMode: verifiedRenderSession.groupSocketMode,
+          privateDataOwner: verifiedRenderSession.privateDataOwner,
         };
         user = {
           uid: verifiedRenderSession.userId,

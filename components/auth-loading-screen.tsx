@@ -2,20 +2,23 @@
 
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { RTL_LANGS } from "@/lib/connect/data";
-import { getDict } from "@/lib/connect/i18n";
+import { getDeletionCopy, getDict } from "@/lib/connect/i18n";
 
 export function AuthLoadingScreen() {
-  const { authMessage, hasError, reinitialize, signedOutLanguage, signIn } = usePiAuth();
+  const { authMessage, hasError, reinitialize, signedOutLanguage, signedOutNotice, signIn } = usePiAuth();
 
   if (signedOutLanguage !== null) {
     const t = getDict(signedOutLanguage);
+    const deletion = getDeletionCopy(signedOutLanguage);
     return (
       <div
         className="min-h-screen flex flex-col items-center justify-center gap-4 bg-background p-6 text-center"
         lang={signedOutLanguage}
         dir={RTL_LANGS.includes(signedOutLanguage) ? "rtl" : "ltr"}
       >
-        <h1 className="text-2xl font-bold">{t.signedOut}</h1>
+        <h1 className="text-2xl font-bold" role="status">
+          {signedOutNotice ? deletion[signedOutNotice] : t.signedOut}
+        </h1>
         <button
           type="button"
           onClick={signIn}

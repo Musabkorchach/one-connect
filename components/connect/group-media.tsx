@@ -11,6 +11,13 @@ import {
 } from "@/lib/api-client";
 
 export function GroupMedia({ message }: { message: GroupMessageRecord }) {
+  const { lang } = useConnect();
+  return <GroupMediaContent message={message} arabic={lang === "ar"} />;
+}
+
+export function GroupMediaContent({ message, arabic = false, accessSignal }: {
+  message: Pick<GroupMessageRecord, "groupId" | "mediaId" | "kind" | "fileName">; arabic?: boolean; accessSignal?: AbortSignal;
+}) {
   const { sessionToken, isAuthenticated } = usePiAuth();
 
   if (
@@ -23,6 +30,8 @@ export function GroupMedia({ message }: { message: GroupMessageRecord }) {
   return (
     <MediaContent
       key={`${sessionToken}:${message.groupId}:${message.mediaId}:${message.kind}`}
+      arabic={arabic}
+      accessSignal={accessSignal}
       token={sessionToken}
       groupId={message.groupId}
       mediaId={message.mediaId}
@@ -33,21 +42,22 @@ export function GroupMedia({ message }: { message: GroupMessageRecord }) {
 }
 
 function MediaContent({
+  arabic,
+  accessSignal,
   token,
   groupId,
   mediaId,
   kind,
   fileName,
 }: {
+  arabic: boolean;
+  accessSignal?: AbortSignal;
   token: string;
   groupId: string;
   mediaId: string;
   kind: GroupMediaKind;
   fileName: string;
 }) {
-  const { lang } = useConnect();
-  const arabic = lang === "ar";
-
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,17 +69,24 @@ function MediaContent({
   const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    aliveRef.current = true;
+    aliveRef.current = !accessSignal?.aborted;
 
-    return () => {
+    const release = () => {
       aliveRef.current = false;
       controllerRef.current?.abort();
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+      blobRef.current = null;
     };
-  }, []);
+    accessSignal?.addEventListener("abort", release, { once: true });
+    return () => {
+      accessSignal?.removeEventListener("abort", release);
+      release();
+    };
+  }, [accessSignal]);
 
   const load = async () => {
-    if (busyRef.current) return;
+    if (busyRef.current || !aliveRef.current) return;
 
     busyRef.current = true;
     setBusy(true);
