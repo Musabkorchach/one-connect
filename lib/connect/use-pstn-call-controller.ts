@@ -5,12 +5,15 @@ import type { Call, Device } from "@twilio/voice-sdk";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { preparePstnCall } from "@/lib/api-client";
 import { loadTwilioVoice } from "@/lib/connect/load-twilio-voice";
+import { createRemoteCallAudio, type RemoteCallAudio } from "./remote-call-audio";
 
 export interface PstnCallState {
   phone: string;
   phase: "preparing" | "connecting" | "ringing" | "connected";
   muted: boolean;
   connectedAt: number | null;
+  audio: RemoteCallAudio;
+  playbackBlocked: boolean;
   inputVolume?: number;
   outputVolume?: number;
 }
@@ -21,6 +24,8 @@ interface CallRun {
   call: Call | null;
   abort: AbortController;
   timer: ReturnType<typeof setTimeout> | null;
+  audio: RemoteCallAudio;
+  silentTracks: Set<MediaStreamTrack>;
 }
 
 export function usePstnCallController(
@@ -47,6 +52,9 @@ export function usePstnCallController(
     runRef.current = null;
     run.abort.abort();
     if (run.timer) clearTimeout(run.timer);
+    run.audio.close();
+    for (const track of run.silentTracks) track.stop();
+    run.silentTracks.clear();
 
     try { run.call?.disconnect(); } catch {}
     try { run.device?.destroy(); } catch {}
@@ -93,6 +101,11 @@ export function usePstnCallController(
       call: null,
       abort: new AbortController(),
       timer: null,
+      silentTracks: new Set(),
+      audio: createRemoteCallAudio((playbackBlocked) => {
+        if (runRef.current !== run) return;
+        setCallState((state) => state && ({ ...state, playbackBlocked }));
+      }),
     };
 
     runRef.current = run;
@@ -102,6 +115,8 @@ export function usePstnCallController(
       phase: "preparing",
       muted: false,
       connectedAt: null,
+      audio: run.audio,
+      playbackBlocked: false,
     });
 
     const isCurrent = () =>
@@ -142,6 +157,30 @@ export function usePstnCallController(
       device.on("error", () => {
         closeRun(run, "Phone call connection failed.");
       });
+      const deviceAudio = device.audio;
+      if (!deviceAudio) throw new Error("Phone call audio is unavailable.");
+      await deviceAudio.addProcessor({
+        async createProcessedStream(stream) {
+          if (!isCurrent()) return new MediaStream();
+          run.audio.attach(stream);
+          // Route audible playback through the already primed element.
+          // The SDK still receives a stream for its own output element.
+          const silent = new MediaStream(stream.getAudioTracks().map((track) => {
+            const clone = track.clone();
+            clone.enabled = false;
+            run.silentTracks.add(clone);
+            return clone;
+          }));
+          return silent;
+        },
+        async destroyProcessedStream(stream) {
+          for (const track of stream.getTracks()) {
+            track.stop();
+            run.silentTracks.delete(track);
+          }
+        },
+      }, true);
+      if (!isCurrent()) return;
 
       setCallState((state) => state && ({
         ...state,
@@ -160,18 +199,6 @@ export function usePstnCallController(
       }
 
       run.call = call;
-      call.on("audio", (remoteAudio: HTMLAudioElement) => {
-        if (!isCurrent() || !remoteAudio.paused) return;
-
-        void remoteAudio.play().catch((error: unknown) => {
-          if (!isCurrent()) return;
-
-          console.warn(
-            "[PSTN] Remote audio playback failed:",
-            error instanceof Error ? `${error.name}: ${error.message}` : error,
-          );
-        });
-      });
       let lastVolumeUpdate = 0;
 
       call.on("volume", (inputVolume: number, outputVolume: number) => {

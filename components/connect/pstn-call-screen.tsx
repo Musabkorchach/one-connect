@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
 import type { PstnCallState } from "@/lib/connect/use-pstn-call-controller";
+import { useConnect } from "@/contexts/connect-context";
+import { CallAudioControls } from "./call-audio-controls";
 
 export function PstnCallScreen({
   call,
@@ -14,6 +16,7 @@ export function PstnCallScreen({
   onMutedChange: (muted: boolean) => void;
 }) {
   const [seconds, setSeconds] = useState(0);
+  const { lang } = useConnect();
 
   useEffect(() => {
     const connectedAt = call.connectedAt;
@@ -108,6 +111,11 @@ export function PstnCallScreen({
           </div>
          </div>
        )}
+      {(call.phase === "connected" || call.playbackBlocked) && (
+        <div className="mt-4">
+          <CallAudioControls audio={call.audio} blocked={call.playbackBlocked} lang={lang} />
+        </div>
+      )}
       <div className="mt-12 flex items-center justify-center gap-8">
         <button
           type="button"
