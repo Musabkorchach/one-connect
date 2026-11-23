@@ -358,6 +358,14 @@ function normalizeMessagingUsername(value) {
     : "";
 }
 
+if (process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460") {
+  const { registerPiTestnetSubscriptions } = await import("./pi-testnet-subscription-routes.js");
+  registerPiTestnetSubscriptions({
+    app, db, authenticateSession,
+    sessionIsCurrent: (req) => userSessions.get(req.headers.authorization.slice(7))?.expiresAt > Date.now(),
+  });
+}
+
 function authenticateSession(req, res, next) {
   const authHeader = req.headers.authorization;
 
@@ -380,6 +388,7 @@ function authenticateSession(req, res, next) {
   req.user = {
     userId: session.userId,
     piUsername: session.piUsername,
+    ...(session.verifiedPiUid ? { verifiedPiUid: session.verifiedPiUid } : {}),
     ...(session.accountId ? { accountId: session.accountId } : {}),
   };
 

@@ -1304,39 +1304,26 @@ test("experimental subscription capability is scoped to the active session and c
   app.unmount();
 });
 
-test("Pi Testnet lookup uses read simulations and reports the wallet period", async () => {
-  const { readTestnetWalletSubscription: read } = (() => {
-    const exports = {};
-    compile("lib/pi-testnet-subscription.ts")(require, exports);
-    return exports;
-  })();
+test("Pi Testnet confirms the session between simulation and a one-period submission", async () => {
+  const exports = {};
+  compile("lib/pi-testnet-subscription.ts")(require, exports);
+  const submit = exports.submitTestnetSubscription;
   const wallet = "G" + "A".repeat(55);
-  const plan = { service_id: "7", price: "1000000", period_secs: "2629746" };
-  const row = { service_id: "7", subscriber: wallet, service_end_ts: "2000" };
-  let records = [row];
-  const reads = [];
-  const sdk = {
-    async getService(...args) { reads.push(args); return plan; },
-    async getSubscriberSubscriptions(...args) { reads.push(args); return records; },
-  };
-  assert.deepEqual(await read(sdk, "7", wallet, () => 1999999), {
-    status: "active", endsAt: new Date(2000000).toISOString(),
-  });
-  assert.deepEqual(reads, [[wallet, "7", { mode: "simulate" }], [wallet, { mode: "simulate" }]]);
-  assert.equal((await read(sdk, "7", wallet, () => 2000000)).status, "expired");
-  records = [{ ...row, service_id: "8" }];
-  assert.deepEqual(await read(sdk, "7", wallet), { status: "none" });
-  records = [{ ...row, subscriber: "G" + "B".repeat(55) }];
-  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
-  records = [{ ...row, service_end_ts: "invalid" }];
-  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
-  records = [row, row];
-  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
-  assert.deepEqual(await read({ ...sdk, getService: async () => ({ ...plan, price: "1" }) }, "7", wallet), { status: "unknown" });
-  assert.deepEqual(await read({ ...sdk, getSubscriberSubscriptions: async () => { throw Error("offline"); } }, "7", wallet), { status: "unknown" });
-  const calls = reads.length;
-  assert.deepEqual(await read(sdk, undefined, wallet), { status: "unknown" });
-  assert.deepEqual(await read(sdk, "7", "invalid"), { status: "unknown" });
-  assert.deepEqual(await read(undefined, "7", wallet), { status: "unknown" });
-  assert.equal(reads.length, calls);
+  const hash = "a".repeat(64);
+  const calls = [];
+  let current = true;
+  const sdk = Object.fromEntries(["subscribe", "toggleAutoRenew", "cancel"].map((method) => [
+    method, async (...args) => { calls.push([method, ...args]); return { hash }; },
+  ]));
+  assert.equal(await submit(sdk, "subscribe", wallet, "460", () => current), hash);
+  assert.deepEqual(calls.splice(0), ["simulate", "submit"].map(mode => ["subscribe", wallet, "460", false, "1", { mode }]));
+  assert.equal(await submit(sdk, "cancel", wallet, "8", () => current), hash);
+  assert.deepEqual(calls.splice(0), ["simulate", "submit"].map(mode => ["cancel", wallet, "8", { mode }]));
+  assert.equal(await submit(sdk, "renew", wallet, "8", () => current), hash);
+  assert.deepEqual(calls.splice(0), ["simulate", "submit"].map(mode => ["toggleAutoRenew", wallet, "8", "1", { mode }]));
+  current = false;
+  await assert.rejects(submit(sdk, "subscribe", wallet, "460", () => current), /Session changed/);
+  assert.deepEqual(calls.splice(0), [["subscribe", wallet, "460", false, "1", { mode: "simulate" }]]);
+  await assert.rejects(submit(sdk, "subscribe", wallet, "7", () => true), /Invalid Testnet/);
+  assert.deepEqual(calls, []);
 });

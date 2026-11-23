@@ -85,6 +85,7 @@ export function createVerifyPiLogin({
       const sessionToken = randomBytes(32).toString("hex");
       userSessions.set(sessionToken, {
         userId, piUsername, accessToken,
+        ...(typeof uid === "string" && uid && uid === uid.trim() ? { verifiedPiUid: uid } : {}),
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
         ...(bindAccounts ? { accountId } : {}),
       });
