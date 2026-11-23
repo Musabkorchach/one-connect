@@ -14,6 +14,7 @@ import { registerAccountDeletionRoutes } from "./account-deletion-routes.js";
 import { insertWithScopedFile, accountWrites, createAccountWriteFence, prepareScopedBuckets, respondToBlockedWrite, saveScopedFile } from "./account-write-fence.js";
 import { createAccountCalls } from "./account-calls.js";
 import { createPrivateData } from "./account-private-data.js";
+import { registerSubscriptionStatus, subscriptionProofMode, subscriptionSettings } from "./account-entitlements.js";
 import { createAccountGroups } from "./account-groups.js";
 import { createAccountChat, legacyChat } from "./account-chat.js";
 import { createEmailSocket } from "./email-socket.js";
@@ -31,8 +32,9 @@ config();
 
 dns.setServers(["8.8.8.8"]);
 
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
 const bindAccounts = isAccountBindingEnabled(process.env);
+const useSubscriptionFixtures = subscriptionProofMode(process.env, bindAccounts);
+const mongoClient = new MongoClient(process.env.MONGODB_URI);
 if (bindAccounts) assertLocalAccountBindingDatabase(mongoClient.options);
 
 await mongoClient.connect();
@@ -226,6 +228,11 @@ const accountCalls = bindAccounts ? await createAccountCalls({
 const privateData = bindAccounts ? await createPrivateData({
   app, db, writeAccount, authenticateSession, normalizeMessagingUsername,
 }) : null;
+if (privateData) {
+  registerSubscriptionStatus({
+    app, db, privateData, settings: subscriptionSettings(process.env), useFixtures: useSubscriptionFixtures,
+  });
+}
 const accountGroups = bindAccounts ? await createAccountGroups({
   app, io, db, mongoClient, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, groupMediaBucket,
 }) : null;

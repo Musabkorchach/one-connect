@@ -1293,3 +1293,127 @@ test("the deletion dialog follows the server capability and requires an explicit
   assert.equal(accepted, 1);
   unmount();
 });
+
+test("experimental subscription capability is scoped to the active session and clears on acceptance of deletion", async () => {
+  const app = mount({ verify: async () => ({
+    ...session("experimental"), privateDataOwner: "account-" + "1".repeat(64),
+    emailSocketMode: "account", subscriptionStatusSupported: true,
+  }) });
+  await settle();
+  assert.equal(app.render().subscriptionStatusSupported, true);
+  app.render().finishAccountDeletion("experimental", "en");
+  assert.equal(app.render().subscriptionStatusSupported, false);
+  assert.equal(app.render().sessionToken, null);
+  app.unmount();
+});
+
+test("subscription panel renders server states and retries without consulting SDKLite or legacy Premium", async () => {
+  const responses = [];
+  const requests = [];
+  let purchaseCalls = 0;
+  const transport = {};
+  compile("lib/account-subscription-status.ts")(require, transport, undefined, undefined, async (url, options) => {
+    requests.push({ url, ...options });
+    const reply = responses.shift();
+    if (reply instanceof Error) throw reply;
+    return Response.json(reply);
+  });
+  const wording = {};
+  compile("lib/connect/subscription-copy.ts")(require, wording);
+  const rendered = {};
+  let index = 0;
+  let effect;
+  let current = "session-a";
+  let supported = true;
+  const state = [];
+  const jsx = (type, props) => ({ type, props });
+  const modules = {
+    react: {
+      useState(initial) {
+        const i = index++;
+        if (!(i in state)) state[i] = initial;
+        return [state[i], (value) => { state[i] = typeof value === "function" ? value(state[i]) : value; }];
+      },
+      useEffect(fn) { effect = fn; },
+    },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@/contexts/pi-auth-context": { usePiAuth: () => ({
+      subscriptionStatusSupported: supported, isCurrentSession: (token) => token === current,
+      premiumActive: true, restoredPurchases: [{ id: "legacy" }],
+      sdk: { makePurchase: async () => { purchaseCalls++; return { ok: true }; } },
+    }) },
+    "@/lib/api-client": { API_URL: "http://127.0.0.1:9" },
+    "@/lib/account-subscription-status": transport,
+    "@/lib/connect/data": languages,
+    "@/lib/connect/i18n": { getDict: () => ({ connecting: "Loading", invoicesRetry: "Retry" }) },
+    "@/lib/connect/subscription-copy": wording,
+    "./ui": { Button: "Button" },
+  };
+  compile("components/connect/account-subscription-status.tsx")((name) => modules[name], rendered);
+  const component = () => rendered.AccountSubscriptionStatus({ sessionToken: "session-a", language: "ar" });
+  const render = () => {
+    index = 0;
+    const outer = component();
+    return outer?.type(outer.props);
+  };
+  const plan = { pricePi: "0.1", cycle: "monthly" };
+  const endsAt = "2030-01-02T03:04:05.000Z";
+  const copy = wording.subscriptionCopy.ar;
+  supported = false;
+  assert.equal(component(), null);
+  supported = true;
+  for (const status of ["none", "active", "expired"]) {
+    responses.push({ accessMode: "free", plan, entitlement: { status, ...(status !== "none" ? { endsAt } : {}) } });
+    render();
+    const cancel = effect();
+    await settle();
+    const panel = JSON.stringify(render());
+    assert.ok(panel.includes(copy.free));
+    assert.ok(panel.includes(copy[status]));
+    assert.ok(panel.includes("0.1"));
+    assert.equal(panel.includes(endsAt), status !== "none");
+    assert.ok(!panel.includes('"type":"Button"'));
+    cancel();
+  }
+  responses.push(new Error("network down"));
+  render();
+  effect();
+  await settle();
+  const failed = render();
+  assert.ok(JSON.stringify(failed).includes(copy.error));
+  assert.ok(!JSON.stringify(failed).includes(copy.active));
+  const retry = failed.props.children[1].props.children[1];
+  retry.props.onClick();
+  responses.push({ accessMode: "free", plan, entitlement: { status: "none" } });
+  render();
+  const cancel = effect();
+  await settle();
+  assert.ok(JSON.stringify(render()).includes(copy.none));
+  assert.ok(requests.every(({ headers, url }) => headers.Authorization === "Bearer session-a" && url.endsWith("/api/subscriptions/status")));
+  current = "session-b";
+  cancel();
+  assert.equal(component(), null);
+  assert.equal(requests.at(-1).signal.aborted, true);
+  assert.equal(purchaseCalls, 0);
+});
+
+test("subscription request discards late results after replacement or logout", async () => {
+  const transport = {};
+  compile("lib/account-subscription-status.ts")(require, transport);
+  for (const replacement of ["new-session", null]) {
+    const reply = deferred();
+    const received = [];
+    let current = "old-session";
+    let signal;
+    const abort = transport.loadSubscriptionStatus((value) => {
+      signal = value;
+      return reply.promise;
+    }, () => current === "old-session", (status) => received.push(status), () => received.push("error"));
+    current = replacement;
+    abort();
+    reply.resolve({ entitlement: { status: "active" } });
+    await settle();
+    assert.equal(signal.aborted, true);
+    assert.deepEqual(received, []);
+  }
+});

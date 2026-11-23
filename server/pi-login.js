@@ -95,7 +95,7 @@ export function createVerifyPiLogin({
       if (!userSessions.has(sessionToken)) return res.status(409).json({ code: "ACCOUNT_DELETING", error: "Account is no longer active" });
       res.json({
         sessionToken, userId, piUsername, message: "Authenticated",
-        ...(bindAccounts ? { accountDeletionSupported: true, accountDataStatus: migrationRequired.code, emailSocketMode: "account", chatSocketMode: "account", groupSocketMode: "account", callSocketMode: "account", privateDataOwner: privateDataOwnerKey(accountId) } : {}),
+        ...(bindAccounts ? { accountDeletionSupported: true, subscriptionStatusSupported: true, accountDataStatus: migrationRequired.code, emailSocketMode: "account", chatSocketMode: "account", groupSocketMode: "account", callSocketMode: "account", privateDataOwner: privateDataOwnerKey(accountId) } : {}),
       });
     } catch (error) {
       console.error("Auth error:", error);

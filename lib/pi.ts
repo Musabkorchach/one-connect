@@ -34,6 +34,7 @@ interface PiAuthApi {
     userId: string;
     piUsername: string;
     accountDeletionSupported?: boolean;
+    subscriptionStatusSupported?: boolean;
     accountDataStatus?: "ACCOUNT_MIGRATION_REQUIRED";
     emailSocketMode?: "account";
     chatSocketMode?: "account";
@@ -103,6 +104,7 @@ function oneConnectAuthPlugin(): OneConnectAuthPlugin {
           userId: verifiedRenderSession.userId,
           piUsername: verifiedRenderSession.piUsername,
           accountDeletionSupported: verifiedRenderSession.accountDeletionSupported === true,
+          subscriptionStatusSupported: verifiedRenderSession.subscriptionStatusSupported === true,
           accountDataStatus: verifiedRenderSession.accountDataStatus,
           emailSocketMode: verifiedRenderSession.emailSocketMode,
           chatSocketMode: verifiedRenderSession.chatSocketMode,

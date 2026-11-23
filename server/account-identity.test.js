@@ -21,6 +21,8 @@ import {
 import { archiveOwnedGroupsForDeletion } from "./group-ownership.js";
 import { pstnAbuseKey, terminateAccountPstn } from "./pstn-account.js";
 import { createAccountDeletion, deletionCollection } from "./account-deletion.js";
+import { createSubscriptionFixture, EntitlementProofConflict } from "./subscription-fixture.test-helper.js";
+import { createAccountEntitlements, recordVerifiedPeriod, subscriptionFixtureCollection, subscriptionSettings } from "./account-entitlements.js";
 import { deletionConfirmations } from "./account-deletion-routes.js";
 import { mailQuotaKey } from "./account-external-operations.js";
 import { deletionFileCandidates } from "./account-file-cleanup.js";
@@ -2614,4 +2616,85 @@ test("deletion records only bounded operational codes and can retry without rele
   assert.equal(job.errors.length, 8);
   assert.ok(job.errors.every((error) => error.code === "STEP_FAILED"));
   assert.doesNotMatch(JSON.stringify(job), /private fixture value/);
+});
+
+test("subscription settings are independent and disabled outside testing", () => {
+  const enforcement = { NODE_ENV: "test", ONE_CONNECT_TEST_SUBSCRIPTION_ENFORCEMENT: "1" };
+  const collection = { NODE_ENV: "test", ONE_CONNECT_TEST_SUBSCRIPTION_COLLECTION: "1" };
+  assert.deepEqual(subscriptionSettings({}), { enforcementEnabled: false, collectionEnabled: false });
+  assert.deepEqual(subscriptionSettings(enforcement), { enforcementEnabled: true, collectionEnabled: false });
+  assert.deepEqual(subscriptionSettings(collection), { enforcementEnabled: false, collectionEnabled: true });
+  assert.deepEqual(subscriptionSettings({ ...enforcement, ...collection, NODE_ENV: "production" }),
+    { enforcementEnabled: false, collectionEnabled: false });
+});
+
+test("verified periods respect exact boundaries and cannot be replayed for a returning account", async () => {
+  const { db, bindings } = await accountFixture("one_connect_entitlement_fixture");
+  const { accountId } = await resolveVerifiedPiAccount(db, "entitlement-fixture-uid");
+  let clock = 1000;
+  const entitlements = await createSubscriptionFixture({ db, writeAccount: createAccountWriteFence(db, client), now: () => clock });
+  const proof = { source: "test-fixture", proofId: "synthetic-cycle-one", startsAt: new Date(2000), endsAt: new Date(8000) };
+  const forged = { ...proof, source: "pi-testnet", network: "pi-testnet", mode: "simulate", success: true };
+  await assert.rejects(entitlements.recordFixturePeriod(accountId, forged), TypeError);
+  for (const evidence of [forged, proof, { ...forged, mode: "submit" }]) {
+    assert.deepEqual(await recordVerifiedPeriod(accountId, evidence), { status: "unavailable" });
+  }
+  assert.equal(await db.collection(subscriptionFixtureCollection).countDocuments(), 0);
+  // Previously seeded periods, even with provider-looking metadata, are not trusted.
+  await db.collection("account_entitlement_periods").insertOne({ ...forged, accountId });
+  const replies = await Promise.all(Array.from({ length: 8 }, () => entitlements.recordFixturePeriod(accountId, proof)));
+  assert.equal(replies.filter(Boolean).length, 1);
+  assert.equal(await db.collection(subscriptionFixtureCollection).countDocuments(), 1);
+  await assert.rejects(entitlements.recordFixturePeriod(accountId, { ...proof, endsAt: new Date(8001) }), EntitlementProofConflict);
+
+  for (const [at, expected] of [[1999, "none"], [2000, "active"], [7999, "active"], [8000, "expired"], [8001, "expired"]]) {
+    clock = at;
+    const status = await entitlements.status(accountId);
+    assert.equal(status.accessMode, "free");
+    assert.equal(status.entitlement.status, expected);
+  }
+
+  const runtime = createAccountEntitlements({ db, now: () => 3000 });
+  assert.equal((await runtime.status(accountId)).entitlement.status, "none");
+  await bindings.updateOne({ accountId }, { $set: { state: "deleting" } });
+  await assert.rejects(entitlements.recordFixturePeriod(accountId, { ...proof, proofId: "late-proof" }), { code: "ACCOUNT_WRITE_BLOCKED" });
+  await bindings.deleteOne({ accountId, state: "deleting" });
+  const returned = (await resolveVerifiedPiAccount(db, "entitlement-fixture-uid")).accountId;
+  assert.notEqual(returned, accountId);
+  assert.equal((await entitlements.status(returned)).entitlement.status, "none");
+  await assert.rejects(entitlements.recordFixturePeriod(returned, proof), EntitlementProofConflict);
+});
+
+test("subscription HTTP status uses the session and legacy flags grant no entitlement", { timeout: 30000 }, async (t) => {
+  const enabled = await startEmailTestServer(t, true, { ONE_CONNECT_TEST_SUBSCRIPTION_FIXTURES: "1" });
+  const signedIn = await enabled.login("delete-peer");
+  const token = signedIn.body.sessionToken;
+  const db = client.db("oneconnect");
+  const { accountId } = await db.collection(identityBindingsCollection).findOne({ _id: "delete-peer-uid" });
+  const path = "/api/subscriptions/status";
+  assert.equal((await enabled.request(path)).status, 401);
+  assert.equal((await enabled.request(path + "?accountId=forged", { token })).status, 400);
+  await db.collection("account_private_state").updateOne({ ownerAccountId: accountId, key: "oneconnect.premium" },
+    { $set: { blob: { premiumActive: true, active: true } } }, { upsert: true });
+  assert.deepEqual((await enabled.request(path, { token })).body, {
+    accessMode: "free", plan: { pricePi: "0.1", cycle: "monthly" }, entitlement: { status: "none" },
+    settings: { enforcementEnabled: false, collectionEnabled: false },
+  });
+  assert.equal((await enabled.request(path, { token, method: "POST", body: { premiumActive: true } })).status, 404);
+  const entitlements = await createSubscriptionFixture({ db, writeAccount: createAccountWriteFence(db, client) });
+  await entitlements.recordFixturePeriod(accountId, {
+    source: "test-fixture", proofId: "synthetic-http-cycle",
+    startsAt: new Date(Date.now() - 60000), endsAt: new Date(Date.now() + 60000),
+  });
+  const current = (await enabled.request(path, { token })).body;
+  assert.equal(current.accessMode, "free");
+  assert.equal(current.entitlement.status, "active");
+  assert.equal(current.entitlement.source, "test-fixture");
+
+  const providerConfigured = await startEmailTestServer(t, true, { ONE_CONNECT_PI_TESTNET_SUBSCRIPTIONS: "1" });
+  const providerToken = (await providerConfigured.login("delete-peer")).body.sessionToken;
+  assert.deepEqual((await providerConfigured.request(path, { token: providerToken })).body.entitlement, { status: "none" });
+  const legacy = await startEmailTestServer(t, false);
+  const legacyToken = (await legacy.login("phone-b")).body.sessionToken;
+  assert.equal((await legacy.request(path, { token: legacyToken })).status, 404);
 });

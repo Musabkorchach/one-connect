@@ -175,6 +175,7 @@ interface PiAuthContextType {
   signedOutLanguage: LangId | null;
   signedOutNotice: SignedOutNotice | null;
   accountDeletionSupported: boolean;
+  subscriptionStatusSupported: boolean;
   getDeletionPiToken: (token: string, signal: AbortSignal) => Promise<string>;
   finishAccountDeletion: (token: string, language: LangId) => void;
   signIn: () => void;
@@ -279,6 +280,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [signedOutLanguage, setSignedOutLanguage] = useState<LangId | null>(null);
   const [signedOutNotice, setSignedOutNotice] = useState<SignedOutNotice | null>(null);
   const [accountDeletionSupported, setAccountDeletionSupported] = useState(false);
+  const [subscriptionStatusSupported, setSubscriptionStatusSupported] = useState(false);
   const authSource = useRef<"pi" | "parent" | null>(null);
   const authAttempt = useRef<AbortController | null>(null);
   const activeSessionToken = useRef<string | null>(null);
@@ -296,6 +298,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     setIsAuthenticated(false);
     setAccountMigrationRequired(false);
     setAccountDeletionSupported(false);
+    setSubscriptionStatusSupported(false);
     setPrivateDataOwner(null);
     setEmailSocketMode("legacy");
     setChatSocketMode("legacy");
@@ -409,6 +412,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         }
         authSource.current = "parent";
         setAccountDeletionSupported(authResult.accountDeletionSupported === true);
+        setSubscriptionStatusSupported(authResult.subscriptionStatusSupported === true);
         setSignedOutNotice(null);
         activeSessionToken.current = authResult.sessionToken;
         setSessionToken(authResult.sessionToken);
@@ -420,7 +424,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         if (authResult.chatSocketMode === "account") setChatSocketMode("account");
         if (authResult.groupSocketMode === "account") setGroupSocketMode("account");
         if (typeof authResult.privateDataOwner === "string" && /^account-[0-9a-f]{64}$/.test(authResult.privateDataOwner)) setPrivateDataOwner(authResult.privateDataOwner);
-        if (authResult.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || authResult.emailSocketMode === "account" || authResult.chatSocketMode === "account" || authResult.groupSocketMode === "account") {
+        if (authResult.subscriptionStatusSupported === true || authResult.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || authResult.emailSocketMode === "account" || authResult.chatSocketMode === "account" || authResult.groupSocketMode === "account") {
           setAccountMigrationRequired(true);
           setIsAuthenticated(true);
           if (explicit) writeSignedOutLanguage(null);
@@ -520,6 +524,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
 
       authSource.current = "pi";
       setAccountDeletionSupported(renderSession.accountDeletionSupported === true);
+      setSubscriptionStatusSupported(renderSession.subscriptionStatusSupported === true);
       setSignedOutNotice(null);
       activeSessionToken.current = renderSession.sessionToken;
       setSessionToken(renderSession.sessionToken);
@@ -529,7 +534,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       if (renderSession.chatSocketMode === "account") setChatSocketMode("account");
       if (renderSession.groupSocketMode === "account") setGroupSocketMode("account");
       if (typeof renderSession.privateDataOwner === "string" && /^account-[0-9a-f]{64}$/.test(renderSession.privateDataOwner)) setPrivateDataOwner(renderSession.privateDataOwner);
-      if (renderSession.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || renderSession.emailSocketMode === "account" || renderSession.chatSocketMode === "account" || renderSession.groupSocketMode === "account") {
+      if (renderSession.subscriptionStatusSupported === true || renderSession.accountDataStatus === "ACCOUNT_MIGRATION_REQUIRED" || renderSession.emailSocketMode === "account" || renderSession.chatSocketMode === "account" || renderSession.groupSocketMode === "account") {
         setAccountMigrationRequired(true);
         setIsAuthenticated(true);
         if (explicit) writeSignedOutLanguage(null);
@@ -617,6 +622,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     signedOutLanguage,
     signedOutNotice,
     accountDeletionSupported,
+    subscriptionStatusSupported,
     getDeletionPiToken,
     finishAccountDeletion,
     signIn,

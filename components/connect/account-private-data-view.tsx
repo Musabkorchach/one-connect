@@ -6,6 +6,7 @@ import { fileToAvatar, LANGUAGES, type LangId, type Profile } from "@/lib/connec
 import { startPrivateDataSession, type PrivateContact } from "@/lib/account-private-data";
 import { InvoicesPanel } from "./invoices-view";
 import { AccountDeletionSettings } from "./account-deletion-settings";
+import { AccountSubscriptionStatus } from "./account-subscription-status";
 
 export function AccountPrivateDataView({ sessionToken }: { sessionToken: string }) {
   const { isCurrentSession, endLocalSession, piUsername } = usePiAuth();
@@ -117,6 +118,7 @@ export function AccountPrivateDataView({ sessionToken }: { sessionToken: string 
         </>
       )}
       {tab === "invoices" && <InvoicesPanel language={profile?.language ?? "en"} />}
+      {tab === "profile" && <AccountSubscriptionStatus sessionToken={sessionToken} language={profile?.language ?? "en"} />}
       {tab === "profile" && <AccountDeletionSettings sessionToken={sessionToken} language={profile?.language ?? "en"} />}
     </main>
   );
