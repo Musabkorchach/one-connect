@@ -41,7 +41,7 @@ function mount({
   iframe = false,
   authenticate = async () => credentials,
   verify = async () => session("session"),
-  products = async () => ({ products: [] }),
+  onLegacyPurchaseRead = () => {},
 } = {}) {
   const calls = { pi: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
   const listeners = new Set();
@@ -70,7 +70,7 @@ function mount({
     Pi: { init: async () => {}, authenticate: (...args) => { calls.pi++; return authenticate(...args); } },
     SDKLite: {
       init: async () => ({
-        state: { products, restore: async () => ({ purchases: [] }), get: async () => null },
+        state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead },
       }),
     },
     get sessionStorage() {
@@ -151,15 +151,14 @@ function mount({
 }
 
 test("logout clears the local session and persists only the language marker", async () => {
-  const pendingProducts = deferred();
-  const app = mount({ products: () => pendingProducts.promise });
+  let legacyPurchaseReads = 0;
+  const app = mount({ onLegacyPurchaseRead: () => { legacyPurchaseReads++; } });
   await settle();
   assert.equal(app.render().isAuthenticated, true);
   app.render().endLocalSession("ar");
   assert.deepEqual([...app.storage], [[marker, "ar"]]);
   assert.deepEqual(app.calls.revoked, ["session"]);
   assert.equal(app.calls.disconnects, 1);
-  pendingProducts.resolve({ products: [{ id: "old" }] });
   await settle();
   const state = app.render();
   assert.equal(state.isAuthenticated, false);
@@ -167,9 +166,7 @@ test("logout clears the local session and persists only the language marker", as
   assert.equal(state.userId, null);
   assert.equal(state.piUsername, "");
   assert.equal(state.sdk, null);
-  assert.equal(state.products, null);
-  assert.equal(state.restoredPurchases, null);
-  assert.equal(state.premiumActive, false);
+  assert.equal(legacyPurchaseReads, 0);
   const screen = app.screen();
   assert.equal(screen.props.dir, "rtl");
   assert.equal(screen.props.children[0].props.children, "تم تسجيل الخروج");
@@ -1307,113 +1304,39 @@ test("experimental subscription capability is scoped to the active session and c
   app.unmount();
 });
 
-test("subscription panel renders server states and retries without consulting SDKLite or legacy Premium", async () => {
-  const responses = [];
-  const requests = [];
-  let purchaseCalls = 0;
-  const transport = {};
-  compile("lib/account-subscription-status.ts")(require, transport, undefined, undefined, async (url, options) => {
-    requests.push({ url, ...options });
-    const reply = responses.shift();
-    if (reply instanceof Error) throw reply;
-    return Response.json(reply);
+test("Pi Testnet lookup uses read simulations and reports the wallet period", async () => {
+  const { readTestnetWalletSubscription: read } = (() => {
+    const exports = {};
+    compile("lib/pi-testnet-subscription.ts")(require, exports);
+    return exports;
+  })();
+  const wallet = "G" + "A".repeat(55);
+  const plan = { service_id: "7", price: "1000000", period_secs: "2629746" };
+  const row = { service_id: "7", subscriber: wallet, service_end_ts: "2000" };
+  let records = [row];
+  const reads = [];
+  const sdk = {
+    async getService(...args) { reads.push(args); return plan; },
+    async getSubscriberSubscriptions(...args) { reads.push(args); return records; },
+  };
+  assert.deepEqual(await read(sdk, "7", wallet, () => 1999999), {
+    status: "active", endsAt: new Date(2000000).toISOString(),
   });
-  const wording = {};
-  compile("lib/connect/subscription-copy.ts")(require, wording);
-  const rendered = {};
-  let index = 0;
-  let effect;
-  let current = "session-a";
-  let supported = true;
-  const state = [];
-  const jsx = (type, props) => ({ type, props });
-  const modules = {
-    react: {
-      useState(initial) {
-        const i = index++;
-        if (!(i in state)) state[i] = initial;
-        return [state[i], (value) => { state[i] = typeof value === "function" ? value(state[i]) : value; }];
-      },
-      useEffect(fn) { effect = fn; },
-    },
-    "react/jsx-runtime": { jsx, jsxs: jsx },
-    "@/contexts/pi-auth-context": { usePiAuth: () => ({
-      subscriptionStatusSupported: supported, isCurrentSession: (token) => token === current,
-      premiumActive: true, restoredPurchases: [{ id: "legacy" }],
-      sdk: { makePurchase: async () => { purchaseCalls++; return { ok: true }; } },
-    }) },
-    "@/lib/api-client": { API_URL: "http://127.0.0.1:9" },
-    "@/lib/account-subscription-status": transport,
-    "@/lib/connect/data": languages,
-    "@/lib/connect/i18n": { getDict: () => ({ connecting: "Loading", invoicesRetry: "Retry" }) },
-    "@/lib/connect/subscription-copy": wording,
-    "./ui": { Button: "Button" },
-  };
-  compile("components/connect/account-subscription-status.tsx")((name) => modules[name], rendered);
-  const component = () => rendered.AccountSubscriptionStatus({ sessionToken: "session-a", language: "ar" });
-  const render = () => {
-    index = 0;
-    const outer = component();
-    return outer?.type(outer.props);
-  };
-  const plan = { pricePi: "0.1", cycle: "monthly" };
-  const endsAt = "2030-01-02T03:04:05.000Z";
-  const copy = wording.subscriptionCopy.ar;
-  supported = false;
-  assert.equal(component(), null);
-  supported = true;
-  for (const status of ["none", "active", "expired"]) {
-    responses.push({ accessMode: "free", plan, entitlement: { status, ...(status !== "none" ? { endsAt } : {}) } });
-    render();
-    const cancel = effect();
-    await settle();
-    const panel = JSON.stringify(render());
-    assert.ok(panel.includes(copy.free));
-    assert.ok(panel.includes(copy[status]));
-    assert.ok(panel.includes("0.1"));
-    assert.equal(panel.includes(endsAt), status !== "none");
-    assert.ok(!panel.includes('"type":"Button"'));
-    cancel();
-  }
-  responses.push(new Error("network down"));
-  render();
-  effect();
-  await settle();
-  const failed = render();
-  assert.ok(JSON.stringify(failed).includes(copy.error));
-  assert.ok(!JSON.stringify(failed).includes(copy.active));
-  const retry = failed.props.children[1].props.children[1];
-  retry.props.onClick();
-  responses.push({ accessMode: "free", plan, entitlement: { status: "none" } });
-  render();
-  const cancel = effect();
-  await settle();
-  assert.ok(JSON.stringify(render()).includes(copy.none));
-  assert.ok(requests.every(({ headers, url }) => headers.Authorization === "Bearer session-a" && url.endsWith("/api/subscriptions/status")));
-  current = "session-b";
-  cancel();
-  assert.equal(component(), null);
-  assert.equal(requests.at(-1).signal.aborted, true);
-  assert.equal(purchaseCalls, 0);
-});
-
-test("subscription request discards late results after replacement or logout", async () => {
-  const transport = {};
-  compile("lib/account-subscription-status.ts")(require, transport);
-  for (const replacement of ["new-session", null]) {
-    const reply = deferred();
-    const received = [];
-    let current = "old-session";
-    let signal;
-    const abort = transport.loadSubscriptionStatus((value) => {
-      signal = value;
-      return reply.promise;
-    }, () => current === "old-session", (status) => received.push(status), () => received.push("error"));
-    current = replacement;
-    abort();
-    reply.resolve({ entitlement: { status: "active" } });
-    await settle();
-    assert.equal(signal.aborted, true);
-    assert.deepEqual(received, []);
-  }
+  assert.deepEqual(reads, [[wallet, "7", { mode: "simulate" }], [wallet, { mode: "simulate" }]]);
+  assert.equal((await read(sdk, "7", wallet, () => 2000000)).status, "expired");
+  records = [{ ...row, service_id: "8" }];
+  assert.deepEqual(await read(sdk, "7", wallet), { status: "none" });
+  records = [{ ...row, subscriber: "G" + "B".repeat(55) }];
+  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
+  records = [{ ...row, service_end_ts: "invalid" }];
+  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
+  records = [row, row];
+  assert.deepEqual(await read(sdk, "7", wallet), { status: "unknown" });
+  assert.deepEqual(await read({ ...sdk, getService: async () => ({ ...plan, price: "1" }) }, "7", wallet), { status: "unknown" });
+  assert.deepEqual(await read({ ...sdk, getSubscriberSubscriptions: async () => { throw Error("offline"); } }, "7", wallet), { status: "unknown" });
+  const calls = reads.length;
+  assert.deepEqual(await read(sdk, undefined, wallet), { status: "unknown" });
+  assert.deepEqual(await read(sdk, "7", "invalid"), { status: "unknown" });
+  assert.deepEqual(await read(undefined, "7", wallet), { status: "unknown" });
+  assert.equal(reads.length, calls);
 });

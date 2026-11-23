@@ -11,13 +11,10 @@ import React, {
 } from "react";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { LANGUAGES, type LangId } from "@/lib/connect/data";
-import { PRODUCT_CONFIG } from "@/lib/product-config";
 import { buildPiSdk, createSdk } from "@/lib/pi";
 import { verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
 import type {
-  Product,
   SDKLiteInstance,
-  UserPurchaseBalance,
 } from "@/lib/sdklite-types";
 
 const SIGNED_OUT_KEY = "oneconnect.explicit-logout";
@@ -192,10 +189,6 @@ interface PiAuthContextType {
   userId: string | null;
   sessionToken: string | null;
   sdk: SDKLiteInstance | null;
-  products: Product[] | null;
-  restoredPurchases: UserPurchaseBalance[] | null;
-  premiumActive: boolean;
-  setPremiumActive: (active: boolean) => Promise<void>;
   reinitialize: () => Promise<void>;
 }
 
@@ -272,11 +265,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sdk, setSdk] = useState<SDKLiteInstance | null>(null);
-  const [products, setProducts] = useState<Product[] | null>(null);
-  const [restoredPurchases, setRestoredPurchases] = useState<
-    UserPurchaseBalance[] | null
-  >(null);
-  const [premiumActive, setPremiumActiveState] = useState(false);
   const [signedOutLanguage, setSignedOutLanguage] = useState<LangId | null>(null);
   const [signedOutNotice, setSignedOutNotice] = useState<SignedOutNotice | null>(null);
   const [accountDeletionSupported, setAccountDeletionSupported] = useState(false);
@@ -307,9 +295,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     setUserId(null);
     setPiUsername("");
     setSdk(null);
-    setProducts(null);
-    setRestoredPurchases(null);
-    setPremiumActiveState(false);
     setHasError(false);
     setSignedOutLanguage(language);
     setSignedOutNotice(notice);
@@ -330,71 +315,12 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     return accessToken;
   }
 
-  const setPremiumActive = async (active: boolean) => {
-    setPremiumActiveState(active);
-    if (!sdk) return;
-    try {
-      await sdk.state.set("oneconnect.premium", {
-        active,
-        piUsername,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error("Failed to save Premium entitlement:", error);
-    }
-  };
-
-  const restorePremiumEntitlement = async (
-    sdkInstance: SDKLiteInstance,
-    purchases: UserPurchaseBalance[],
-    productSlug: string | undefined,
-    authenticatedUsername: string,
-    signal: AbortSignal,
-  ) => {
-    const premium = purchases.some(
-      (purchase) =>
-        purchase.productId === PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595 ||
-        (productSlug != null && purchase.productId === productSlug),
-    );
-    try {
-      const saved = await sdkInstance.state.get("oneconnect.premium");
-      if (signal.aborted) return;
-      const savedBlob = saved?.blob as { active?: unknown; piUsername?: unknown } | undefined;
-      const savedActive = savedBlob?.active === true && savedBlob.piUsername === authenticatedUsername;
-      setPremiumActiveState(premium || savedActive);
-      if (premium && !savedActive) {
-        await sdkInstance.state.set("oneconnect.premium", {
-          active: true,
-          piUsername: authenticatedUsername,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    } catch (error) {
-      console.error("Failed to restore Premium entitlement:", error);
-      if (!signal.aborted) setPremiumActiveState(premium);
-    }
-  };
-
-  const fetchProducts = async (sdkInstance: SDKLiteInstance, signal: AbortSignal): Promise<Product[]> => {
-    try {
-      const { products } = await sdkInstance.state.products();
-      if (!signal.aborted) setProducts(products);
-      return products;
-    } catch (e) {
-      console.error("Failed to load products:", e);
-      if (!signal.aborted) setProducts([]);
-      return [];
-    }
-  };
-
   const initialize = async (explicit = false, requestedLanguage?: LangId) => {
     if (authAttempt.current || activeSessionToken.current) return;
     const attempt = new AbortController();
     authAttempt.current = attempt;
     const { signal } = attempt;
     setHasError(false);
-    setRestoredPurchases(null);
-    setPremiumActiveState(false);
     try {
       // Probe for parent credentials (App Studio iframe environment).
       // When running inside App Studio's restore-preview iframe, SDKLite.login()
@@ -419,7 +345,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         setUserId(authResult.userId);
         setPiUsername(authResult.piUsername || "");
         setSdk(null);
-        setProducts(null);
         if (authResult.emailSocketMode === "account") setEmailSocketMode("account");
         if (authResult.chatSocketMode === "account") setChatSocketMode("account");
         if (authResult.groupSocketMode === "account") setGroupSocketMode("account");
@@ -438,7 +363,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         setIsAuthenticated(true);
         if (explicit) writeSignedOutLanguage(null);
 
-        // Purchase services are initialized separately from app login.
+        // Initialize the SDK separately from App Studio sign-in.
         try {
           await loadPiSDK();
           if (signal.aborted) return;
@@ -454,38 +379,10 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
           if (signal.aborted) return;
           setSdk(purchaseSdk);
 
-          const availableProducts = await fetchProducts(purchaseSdk, signal);
-          if (signal.aborted) return;
-
-          try {
-            const { purchases } = await purchaseSdk.state.restore();
-            if (signal.aborted) return;
-            setRestoredPurchases(purchases);
-
-            const premiumProduct = availableProducts.find(
-              (product) =>
-                product.id ===
-                PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595,
-            );
-
-            await restorePremiumEntitlement(
-              purchaseSdk,
-              purchases,
-              premiumProduct?.slug,
-              authResult.piUsername,
-              signal,
-            );
-          } catch (error) {
-            if (signal.aborted) return;
-            console.error("[PiAuth] Purchase restore failed:", error);
-            setRestoredPurchases([]);
-          }
         } catch (error) {
           if (signal.aborted) return;
-          console.error("[PiAuth] Purchase initialization failed:", error);
+          console.error("[PiAuth] SDK initialization failed:", error);
           setSdk(null);
-          setProducts([]);
-          setRestoredPurchases([]);
         }
 
         return;
@@ -512,7 +409,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // the SDKLiteInstance surface so nothing downstream changes.
       setAuthMessage("Logging in...");
       const pi = buildPiSdk();
-      const authenticatedUser = await pi.auth.login(undefined, signal);
+      await pi.auth.login(undefined, signal);
       const renderSession = pi.auth.getRenderSession();
       if (signal.aborted) {
         if (renderSession) revokeOneConnectSession(renderSession.sessionToken);
@@ -550,30 +447,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       setSdk(sdkInstance);
       setIsAuthenticated(true);
       if (explicit) writeSignedOutLanguage(null);
-      setAuthMessage("Loading products...");
-      const availableProducts = await fetchProducts(sdkInstance, signal);
-      if (signal.aborted) return;
-
-      try {
-        const { purchases } = await sdkInstance.state.restore();
-        if (signal.aborted) return;
-        setRestoredPurchases(purchases);
-        const premiumProduct = availableProducts.find(
-          (product) => product.id === PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595,
-        );
-        await restorePremiumEntitlement(
-          sdkInstance,
-          purchases,
-          premiumProduct?.slug,
-          authenticatedUser.username || "",
-          signal,
-        );
-        console.log("[PiAuth] Purchases restored", purchases);
-      } catch (e) {
-        if (signal.aborted) return;
-        console.error("[PiAuth] Failed to restore purchases:", e);
-        setRestoredPurchases([]);
-      }
     } catch (err) {
       if (signal.aborted) return;
       if (err instanceof Error && "code" in err && err.code === "ACCOUNT_DELETING") {
@@ -639,10 +512,6 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     userId,
     sessionToken,
     sdk,
-    products,
-    restoredPurchases,
-    premiumActive,
-    setPremiumActive,
     reinitialize: () => initialize(true, signedOutLanguage ?? undefined),
   };
 

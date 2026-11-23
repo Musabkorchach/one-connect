@@ -73,6 +73,7 @@ declare global {
       init: () => Promise<SDKLiteInstance>;
     };
     Pi: {
+      SmartContract?: { Subscription?: import("./pi-testnet-subscription").PiSubscriptionReader };
       init: (config: { version: string; sandbox?: boolean }) => Promise<void>;
     };
   }
