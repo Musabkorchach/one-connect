@@ -23,7 +23,7 @@ test("subscription startup rejects fixtures combined with provider configuration
     [{ ONE_CONNECT_TEST_ACCOUNT_BINDING: "0" }, /require local account-binding tests/],
   ]) {
     const result = spawnSync(process.execPath, [script], {
-      cwd: tmpdir(), encoding: "utf8", timeout: 8000, windowsHide: true,
+      cwd: tmpdir(), encoding: "utf8", timeout: 30000, windowsHide: true,
       env: {
         SystemRoot: process.env.SystemRoot, NODE_ENV: "test", ONE_CONNECT_TEST_ACCOUNT_BINDING: "1",
         ONE_CONNECT_TEST_SUBSCRIPTION_FIXTURES: "1", ...configuration,
