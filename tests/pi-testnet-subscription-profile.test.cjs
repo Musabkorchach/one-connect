@@ -27,10 +27,11 @@ function nodes(element) {
 
 function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", serviceId,
   response = [200, plan], piSdkReady = true,
-  prepareResponse = [403, "WALLET_ADDRESS_MISMATCH"], authorize = async () => ({ accessToken: "pi-token" }) } = {}) {
+  prepareResponse = [403, "WALLET_ADDRESS_MISMATCH"], authorize = async () => ({ accessToken: "pi-token" }),
+  sdkFailure } = {}) {
   const auth = { sessionToken: "production-session", isCurrentSession: token => token === "production-session",
     subscriptionStatusSupported: false, privateDataOwner: null, sdk: null, piSdkReady };
-  const calls = { scopes: [], prepares: [], subscriptions: 0, modes: [], confirmations: [] };
+  const calls = { scopes: [], prepares: [], subscriptions: 0, modes: [], starts: [], releases: [], confirmations: [] };
   const hash = "a".repeat(64);
   const browse = { location: { origin }, Pi: {
     async authenticate(scopes) { calls.scopes.push(scopes); return authorize(); },
@@ -38,6 +39,7 @@ function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", 
       assert.deepEqual([id, autoRenew, periods], ["460", false, "1"]);
       calls.subscriptions++;
       calls.modes.push(mode);
+      if (sdkFailure?.mode === mode) throw new Error(sdkFailure.message);
       return { hash };
     } } },
   } };
@@ -76,6 +78,12 @@ function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", 
       assert.equal(method, "POST");
       calls.confirmations.push(JSON.parse(body));
       return { ok: true, json: async () => ({ state: "pending" }) };
+    }
+    if (url.endsWith("/start") || url.endsWith("/release")) {
+      assert.equal(method, "POST");
+      const start = url.endsWith("/start");
+      calls[start ? "starts" : "releases"].push(JSON.parse(body));
+      return { ok: true, json: async () => ({ state: start ? "submitting" : "released" }) };
     }
     assert.equal(method, "GET");
     return { ok: response[0] === 200, status: response[0], json: async () => response[1] };
@@ -142,7 +150,7 @@ test("wallet errors are displayed separately without reaching simulation or clea
     const wallet = enroll(app);
     await settle();
     assert.deepEqual(app.calls.scopes, [["username", "payments"]]);
-    assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token" }]);
+    assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token", protocol: 2 }]);
     assert.equal(app.calls.subscriptions, 0);
     assert.equal(app.requests, 2, "verification failure preserves the last confirmed subscription status");
     const view = app.render();
@@ -173,12 +181,30 @@ test("an authenticated user can prepare then simulate and confirm a signed Testn
   const wallet = enroll(app);
   await settle();
   assert.deepEqual(app.calls.scopes, [["username", "payments"]]);
-  assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token" }]);
+  assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token", protocol: 2 }]);
   assert.deepEqual(app.calls.modes, ["simulate", "submit"]);
+  assert.deepEqual(app.calls.starts, [{ id: "fixture-attempt" }]);
   assert.deepEqual(app.calls.confirmations, [{ id: "fixture-attempt", hash: "a".repeat(64) }]);
   assert.ok(app.render().includes("Awaiting transaction confirmation."));
   assert.ok(!app.render().some(node => node.type === "form"));
   app.cleanup();
+});
+
+test("simulation failure and explicit wallet rejection release the attempt; uncertain submission does not", async () => {
+  for (const [mode, message, release] of [
+    ["simulate", "Simulation failed", false],
+    ["submit", "User rejected.", true],
+    ["submit", "Network error", null],
+  ]) {
+    const app = mount({ prepareResponse: [200], sdkFailure: { mode, message } });
+    await settle();
+    enroll(app);
+    await settle();
+    assert.deepEqual(app.calls.starts, mode === "submit" ? [{ id: "fixture-attempt" }] : []);
+    assert.deepEqual(app.calls.releases, release === null ? [] : [{ id: "fixture-attempt", walletRejected: release }]);
+    assert.deepEqual(app.calls.confirmations, []);
+    app.cleanup();
+  }
 });
 
 test("a forbidden or unavailable service stays visible and can be retried", async () => {

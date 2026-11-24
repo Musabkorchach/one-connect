@@ -72,7 +72,7 @@ test("prepare verifies Pi identity without requiring a wallet address from Pi", 
   ];
   const prepare = handlers.get("/api/pi-testnet/subscription/prepare");
   const request = { user: { verifiedPiUid: identity.uid, accessToken: "login-fixture" },
-    body: { wallet, accessToken: "authorization-fixture" } };
+    body: { wallet, accessToken: "authorization-fixture", protocol: 2 } };
   for (const [status, code, response] of cases) {
     piReply = response;
     const reply = { set() {}, status(code) { this.code = code; return this; }, json(value) { this.body = value; } };
@@ -121,7 +121,7 @@ test("a second verified Pi account cannot reserve a wallet held by another accou
   const prepare = handlers.get("/api/pi-testnet/subscription/prepare");
   const reply = () => ({ set() {}, statusCode: 200, sendStatus(status) { this.statusCode = status; },
     json(body) { this.body = body; } });
-  const request = uid => ({ user: { verifiedPiUid: uid }, body: { wallet, accessToken: uid } });
+  const request = uid => ({ user: { verifiedPiUid: uid }, body: { wallet, accessToken: uid, protocol: 2 } });
   const first = reply();
   await prepare(request("account-a"), first);
   assert.equal(first.statusCode, 200);

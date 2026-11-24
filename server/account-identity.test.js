@@ -13,6 +13,7 @@ import express from "express";
 import { io as connectSocket } from "socket.io-client";
 import { Collection, MongoClient, ObjectId } from "mongodb";
 import { createVerifyPiLogin, isAccountBindingEnabled } from "./pi-login.js";
+import { registerPiTestnetSubscriptions } from "./pi-testnet-subscription-routes.js";
 import {
   accountIdentityIndexes,
   identityBindingsCollection,
@@ -592,6 +593,90 @@ test("all authorized subscription previews reach session checks independently of
     assert.equal(forbidden.status, 403);
     assert.equal(forbidden.body.code, "PI_TESTNET_ORIGIN_NOT_ALLOWED");
   }
+});
+
+test("subscription attempts release, expire, and serialize concurrent claims", async (t) => {
+  const db = client.db("subscription_reservation_lifecycle");
+  const collection = db.collection("pi_testnet_subscription_wallets_v1");
+  const handlers = new Map();
+  let sequence = "42";
+  let transaction = null;
+  t.mock.method(globalThis, "fetch", async (_url, { headers }) =>
+    Response.json({ uid: headers.Authorization.slice("Bearer ".length) }));
+  registerPiTestnetSubscriptions({
+    app: { get() {}, post(path, _auth, handler) { handlers.set(path.split("/").at(-1), handler); } },
+    db, authenticateSession() {}, sessionIsCurrent: () => true,
+    provider: { isWallet: value => /^wallet-[abc]$/.test(value), service: async () => ({ active: true }),
+      nextSequence: async () => sequence, subscription: async () => ({ status: "expired" }),
+      transaction: async () => transaction },
+  });
+  async function call(action, uid, body) {
+    const res = { code: 200, set() { return this; }, status(code) { this.code = code; return this; },
+      sendStatus(code) { this.code = code; }, json(value) { this.body = value; } };
+    await handlers.get(action)({ user: { verifiedPiUid: uid }, body }, res);
+    return res;
+  }
+  const prepare = (uid, wallet = "wallet-a") => call("prepare", uid, { wallet, accessToken: uid, protocol: 2 });
+  async function reserve(uid) {
+    const result = await prepare(uid);
+    assert.equal(result.code, 200);
+    return result.body.id;
+  }
+  const hash = "a".repeat(64);
+  assert.equal((await call("prepare", "a", { wallet: "wallet-a", accessToken: "a" })).code, 426);
+  const expire = delay => collection.updateOne({ _id: "wallet-a" }, { $set: { "intent.expiresAt": Date.now() - delay } });
+  const cancelled = await reserve("a");
+  assert.equal((await call("release", "b", { id: cancelled })).code, 409);
+  assert.equal((await call("release", "a", { id: cancelled })).code, 200);
+  assert.equal((await call("confirm", "a", { id: cancelled, hash })).code, 409);
+  const racing = await reserve("a");
+  const race = await Promise.all([call("start", "a", { id: racing }), call("release", "a", { id: racing })]);
+  assert.deepEqual(race.map(result => result.code).sort(), [200, 409]);
+  if (race[0].code === 200) {
+    assert.equal((await call("release", "a", { id: racing, walletRejected: true })).code, 200);
+  }
+  const abandoned = await reserve("a");
+  await expire(1000);
+  const replaced = await reserve("b");
+  assert.equal((await call("confirm", "a", { id: abandoned, hash })).code, 409);
+  assert.equal((await call("start", "b", { id: replaced })).code, 200);
+  assert.equal((await call("release", "b", { id: replaced })).code, 409);
+  sequence = "43";
+  assert.equal((await call("release", "b", { id: replaced, walletRejected: true })).code, 409);
+  sequence = "42";
+  assert.equal((await call("release", "b", { id: replaced, walletRejected: true })).code, 200);
+  assert.equal((await call("confirm", "b", { id: replaced, hash })).code, 409);
+
+  const pending = await reserve("a");
+  assert.equal((await call("start", "a", { id: pending })).code, 200);
+  assert.equal((await call("confirm", "a", { id: pending, hash })).code, 202);
+  assert.equal((await call("release", "a", { id: pending, walletRejected: true })).code, 409);
+  await expire(1000);
+  assert.equal((await prepare("b")).code, 409);
+  await expire(25 * 60 * 60_000);
+  const replacement = await reserve("b");
+  assert.equal((await call("confirm", "a", { id: pending, hash })).code, 409);
+  assert.equal((await call("confirm", "b", { id: replacement, hash })).code, 409);
+  transaction = { hash, successful: false };
+  assert.equal((await call("start", "b", { id: replacement })).code, 200);
+  assert.equal((await call("confirm", "b", { id: replacement, hash })).code, 422);
+  assert.equal(await collection.findOne({ _id: "wallet-a" }), null);
+
+  const competing = await Promise.all([prepare("a"), prepare("b")]);
+  assert.deepEqual(competing.map(result => result.code).sort(), [200, 409]);
+  const singleAccount = await Promise.all([prepare("c", "wallet-b"), prepare("c", "wallet-c")]);
+  assert.deepEqual(singleAccount.map(result => result.code).sort(), [200, 409]);
+  assert.equal(await collection.countDocuments({ uid: "c" }), 1);
+
+  const established = await collection.findOne({ _id: "wallet-a" });
+  await collection.updateOne({ _id: established._id }, {
+    $set: { verified: true, confirmedHash: hash, confirmedIntentId: "original" }, $unset: { intent: "" },
+  });
+  const renewal = await reserve(established.uid);
+  assert.equal((await call("release", established.uid, { id: renewal })).code, 200);
+  assert.equal((await call("confirm", established.uid, { id: renewal, hash })).code, 409);
+  assert.equal((await collection.findOne({ _id: established._id })).verified, true);
+  assert.equal((await prepare("other")).code, 409);
 });
 
 test("real HTTP email routes isolate generations, preserve recipient copies and reject inactive accounts", async (t) => {

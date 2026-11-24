@@ -28,6 +28,7 @@ export async function submitTestnetSubscription(
   wallet: string,
   id: string,
   isCurrent: () => boolean,
+  beforeSubmit?: () => Promise<void>,
 ): Promise<string> {
   if (!testnetWalletPattern.test(wallet) || !serviceIdPattern.test(id) || (action === "subscribe" && id !== testnetServiceId)) {
     throw new Error("Invalid Testnet subscription");
@@ -39,6 +40,10 @@ export async function submitTestnetSubscription(
   };
   await invoke("simulate");
   if (!isCurrent()) throw new Error("Session changed");
+  if (beforeSubmit) {
+    await beforeSubmit();
+    if (!isCurrent()) throw new Error("Session changed");
+  }
   const result = await invoke("submit");
   const submitted = result as { hash?: unknown } | null;
   if (typeof submitted?.hash !== "string" || !/^[a-f0-9]{64}$/.test(submitted.hash)) {
