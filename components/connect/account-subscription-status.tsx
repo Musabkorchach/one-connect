@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { API_URL } from "@/lib/api-client";
 import { monthlyTestnetPrice, resolveTestnetSubscriptionServiceId, submitTestnetSubscription, testnetWalletPattern } from "@/lib/pi-testnet-subscription";
@@ -9,6 +9,7 @@ import { Button } from "./ui";
 
 const endpoint = API_URL + "/api/pi-testnet/subscription";
 type Proof = { id: string; hash: string };
+type StatusFailure = "forbidden" | "disabled" | "unavailable";
 type Status = {
   plan: { active: boolean; network: string; serviceId: string };
   wallet: string | null;
@@ -31,7 +32,14 @@ async function request<T>(token: string, path = "", body?: object, signal?: Abor
       headers: { Authorization: "Bearer " + token, ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body && JSON.stringify(body),
     });
-    if (response.status === 403 && path === "/prepare") throw new Error("wallet");
+    if (response.status === 403) {
+      if (path === "/prepare") {
+        const denial = await response.json().catch(() => null);
+        if (denial?.code === "WALLET_UNVERIFIED") throw new Error("wallet");
+      }
+      throw new Error("forbidden");
+    }
+    if (response.status === 404) throw new Error("disabled");
     if (!response.ok) throw new Error(response.status === 422 ? "rejected" : "unavailable");
     return await response.json();
   } finally {
@@ -41,30 +49,86 @@ async function request<T>(token: string, path = "", body?: object, signal?: Abor
 }
 
 export function AccountSubscriptionStatus({ sessionToken, language }: { sessionToken: string; language: LangId }) {
-  const { isCurrentSession } = usePiAuth();
+  const { isCurrentSession, piSdkReady } = usePiAuth();
   if (typeof window === "undefined" || !isCurrentSession(sessionToken)) return null;
   const serviceId = resolveTestnetSubscriptionServiceId(
     window.location.origin,
     process.env.NEXT_PUBLIC_PI_TESTNET_SUBSCRIPTION_SERVICE_ID,
   );
-  if (!serviceId) return null;
-  return <SubscriptionPanel key={sessionToken} token={sessionToken} language={language} serviceId={serviceId} isCurrentSession={isCurrentSession} />;
+  if (!serviceId) return (
+    <SubscriptionCard language={language}>
+      <p role="status" className="text-sm">{subscriptionCopy(language).context}</p>
+    </SubscriptionCard>
+  );
+  return <SubscriptionPanel key={sessionToken} token={sessionToken} language={language} serviceId={serviceId}
+    isCurrentSession={isCurrentSession} piSdkReady={piSdkReady} />;
 }
 
-function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
+function subscriptionCopy(language: LangId) {
+  if (language === "ar") return {
+    title: "اشتراك Pi على Testnet", loading: "جارٍ التحقق من توفر الاشتراك…",
+    context: "اشتراك Testnet غير متاح من هذا التطبيق أو المعاينة.",
+    forbidden: "لم يسمح الخادم بالاشتراك لهذه الجلسة أو المعاينة.",
+    disabled: "خدمة اشتراك Testnet غير متاحة على الخادم.",
+    unavailable: "تعذّر التحقق من حالة الاشتراك. حاول مجددًا.",
+    inactive: "الخطة لا تقبل اشتراكات جديدة حاليًا.",
+    sdk: "معاملات الاشتراك غير متاحة في جلسة Pi Browser الحالية.",
+    wallet: "لم يؤكد Pi أن هذه المحفظة تخص حسابك.",
+    refresh: "حدّث الحالة",
+  };
+  if (language === "fr") return {
+    title: "Abonnement Pi sur Testnet", loading: "Vérification de la disponibilité de l’abonnement…",
+    context: "L’abonnement Testnet est indisponible dans cette application ou cet aperçu.",
+    forbidden: "Le serveur n’a pas autorisé l’abonnement pour cette session ou cet aperçu.",
+    disabled: "Le service d’abonnement Testnet est indisponible sur le serveur.",
+    unavailable: "Impossible de vérifier l’état de l’abonnement. Réessayez.",
+    inactive: "Le forfait n’accepte pas de nouveaux abonnements pour le moment.",
+    sdk: "Les transactions d’abonnement sont indisponibles dans cette session Pi Browser.",
+    wallet: "Pi n’a pas confirmé que ce portefeuille appartient à votre compte.",
+    refresh: "Actualiser l’état",
+  };
+  return {
+    title: "Pi Subscription · Testnet", loading: "Checking subscription availability…",
+    context: "Testnet subscriptions are unavailable in this app or preview.",
+    forbidden: "The server did not allow subscriptions for this session or preview.",
+    disabled: "The Testnet subscription service is unavailable on the server.",
+    unavailable: "Could not verify the subscription status. Try again.",
+    inactive: "The plan is currently closed to new subscriptions.",
+    sdk: "Subscription transactions are unavailable in this Pi Browser session.",
+    wallet: "Pi could not verify this wallet for your account.",
+    refresh: "Refresh status",
+  };
+}
+
+function SubscriptionCard({ language, children }: { language: LangId; children: ReactNode }) {
+  return (
+    <section className="space-y-3 rounded-2xl pc-glass p-4" dir={language === "ar" ? "rtl" : "ltr"}>
+      <h2 className="font-semibold">{subscriptionCopy(language).title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function SubscriptionPanel({ token, language, serviceId, isCurrentSession, piSdkReady }: {
   token: string;
   language: LangId;
   serviceId: NonNullable<ReturnType<typeof resolveTestnetSubscriptionServiceId>>;
   isCurrentSession: (token: string) => boolean;
+  piSdkReady: boolean;
 }) {
   const [wallet, setWallet] = useState("");
   const [result, setResult] = useState<Status | null>(null);
+  const [statusFailure, setStatusFailure] = useState<StatusFailure | null>(null);
   const [proof, setProof] = useState<Proof | null>(null);
   const [managementHash, setManagementHash] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<"wallet" | "unavailable" | "pending" | "rejected" | null>(null);
   const inFlight = useRef(false);
   const arabic = language === "ar";
+  const copy = subscriptionCopy(language);
+  const pi = piSdkReady ? window.Pi : undefined;
+  const subscriptionSdk = pi?.SmartContract?.Subscription;
+  const canEnroll = typeof pi?.authenticate === "function" && typeof subscriptionSdk?.subscribe === "function";
   const current = useCallback(() => isCurrentSession(token), [isCurrentSession, token]);
 
   const readStatus = useCallback(async (signal?: AbortSignal) => {
@@ -77,9 +141,16 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
       const status = await readStatus(signal);
-      if (current() && !signal?.aborted) setResult(status);
-    } catch {
-      if (current() && !signal?.aborted) setResult(null);
+      if (current() && !signal?.aborted) {
+        setResult(status);
+        setStatusFailure(null);
+      }
+    } catch (error) {
+      if (current() && !signal?.aborted) {
+        const failure = error instanceof Error ? error.message : null;
+        setResult(null);
+        setStatusFailure(failure === "forbidden" || failure === "disabled" ? failure : "unavailable");
+      }
     }
   }, [current, readStatus]);
 
@@ -98,7 +169,7 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   }
 
   async function run(action: () => Promise<void>) {
-    if (!current() || !result || inFlight.current) return;
+    if (!current() || inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setMessage(null);
@@ -120,7 +191,7 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   function enroll(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const address = result?.wallet ?? wallet.trim();
-    if (!testnetWalletPattern.test(address) || !result?.plan.active || result.reserved || result.pending || proof) return;
+    if (!canEnroll || !testnetWalletPattern.test(address) || !result?.plan.active || result.reserved || result.pending || proof) return;
     void run(async () => {
       const pi = window.Pi;
       const sdk = pi?.SmartContract?.Subscription;
@@ -156,7 +227,10 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   function manage(action: "cancel" | "renew") {
     void run(async () => {
       const sdk = window.Pi?.SmartContract?.Subscription;
-      if (!sdk || managementHash) throw new Error("unavailable");
+      if (!piSdkReady || !sdk || managementHash ||
+          typeof (action === "cancel" ? sdk.cancel : sdk.toggleAutoRenew) !== "function") {
+        throw new Error("unavailable");
+      }
       const { wallet: verifiedWallet, subscription: sub } = await readStatus();
       if (!current()) return;
       if (!verifiedWallet || !sub || !("subscriptionId" in sub) ||
@@ -170,28 +244,45 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
     });
   }
 
-  if (!result) return null;
+  if (!result) return (
+    <SubscriptionCard language={language}>
+      <p role="status" className="text-sm">{statusFailure ? copy[statusFailure] : copy.loading}</p>
+      {statusFailure && (
+        <Button className="w-full" type="button" variant="outline" disabled={busy} onClick={() => void run(() => refresh())}>
+          {copy.refresh}
+        </Button>
+      )}
+    </SubscriptionCard>
+  );
 
   const subscription = result.subscription;
   const pending = proof ?? result?.pending;
+  const canShowEnrollment = result.plan.active && (!result.wallet ||
+    (subscription?.status === "expired" && !subscription.autoRenew)) && !pending && !result.reserved;
+  const canShowManagement = subscription && "subscriptionId" in subscription &&
+    (subscription.status === "active" || subscription.autoRenew);
+  const canManage = canShowManagement &&
+    typeof (subscription.autoRenew ? subscriptionSdk?.cancel : subscriptionSdk?.toggleAutoRenew) === "function";
   const statusText = subscription?.status === "active" ? (arabic ? "نشط" : "Active")
     : subscription?.status === "expired" ? (arabic ? "منتهٍ" : "Expired")
     : (arabic ? "غير معلومة" : "Unknown");
   const messages = {
-    wallet: arabic ? "لم يؤكد Pi أن هذه المحفظة تخص حسابك." : "Pi could not verify this wallet for your account.",
+    wallet: copy.wallet,
     unavailable: arabic ? "تعذّر التحقق من العملية. حدّث الحالة قبل المحاولة مجددًا." : "Could not verify the operation. Refresh the status before trying again.",
     pending: arabic ? "المعاملة بانتظار التأكيد." : "Awaiting transaction confirmation.",
     rejected: arabic ? "لم يؤكد Pi المعاملة." : "Pi did not confirm the transaction.",
   };
 
   return (
-    <section className="space-y-3 rounded-2xl pc-glass p-4" dir={arabic ? "rtl" : "ltr"}>
-      <h2 className="font-semibold">{arabic ? "اشتراك Pi على Testnet" : "Pi Subscription · Testnet"}</h2>
+    <SubscriptionCard language={language}>
       <p className="text-sm text-muted-foreground">
         {arabic ? `${monthlyTestnetPrice} Pi تجريبية شهريًا. الخدمات الحالية مجانية.`
           : `${monthlyTestnetPrice} Test-Pi per month. Current services are free.`}
       </p>
       <p role="status" className="text-sm">{arabic ? "حالة اشتراك الحساب: " : "Account subscription: "}{statusText}</p>
+      {!result.plan.active && <p role="status" className="text-sm">{copy.inactive}</p>}
+      {((canShowEnrollment && !canEnroll) || (canShowManagement && !canManage)) &&
+        <p role="status" className="text-sm">{copy.sdk}</p>}
       {subscription && "endsAt" in subscription && (
         <p className="text-sm">
           {arabic ? "نهاية الفترة" : "Period ends"}{" "}
@@ -200,7 +291,7 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
           }).format(new Date(subscription.endsAt))} UTC</time>
         </p>
       )}
-      {result?.plan.active && (!result.wallet || (subscription?.status === "expired" && !subscription.autoRenew)) && !pending && !result.reserved && (
+      {canShowEnrollment && (
         <form className="space-y-2" onSubmit={enroll}>
           {!result.wallet && (
             <label className="block space-y-1 text-sm">
@@ -210,15 +301,15 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
                 value={wallet} onChange={(event) => setWallet(event.target.value)} />
             </label>
           )}
-          <Button className="w-full" type="submit" disabled={busy || !testnetWalletPattern.test(result.wallet ?? wallet.trim())}>
+          <Button className="w-full" type="submit" disabled={busy || !canEnroll || !testnetWalletPattern.test(result.wallet ?? wallet.trim())}>
             {arabic ? "اشترك لدورة واحدة دون تجديد تلقائي" : "Subscribe for one period without auto-renewal"}
           </Button>
         </form>
       )}
       {!pending && result?.reserved && <p className="text-sm">{arabic ? "هناك محاولة اشتراك قيد التحقق." : "A subscription attempt is being checked."}</p>}
-      {subscription && "subscriptionId" in subscription && (subscription.status === "active" || subscription.autoRenew) && (
+      {canShowManagement && (
         <div className="space-y-2">
-          <Button className="w-full" type="button" variant="outline" disabled={busy || !!managementHash}
+          <Button className="w-full" type="button" variant="outline" disabled={busy || !canManage || !!managementHash}
             onClick={() => manage(subscription.autoRenew ? "cancel" : "renew")}>
             {subscription.autoRenew ? (arabic ? "أوقف التجديد التلقائي" : "Turn off auto-renewal")
               : (arabic ? "وافق على تجديد دورة واحدة" : "Approve one renewal")}
@@ -227,9 +318,9 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
       )}
       <Button className="w-full" type="button" variant="outline" disabled={busy}
         onClick={() => void run(() => pending ? confirm(pending) : managementHash ? checkManagement(managementHash) : refresh())}>
-        {arabic ? "حدّث الحالة" : "Refresh status"}
+        {copy.refresh}
       </Button>
       {message && <p role="status" className="text-sm text-muted-foreground">{messages[message]}</p>}
-    </section>
+    </SubscriptionCard>
   );
 }
