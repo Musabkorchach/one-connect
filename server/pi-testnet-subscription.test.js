@@ -47,7 +47,7 @@ test("only a successful matching Testnet subscribe transaction can bind an accou
   assert.equal(verifySubscribeTransaction(valid, { ...intent, wallet: Keypair.random().publicKey() }), false);
 });
 
-test("prepare distinguishes Pi wallet verification failures without preparing a transaction", async (t) => {
+test("prepare verifies Pi identity without requiring a wallet address from Pi", async (t) => {
   const handlers = new Map();
   const app = { get: (path, _auth, fn) => handlers.set(path, fn), post: (path, _auth, fn) => handlers.set(path, fn) };
   let writes = 0;
@@ -63,8 +63,6 @@ test("prepare distinguishes Pi wallet verification failures without preparing a 
   });
   const identity = { uid: "verified-uid" };
   const cases = [
-    [403, "WALLET_ADDRESS_MISSING", () => Response.json(identity)],
-    [403, "WALLET_ADDRESS_MISMATCH", () => Response.json({ ...identity, wallet_address: key.publicKey().replace(/^G/, "X") })],
     [403, "WALLET_PI_IDENTITY_MISMATCH", () => Response.json({ uid: "other-uid", wallet_address: wallet })],
     ...[401, 403].map(status => [403, "WALLET_PI_AUTH_REJECTED", () => new Response(null, { status })]),
     ...[429, 503].map(status => [503, "WALLET_PI_UNAVAILABLE", () => new Response(null, { status })]),
@@ -74,7 +72,7 @@ test("prepare distinguishes Pi wallet verification failures without preparing a 
   ];
   const prepare = handlers.get("/api/pi-testnet/subscription/prepare");
   const request = { user: { verifiedPiUid: identity.uid, accessToken: "login-fixture" },
-    body: { wallet, accessToken: "authorization-fixture" } };
+    body: { wallet, accessToken: "authorization-fixture", protocol: 2 } };
   for (const [status, code, response] of cases) {
     piReply = response;
     const reply = { set() {}, status(code) { this.code = code; return this; }, json(value) { this.body = value; } };
@@ -89,12 +87,50 @@ test("prepare distinguishes Pi wallet verification failures without preparing a 
   assert.equal(sequenceReads, 0);
   assert.equal(writes, 0);
 
-  piReply = () => Response.json({ ...identity, wallet_address: wallet });
+  piReply = () => Response.json(identity);
   const allowed = { set() {}, json(value) { this.body = value; } };
   await prepare(request, allowed);
   assert.equal(typeof allowed.body.id, "string");
   assert.equal(sequenceReads, 1);
   assert.equal(writes, 1);
+});
+
+test("a second verified Pi account cannot reserve a wallet held by another account", async (t) => {
+  const handlers = new Map();
+  const app = { get() {}, post: (path, _auth, fn) => handlers.set(path, fn) };
+  let saved;
+  const storage = {
+    createIndex: async () => {},
+    findOne: async ({ uid }) => saved?.uid === uid ? saved : null,
+    async updateOne(filter, update, { upsert }) {
+      assert.equal(upsert, true);
+      assert.equal(filter._id, wallet);
+      if (saved) {
+        assert.notEqual(filter.uid, saved.uid);
+        throw Object.assign(new Error("duplicate wallet key"), { code: 11000 });
+      }
+      saved = { _id: filter._id, uid: filter.uid, ...update.$setOnInsert, ...update.$set };
+    },
+  };
+  t.mock.method(globalThis, "fetch", async (_url, { headers }) =>
+    Response.json({ uid: headers.Authorization.endsWith("account-a") ? "account-a" : "account-b" }));
+  registerPiTestnetSubscriptions({ app, db: { collection: () => storage }, authenticateSession() {},
+    sessionIsCurrent: () => true,
+    provider: { service: async () => ({ active: true }), isWallet: value => value === wallet, nextSequence: async () => "42" },
+  });
+  const prepare = handlers.get("/api/pi-testnet/subscription/prepare");
+  const reply = () => ({ set() {}, statusCode: 200, sendStatus(status) { this.statusCode = status; },
+    json(body) { this.body = body; } });
+  const request = uid => ({ user: { verifiedPiUid: uid }, body: { wallet, accessToken: uid, protocol: 2 } });
+  const first = reply();
+  await prepare(request("account-a"), first);
+  assert.equal(first.statusCode, 200);
+  assert.equal(saved.verified, false);
+  const second = reply();
+  await prepare(request("account-b"), second);
+  assert.equal(second.statusCode, 409);
+  assert.equal(saved.uid, "account-a");
+  assert.equal(saved.intent.id, first.body.id);
 });
 
 test("confirmation survives RPC lag and only persists a verified wallet once", async () => {
