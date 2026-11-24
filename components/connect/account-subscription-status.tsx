@@ -67,17 +67,21 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   const arabic = language === "ar";
   const current = useCallback(() => isCurrentSession(token), [isCurrentSession, token]);
 
+  const readStatus = useCallback(async (signal?: AbortSignal) => {
+    const status = await request<Status>(token, "", undefined, signal);
+    if (status?.plan?.network !== "Pi Testnet" || status.plan.serviceId !== serviceId ||
+        typeof status.plan.active !== "boolean") throw new Error("unavailable");
+    return status;
+  }, [serviceId, token]);
+
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      const status = await request<Status>(token, "", undefined, signal);
-      if (current() && !signal?.aborted) {
-        setResult(status?.plan?.network === "Pi Testnet" && status.plan.serviceId === serviceId &&
-          typeof status.plan.active === "boolean" ? status : null);
-      }
+      const status = await readStatus(signal);
+      if (current() && !signal?.aborted) setResult(status);
     } catch {
       if (current() && !signal?.aborted) setResult(null);
     }
-  }, [current, serviceId, token]);
+  }, [current, readStatus]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -152,10 +156,14 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   function manage(action: "cancel" | "renew") {
     void run(async () => {
       const sdk = window.Pi?.SmartContract?.Subscription;
-      const sub = result?.subscription;
-      if (!sdk || !result?.wallet || !sub || !("subscriptionId" in sub) ||
-          (action === "renew" && sub.status !== "active") || managementHash) throw new Error("unavailable");
-      const hash = await submitTestnetSubscription(sdk, action, result.wallet, sub.subscriptionId, current);
+      if (!sdk || managementHash) throw new Error("unavailable");
+      const { wallet: verifiedWallet, subscription: sub } = await readStatus();
+      if (!current()) return;
+      if (!verifiedWallet || !sub || !("subscriptionId" in sub) ||
+          (action === "cancel" ? !sub.autoRenew : sub.status !== "active" || sub.autoRenew)) {
+        throw new Error("unavailable");
+      }
+      const hash = await submitTestnetSubscription(sdk, action, verifiedWallet, sub.subscriptionId, current);
       if (!current()) return;
       setManagementHash(hash);
       await checkManagement(hash);

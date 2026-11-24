@@ -1,14 +1,12 @@
 export const monthlyTestnetPrice = "0.1";
 const testnetServiceId = "460";
-// Frontend origins from the two One Connect Testnet registrations. PiNet embeds
-// these frontends, so its outer URLs are not the origins of the app documents.
-const testnetAppOrigins = new Set([
-  "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
-  "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
-]);
+const registeredTestnetOrigin = "https://one-connect-git-develop-musabkorchachs-projects.vercel.app";
+const previewOriginPattern = /^https:\/\/demo-[a-z0-9]+\.vusercontent\.net$/;
 
 export function resolveTestnetSubscriptionServiceId(origin: string, configuredServiceId: string | undefined) {
-  if (!testnetAppOrigins.has(origin)) return null;
+  // A preview host is only a candidate. The authenticated endpoint checks it
+  // against the frame currently published by One Connect's Access App link.
+  if (origin !== registeredTestnetOrigin && !previewOriginPattern.test(origin)) return null;
   const serviceId = configuredServiceId ?? testnetServiceId;
   return serviceId === testnetServiceId ? serviceId : null;
 }
