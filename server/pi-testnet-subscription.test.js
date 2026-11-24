@@ -47,23 +47,54 @@ test("only a successful matching Testnet subscribe transaction can bind an accou
   assert.equal(verifySubscribeTransaction(valid, { ...intent, wallet: Keypair.random().publicKey() }), false);
 });
 
-test("prepare refuses wallet linking when Pi does not verify ownership", async () => {
+test("prepare distinguishes Pi wallet verification failures without preparing a transaction", async (t) => {
   const handlers = new Map();
   const app = { get: (path, _auth, fn) => handlers.set(path, fn), post: (path, _auth, fn) => handlers.set(path, fn) };
-  const collection = { createIndex: async () => {} };
-  const calls = [];
+  let writes = 0;
+  const collection = { createIndex: async () => {}, findOne: async () => null,
+    updateOne: async () => { writes++; } };
+  let piReply;
+  let sequenceReads = 0;
+  const piMock = t.mock.method(globalThis, "fetch", async () => piReply());
   registerPiTestnetSubscriptions({
     app, db: { collection: () => collection }, authenticateSession() {}, sessionIsCurrent: () => true,
-    provider: { service: async () => ({ active: true }), isWallet: () => true },
-    verifyWallet: async (...args) => { calls.push(args); return false; },
+    provider: { service: async () => ({ active: true }), isWallet: () => true,
+      nextSequence: async () => { sequenceReads++; return "42"; } },
   });
-  const reply = { set() {}, status(code) { this.code = code; return this; }, json(value) { this.body = value; } };
-  await handlers.get("/api/pi-testnet/subscription/prepare")({
-    user: { verifiedPiUid: "verified-uid" }, body: { wallet, accessToken: "test-token" },
-  }, reply);
-  assert.equal(reply.code, 403);
-  assert.deepEqual(reply.body, { code: "WALLET_UNVERIFIED" });
-  assert.deepEqual(calls, [["test-token", "verified-uid", wallet]]);
+  const identity = { uid: "verified-uid" };
+  const cases = [
+    [403, "WALLET_ADDRESS_MISSING", () => Response.json(identity)],
+    [403, "WALLET_ADDRESS_MISMATCH", () => Response.json({ ...identity, wallet_address: key.publicKey().replace(/^G/, "X") })],
+    [403, "WALLET_PI_IDENTITY_MISMATCH", () => Response.json({ uid: "other-uid", wallet_address: wallet })],
+    ...[401, 403].map(status => [403, "WALLET_PI_AUTH_REJECTED", () => new Response(null, { status })]),
+    ...[429, 503].map(status => [503, "WALLET_PI_UNAVAILABLE", () => new Response(null, { status })]),
+    [503, "WALLET_PI_UNAVAILABLE", () => new Response("invalid-json")],
+    [503, "WALLET_PI_UNAVAILABLE", () => Response.json(null)],
+    [503, "WALLET_PI_UNAVAILABLE", () => { throw new Error("fixture network failure"); }],
+  ];
+  const prepare = handlers.get("/api/pi-testnet/subscription/prepare");
+  const request = { user: { verifiedPiUid: identity.uid, accessToken: "login-fixture" },
+    body: { wallet, accessToken: "authorization-fixture" } };
+  for (const [status, code, response] of cases) {
+    piReply = response;
+    const reply = { set() {}, status(code) { this.code = code; return this; }, json(value) { this.body = value; } };
+    await prepare(request, reply);
+    assert.equal(reply.code, status);
+    assert.deepEqual(reply.body, { code });
+    const [url, options] = piMock.mock.calls.at(-1).arguments;
+    assert.equal(url, "https://api.minepi.com/v2/me");
+    assert.ok(options.headers.Authorization === "Bearer authorization-fixture", "uses the wallet authorization token");
+  }
+  assert.equal(piMock.mock.callCount(), cases.length);
+  assert.equal(sequenceReads, 0);
+  assert.equal(writes, 0);
+
+  piReply = () => Response.json({ ...identity, wallet_address: wallet });
+  const allowed = { set() {}, json(value) { this.body = value; } };
+  await prepare(request, allowed);
+  assert.equal(typeof allowed.body.id, "string");
+  assert.equal(sequenceReads, 1);
+  assert.equal(writes, 1);
 });
 
 test("confirmation survives RPC lag and only persists a verified wallet once", async () => {
