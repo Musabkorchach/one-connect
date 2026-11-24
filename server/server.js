@@ -367,6 +367,7 @@ if (testnetSubscriptionsEnabled) {
     "https://demo-kzmid74mzykg7dfhbw4w.vusercontent.net",
     "https://demo-kzmokzvi7qilj4jvt5pu.vusercontent.net",
     "https://demo-kzmj9x7doc3tbnuv0jmh.vusercontent.net",
+    "https://demo-kzmovxi2wuipz4n4bbzo.vusercontent.net",
   ]);
   app.use("/api/pi-testnet/subscription", (req, res, next) => {
     if (!subscriptionOrigins.has(req.get("Origin"))) {
