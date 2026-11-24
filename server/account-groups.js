@@ -470,6 +470,8 @@ export async function createAccountGroups({
 
   return {
     guardMedia, authorizeMediaWrite, authorizeMediaRead, writeForMember, report,
+    groupChanged,
+    invitationListChanged(accountId) { namespace.to(room(accountId)).emit("group:invited"); },
     disconnectSession(token) {
       for (const socket of namespace.sockets.values()) {
         if (socket.data.sessionToken === token) socket.disconnect();

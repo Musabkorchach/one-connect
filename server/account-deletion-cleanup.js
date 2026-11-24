@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { trackMailSubmission } from "./account-external-operations.js";
 import { identityBindingsCollection } from "./account-identity.js";
 import { archiveOwnedGroupsForDeletion } from "./group-ownership.js";
+import { removeVerifiedLegacyGroupAccess } from "./legacy-group-management.js";
 import { accountAttempts, deletedPstnAttempts } from "./pstn-account.js";
 
 import { deletionFileCandidates } from "./account-file-cleanup.js";
@@ -131,6 +132,14 @@ export async function verifyDataCleanup(db, accountId, session) {
       throw new Error("Account cleanup verification failed");
     }
   }
+  const binding = await db.collection(identityBindingsCollection).findOne({ accountId, state: "deleting" }, { session });
+  if (!binding) throw new Error("Account deletion binding is unavailable");
+  if (binding.username && await db.collection("email_users").findOne({
+    _id: binding.username, groupPiUid: binding._id,
+  }, { session }) && await db.collection("chat_groups").findOne({
+    $or: [{ members: binding.username }, { admins: binding.username }, { invitations: binding.username },
+      { "ownershipOffer.toAccountId": binding.username }, { ownerUsername: binding.username, state: { $ne: "archived" } }],
+  }, { session, projection: { _id: 1 } })) throw new Error("Legacy group access cleanup verification failed");
   await db.collection(identityBindingsCollection).updateOne({ accountId, state: "deleting" },
     { $set: { privateDataErased: true }, $unset: { username: "" } }, { session });
 }
@@ -142,10 +151,16 @@ export async function cleanDeletionPhase(db, accountId, phase, session) {
     case "awaiting-cleanup": return collectFiles(db, accountId, binding.username, session);
     case "erase-private-data": return erasePrivateData(db, accountId, session);
     case "remove-message-copies": return removeMessageCopies(db, accountId, session);
-    case "remove-group-access":
+    case "remove-group-access": {
+      const affected = await db.collection("account_chat_groups").find({
+        $or: [{ memberAccountIds: accountId }, { invitedAccountIds: accountId }, { ownerAccountId: accountId }],
+      }, { session, projection: { _id: 1, invitedAccountIds: 1 } }).toArray();
       await archiveOwnedGroupsForDeletion(db, accountId, session);
-      return db.collection("account_group_messages").updateMany({ readByAccountIds: accountId },
+      await db.collection("account_group_messages").updateMany({ readByAccountIds: accountId },
         { $pull: { readByAccountIds: accountId } }, { session });
+      return [...affected.map(row => ({ id: row._id, invitees: row.invitedAccountIds ?? [] })),
+        ...await removeVerifiedLegacyGroupAccess(db, binding, session)];
+    }
     case "verify-data-cleanup": return verifyDataCleanup(db, accountId, session);
   }
 }

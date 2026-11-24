@@ -37,7 +37,7 @@ function validGroup(value: unknown): value is GroupRecord {
     group.name.length <= 80 &&
     typeof group.ownerUsername === "string" &&
     Array.isArray(group.members) &&
-    group.members.length >= 3 &&
+    group.members.length >= 1 &&
     group.members.length <= 50 &&
     group.members.every(
       (member) =>
@@ -125,10 +125,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
 
         setState((previous) => ({
           token,
-          groups: mergeGroups(
-            previous.token === token ? previous.groups : [],
-            incoming,
-          ),
+          groups: mergeGroups([], incoming),
           loading: false,
           error: null,
         }));
@@ -168,6 +165,12 @@ export function GroupProvider({ children }: { children: ReactNode }) {
         loading: previous.token === token ? previous.loading : false,
         error: previous.token === token ? previous.error : null,
       }));
+      void refresh();
+    });
+    const unsubscribeRevoked = onGroupEvent("group:access-revoked", ({ groupId }) => {
+      if (!active()) return;
+      setState(previous => ({ ...previous, groups: previous.groups.filter(group => group.id !== groupId) }));
+      void refresh();
     });
 
     const unsubscribeMessage = onGroupEvent("group:message", (event) => {
@@ -215,6 +218,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
       disposed = true;
       controller.abort();
       unsubscribeUpdated();
+      unsubscribeRevoked();
       unsubscribeMessage();
       unsubscribeRead();
       unsubscribeConnect();

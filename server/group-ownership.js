@@ -4,6 +4,15 @@ import { identityBindingsCollection } from "./account-identity.js";
 const stale = { code: "GROUP_TRANSFER_STALE", error: "This ownership offer is no longer available" };
 const unavailable = { code: "GROUP_TRANSFER_UNAVAILABLE", error: "Ownership transfer requires a transactional database" };
 
+export function ownershipOffer(fromAccountId, toAccountId) {
+  return { id: new ObjectId().toHexString(), fromAccountId, toAccountId };
+}
+
+export function isCurrentOwnershipOffer(offer, id, owner, recipient) {
+  return offer?.id === id && offer.fromAccountId === owner &&
+    offer.toAccountId === recipient && owner !== recipient;
+}
+
 export function removeGroupMember(accountId) {
   return [
     { $set: {
@@ -79,7 +88,7 @@ export function registerGroupOwnership({
     const group = await member(groupId, accountId, { owner: true, write: true });
     const target = group.memberAccountIds.find((id) => opaqueMember(groupId, id) === req.body?.memberId);
     if (!target || target === accountId) reject(400, "Choose another active member");
-    const offer = { id: new ObjectId().toHexString(), fromAccountId: accountId, toAccountId: target };
+    const offer = ownershipOffer(accountId, target);
     await transaction(async (session) => {
       await fenceAccounts([accountId, target], session);
       const result = await groups.updateOne({
@@ -102,7 +111,7 @@ export function registerGroupOwnership({
         _id: group._id, state: "active", "ownershipOffer.id": offerId, "ownershipOffer.toAccountId": accountId,
       }, { session });
       const offer = current?.ownershipOffer;
-      if (!offer || offer.fromAccountId === accountId || current.ownerAccountId !== offer.fromAccountId) reject(409, stale);
+      if (!current || !isCurrentOwnershipOffer(offer, offerId, current.ownerAccountId, accountId)) reject(409, stale);
       await fenceAccounts([offer.fromAccountId, accountId], session);
       const accepted = action === "accept";
       const result = await groups.updateOne({

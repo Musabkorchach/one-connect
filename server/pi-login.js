@@ -72,6 +72,12 @@ export function createVerifyPiLogin({
           },
           { upsert: true },
         );
+        if (typeof uid === "string" && uid && uid === uid.trim()) {
+          await emailUsersCollection.updateOne(
+            { _id: messagingUsername, groupPiUid: { $exists: false } },
+            { $set: { groupPiUid: uid } },
+          );
+        }
         users.set(userId, {
           id: userId,
           piUsername,

@@ -1421,6 +1421,34 @@ export interface GroupRecord {
   createdAt: number;
   updatedAt: number;
   unreadCount: number;
+  state?: "active" | "archived";
+}
+
+export interface GroupManagement {
+  id: string;
+  name: string;
+  description: string;
+  owner: string;
+  members: { username: string; role: "owner" | "admin" | "member" }[];
+  ownRole: "owner" | "admin" | "member";
+  canManage: boolean;
+  canLeave: boolean;
+  invitations: string[];
+  offer: { id: string; fromAccountId: string; toAccountId: string } | null;
+  revision: number;
+}
+
+export function getGroupManagement(token: string, groupId: string, signal: AbortSignal) {
+  return groupRequest<{ group: GroupManagement }>(`/api/groups/${groupId}/management`, token, "GET", undefined, signal);
+}
+
+export function manageGroup(token: string, groupId: string, action: string, data = {}, signal?: AbortSignal) {
+  return groupRequest<{ group: GroupManagement | null }>(`/api/groups/${groupId}/management`, token, "POST", { ...data, action }, signal);
+}
+
+export function getGroupInvitations(token: string, signal: AbortSignal) {
+  return groupRequest<{ invitations: { id: string; name: string; owner: string }[] }>(
+    "/api/group-management/invitations", token, "GET", undefined, signal);
 }
 
 export type GroupMediaKind = "image" | "file" | "video" | "voice";
@@ -1557,6 +1585,8 @@ export function markGroupMessagesRead(
 
 export interface GroupEventMap {
   "group:updated": GroupRecord;
+  "group:access-revoked": { groupId: string };
+  "group:invited": undefined;
   "group:message": { message: GroupMessageRecord };
   "group:read": GroupReadReceipt;
   connect: undefined;

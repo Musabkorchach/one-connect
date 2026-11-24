@@ -6,6 +6,7 @@ import { useGroups } from "@/contexts/group-context";
 import { Avatar } from "./ui";
 import { CreateGroupSheet } from "./create-group-sheet";
 import { GroupConversationView } from "./group-conversation-view";
+import { GroupInvitations } from "./group-management";
 import { hueFromString } from "@/lib/connect/data";
 
 export function GroupsPanel({ query = "" }: { query?: string }) {
@@ -53,6 +54,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
         </p>
       )}
 
+      <GroupInvitations />
       <ul>
         {filtered.map((group) => (
           <li key={group.id}>
