@@ -10,7 +10,7 @@ import { Button } from "./ui";
 const endpoint = API_URL + "/api/pi-testnet/subscription";
 type Proof = { id: string; hash: string };
 type Status = {
-  plan: { active: boolean };
+  plan: { active: boolean; network: string; serviceId: string };
   wallet: string | null;
   pending: Proof | null;
   reserved: boolean;
@@ -70,11 +70,14 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
       const status = await request<Status>(token, "", undefined, signal);
-      if (current() && !signal?.aborted) setResult(status);
+      if (current() && !signal?.aborted) {
+        setResult(status?.plan?.network === "Pi Testnet" && status.plan.serviceId === serviceId &&
+          typeof status.plan.active === "boolean" ? status : null);
+      }
     } catch {
       if (current() && !signal?.aborted) setResult(null);
     }
-  }, [current, token]);
+  }, [current, serviceId, token]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -91,7 +94,7 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   }
 
   async function run(action: () => Promise<void>) {
-    if (!current() || inFlight.current) return;
+    if (!current() || !result || inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setMessage(null);
@@ -159,7 +162,9 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
     });
   }
 
-  const subscription = result?.subscription;
+  if (!result) return null;
+
+  const subscription = result.subscription;
   const pending = proof ?? result?.pending;
   const statusText = subscription?.status === "active" ? (arabic ? "نشط" : "Active")
     : subscription?.status === "expired" ? (arabic ? "منتهٍ" : "Expired")

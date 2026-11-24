@@ -1,9 +1,14 @@
 export const monthlyTestnetPrice = "0.1";
 const testnetServiceId = "460";
-const testnetAppOrigin = "https://oneconnect1066.pinet.com";
+// Frontend origins from the two One Connect Testnet registrations. PiNet embeds
+// these frontends, so its outer URLs are not the origins of the app documents.
+const testnetAppOrigins = new Set([
+  "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
+  "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
+]);
 
 export function resolveTestnetSubscriptionServiceId(origin: string, configuredServiceId: string | undefined) {
-  if (origin !== testnetAppOrigin) return null;
+  if (!testnetAppOrigins.has(origin)) return null;
   const serviceId = configuredServiceId ?? testnetServiceId;
   return serviceId === testnetServiceId ? serviceId : null;
 }
