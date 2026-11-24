@@ -26,12 +26,13 @@ function nodes(element) {
 }
 
 function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", serviceId,
-  response = [200, plan], piSdkReady = true } = {}) {
+  response = [200, plan], piSdkReady = true,
+  prepareResponse = [403, "WALLET_ADDRESS_MISMATCH"], authorize = async () => ({ accessToken: "pi-token" }) } = {}) {
   const auth = { sessionToken: "production-session", isCurrentSession: token => token === "production-session",
     subscriptionStatusSupported: false, privateDataOwner: null, sdk: null, piSdkReady };
   const calls = { scopes: [], prepares: [], subscriptions: 0 };
   const browse = { location: { origin }, Pi: {
-    async authenticate(scopes) { calls.scopes.push(scopes); return { accessToken: "pi-token" }; },
+    async authenticate(scopes) { calls.scopes.push(scopes); return authorize(); },
     SmartContract: { Subscription: { subscribe() { calls.subscriptions++; } } },
   } };
   const jsx = (type, props) => ({ type, props });
@@ -62,7 +63,7 @@ function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", 
     if (url.endsWith("/prepare")) {
       assert.equal(method, "POST");
       calls.prepares.push(JSON.parse(body));
-      return { ok: false, status: 403, json: async () => ({ code: "WALLET_UNVERIFIED" }) };
+      return { ok: false, status: prepareResponse[0], json: async () => ({ code: prepareResponse[1] }) };
     }
     assert.equal(method, "GET");
     return { ok: response[0] === 200, status: response[0], json: async () => response[1] };
@@ -108,17 +109,49 @@ test("an inactive verified plan explains why new subscriptions are closed", asyn
   app.cleanup();
 });
 
-test("an unverified wallet cannot reach simulation or submission", async () => {
-  const app = mount();
-  await settle();
+function enroll(app) {
   const wallet = "G" + "A".repeat(55);
   app.render().find(node => node.type === "input").props.onChange({ target: { value: wallet } });
   app.render().find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
+  return wallet;
+}
+
+test("wallet errors are displayed separately without reaching simulation or clearing the plan", async () => {
+  const cases = [
+    [403, "WALLET_ADDRESS_MISSING", "Pi n’a renvoyé aucune adresse"],
+    [403, "WALLET_ADDRESS_MISMATCH", "L’adresse renvoyée par Pi diffère"],
+    [403, "WALLET_PI_AUTH_REJECTED", "Pi a refusé le jeton"],
+    [503, "WALLET_PI_UNAVAILABLE", "Impossible de joindre Pi"],
+    [403, "WALLET_PI_IDENTITY_MISMATCH", "Le compte Pi qui a autorisé l’accès diffère"],
+  ];
+  for (const [status, code, message] of cases) {
+    const app = mount({ prepareResponse: [status, code] });
+    await settle();
+    const wallet = enroll(app);
+    await settle();
+    assert.deepEqual(app.calls.scopes, [["username", "payments", "wallet_address"]]);
+    assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token" }]);
+    assert.equal(app.calls.subscriptions, 0);
+    assert.equal(app.requests, 2, "verification failure preserves the last confirmed subscription status");
+    const view = app.render();
+    assert.ok(view.some(node => typeof node === "string" && node.startsWith(message)));
+    assert.ok(view.some(node => node.type === "form"));
+    app.cleanup();
+  }
+});
+
+test("the app waits for wallet consent and a declined authorization never starts preparation", async () => {
+  let deny;
+  const app = mount({ authorize: () => new Promise((_resolve, reject) => { deny = reject; }) });
   await settle();
-  assert.deepEqual(app.calls.scopes, [["username", "payments", "wallet_address"]]);
-  assert.deepEqual(app.calls.prepares, [{ wallet, accessToken: "pi-token" }]);
+  enroll(app);
+  await settle();
+  assert.equal(app.calls.prepares.length, 0);
+  deny(new Error("fixture declined"));
+  await settle();
+  assert.equal(app.calls.prepares.length, 0);
   assert.equal(app.calls.subscriptions, 0);
-  assert.ok(app.render().includes("Pi n’a pas confirmé que ce portefeuille appartient à votre compte."));
+  assert.ok(app.render().some(node => typeof node === "string" && node.startsWith("L’autorisation du portefeuille n’a pas abouti")));
   app.cleanup();
 });
 

@@ -2,13 +2,23 @@ import { randomUUID } from "node:crypto";
 import { piTestnet, verifySubscribeTransaction } from "./pi-testnet-subscription.js";
 
 async function verifyWalletToken(accessToken, uid, wallet) {
-  if (typeof accessToken !== "string" || !accessToken || accessToken.length > 4096) return false;
-  const response = await fetch("https://api.minepi.com/v2/me", {
-    headers: { Authorization: "Bearer " + accessToken }, signal: AbortSignal.timeout(8000), redirect: "error",
-  });
-  if (!response.ok) return false;
-  const identity = await response.json();
-  return identity.uid === uid && identity.wallet_address === wallet;
+  if (typeof accessToken !== "string" || !accessToken || accessToken.length > 4096) return "WALLET_PI_AUTH_REJECTED";
+  try {
+    const response = await fetch("https://api.minepi.com/v2/me", {
+      headers: { Authorization: "Bearer " + accessToken }, signal: AbortSignal.timeout(8000), redirect: "error",
+    });
+    if (response.status === 401 || response.status === 403) return "WALLET_PI_AUTH_REJECTED";
+    if (!response.ok) return "WALLET_PI_UNAVAILABLE";
+    const identity = await response.json();
+    if (typeof identity?.uid !== "string" || !identity.uid) return "WALLET_PI_UNAVAILABLE";
+    if (identity.uid !== uid) return "WALLET_PI_IDENTITY_MISMATCH";
+    const address = identity.wallet_address;
+    if (address == null || address === "") return "WALLET_ADDRESS_MISSING";
+    if (typeof address !== "string") return "WALLET_PI_UNAVAILABLE";
+    return address === wallet ? null : "WALLET_ADDRESS_MISMATCH";
+  } catch {
+    return "WALLET_PI_UNAVAILABLE";
+  }
 }
 
 export function registerPiTestnetSubscriptions({ app, db, authenticateSession, sessionIsCurrent, provider = piTestnet, verifyWallet = verifyWalletToken }) {
@@ -47,7 +57,10 @@ export function registerPiTestnetSubscriptions({ app, db, authenticateSession, s
     const wallet = req.body?.wallet;
     if (!provider.isWallet(wallet)) return res.sendStatus(400);
     if (!(await provider.service()).active) return res.sendStatus(409);
-    if (!await verifyWallet(req.body.accessToken, uid, wallet)) return res.status(403).json({ code: "WALLET_UNVERIFIED" });
+    const walletError = await verifyWallet(req.body.accessToken, uid, wallet);
+    if (walletError !== null) {
+      return res.status(walletError === "WALLET_PI_UNAVAILABLE" ? 503 : 403).json({ code: walletError });
+    }
     const sequence = await provider.nextSequence(wallet);
     if (!sessionIsCurrent(req)) return res.sendStatus(401);
     const now = Date.now();
