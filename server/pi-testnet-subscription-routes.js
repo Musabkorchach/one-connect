@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { piTestnet, verifySubscribeTransaction } from "./pi-testnet-subscription.js";
 
-async function verifyWalletToken(accessToken, uid, wallet) {
+async function verifyPiIdentity(accessToken, uid) {
   if (typeof accessToken !== "string" || !accessToken || accessToken.length > 4096) return "WALLET_PI_AUTH_REJECTED";
   try {
     const response = await fetch("https://api.minepi.com/v2/me", {
@@ -11,17 +11,13 @@ async function verifyWalletToken(accessToken, uid, wallet) {
     if (!response.ok) return "WALLET_PI_UNAVAILABLE";
     const identity = await response.json();
     if (typeof identity?.uid !== "string" || !identity.uid) return "WALLET_PI_UNAVAILABLE";
-    if (identity.uid !== uid) return "WALLET_PI_IDENTITY_MISMATCH";
-    const address = identity.wallet_address;
-    if (address == null || address === "") return "WALLET_ADDRESS_MISSING";
-    if (typeof address !== "string") return "WALLET_PI_UNAVAILABLE";
-    return address === wallet ? null : "WALLET_ADDRESS_MISMATCH";
+    return identity.uid === uid ? null : "WALLET_PI_IDENTITY_MISMATCH";
   } catch {
     return "WALLET_PI_UNAVAILABLE";
   }
 }
 
-export function registerPiTestnetSubscriptions({ app, db, authenticateSession, sessionIsCurrent, provider = piTestnet, verifyWallet = verifyWalletToken }) {
+export function registerPiTestnetSubscriptions({ app, db, authenticateSession, sessionIsCurrent, provider = piTestnet }) {
   const collection = db.collection("pi_testnet_subscription_wallets_v1");
   let indexes;
   const path = "/api/pi-testnet/subscription";
@@ -57,9 +53,9 @@ export function registerPiTestnetSubscriptions({ app, db, authenticateSession, s
     const wallet = req.body?.wallet;
     if (!provider.isWallet(wallet)) return res.sendStatus(400);
     if (!(await provider.service()).active) return res.sendStatus(409);
-    const walletError = await verifyWallet(req.body.accessToken, uid, wallet);
-    if (walletError !== null) {
-      return res.status(walletError === "WALLET_PI_UNAVAILABLE" ? 503 : 403).json({ code: walletError });
+    const identityError = await verifyPiIdentity(req.body.accessToken, uid);
+    if (identityError !== null) {
+      return res.status(identityError === "WALLET_PI_UNAVAILABLE" ? 503 : 403).json({ code: identityError });
     }
     const sequence = await provider.nextSequence(wallet);
     if (!sessionIsCurrent(req)) return res.sendStatus(401);
@@ -73,6 +69,7 @@ export function registerPiTestnetSubscriptions({ app, db, authenticateSession, s
     if (existing?.verified && (await provider.subscription(wallet)).status !== "expired") return res.sendStatus(409);
     const id = randomUUID();
     const intent = { id, wallet, sequence, startedAt: Math.floor(now / 1000) * 1000, expiresAt: now + 10 * 60_000 };
+    // Reserving a candidate address does not establish ownership.
     await collection.updateOne({ _id: wallet, uid, pending: null,
       $or: [{ intent: { $exists: false } }, { "intent.expiresAt": { $lte: now } }] },
       { $set: { intent }, $setOnInsert: { verified: false } }, { upsert: true });

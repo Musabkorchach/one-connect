@@ -87,10 +87,10 @@ function subscriptionCopy(language: LangId) {
     sdk: "معاملات الاشتراك غير متاحة في جلسة Pi Browser الحالية.",
     walletMissing: "لم يُرجع Pi عنوان محفظة لحسابك. تحقق من ربط المحفظة ومنح صلاحية عنوانها.",
     walletMismatch: "العنوان الذي أعاده Pi يختلف عن عنوان المحفظة الذي أدخلته.",
-    walletAuthRejected: "رفض Pi رمز التحقق أو صلاحية عنوان المحفظة. أعد التفويض وحاول مجددًا.",
+    walletAuthRejected: "رفض Pi رمز التفويض. سجّل الدخول مجددًا وحاول مرة أخرى.",
     walletUnavailable: "تعذّر الاتصال بخدمة Pi أو قراءة ردها للتحقق من المحفظة. حاول مجددًا.",
     walletIdentityMismatch: "حساب Pi الذي وافق على التفويض يختلف عن حساب جلسة One Connect.",
-    walletConsent: "لم يكتمل تفويض عنوان المحفظة في Pi Browser. أعد المحاولة وامنح الصلاحية.",
+    walletConsent: "لم يكتمل تفويض الدفع في Pi Browser. أعد المحاولة وامنح الصلاحية.",
     refresh: "حدّث الحالة",
   };
   if (language === "fr") return {
@@ -103,10 +103,10 @@ function subscriptionCopy(language: LangId) {
     sdk: "Les transactions d’abonnement sont indisponibles dans cette session Pi Browser.",
     walletMissing: "Pi n’a renvoyé aucune adresse de portefeuille pour votre compte. Vérifiez le portefeuille associé et l’autorisation.",
     walletMismatch: "L’adresse renvoyée par Pi diffère de l’adresse de portefeuille saisie.",
-    walletAuthRejected: "Pi a refusé le jeton ou l’autorisation du portefeuille. Autorisez de nouveau l’accès.",
+    walletAuthRejected: "Pi a refusé le jeton d’autorisation. Reconnectez-vous et réessayez.",
     walletUnavailable: "Impossible de joindre Pi ou de lire sa réponse pour vérifier le portefeuille. Réessayez.",
     walletIdentityMismatch: "Le compte Pi qui a autorisé l’accès diffère du compte de la session One Connect.",
-    walletConsent: "L’autorisation du portefeuille n’a pas abouti dans Pi Browser. Réessayez et accordez l’accès.",
+    walletConsent: "L’autorisation de paiement n’a pas abouti dans Pi Browser. Réessayez et accordez l’accès.",
     refresh: "Actualiser l’état",
   };
   return {
@@ -119,10 +119,10 @@ function subscriptionCopy(language: LangId) {
     sdk: "Subscription transactions are unavailable in this Pi Browser session.",
     walletMissing: "Pi returned no wallet address for your account. Check your linked wallet and address permission.",
     walletMismatch: "The wallet address returned by Pi differs from the address you entered.",
-    walletAuthRejected: "Pi rejected the verification token or wallet address permission. Authorize access again.",
+    walletAuthRejected: "Pi rejected the authorization token. Sign in again and retry.",
     walletUnavailable: "Could not reach Pi or read its response to verify the wallet. Try again.",
     walletIdentityMismatch: "The Pi account that authorized access differs from your One Connect session.",
-    walletConsent: "Wallet address authorization did not complete in Pi Browser. Try again and grant access.",
+    walletConsent: "Payment authorization did not complete in Pi Browser. Try again and grant access.",
     refresh: "Refresh status",
   };
 }
@@ -224,7 +224,7 @@ function SubscriptionPanel({ token, language, serviceId, isCurrentSession, piSdk
       const pi = window.Pi;
       const sdk = pi?.SmartContract?.Subscription;
       if (!sdk || !pi.authenticate) throw new Error("unavailable");
-      const authorization = await pi.authenticate(["username", "payments", "wallet_address"], () => {})
+      const authorization = await pi.authenticate(["username", "payments"], () => {})
         .catch(() => { throw new Error("walletConsent"); });
       if (!current()) return;
       if (!authorization?.accessToken) throw new Error("walletConsent");
