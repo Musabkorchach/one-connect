@@ -186,24 +186,15 @@ const allowedOrigins = [
   "https://one-connect-lake.vercel.app",
   "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
   "https://demo-kzmkra2mcgav4p1ncaco.vusercontent.net",
+  "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
   "http://localhost:3000",
 ].filter(Boolean);
 const testnetSubscriptionsEnabled = process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
-const isOneConnectTestnetOrigin = createTestnetOriginCheck();
-function allowBrowserOrigin(origin, callback) {
-  if (allowedOrigins.includes(origin)) return callback(null, true);
-  if (!origin) return callback(null, false);
-  isOneConnectTestnetOrigin(origin).then(
-    (allowed) => callback(null, allowed),
-    (error) => callback(error),
-  );
-}
-
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: allowBrowserOrigin,
+    origin: allowedOrigins,
     credentials: true,
   },
 });
@@ -213,7 +204,7 @@ const __dirname = dirname(__filename);
 
 // Middleware
 app.use(cors({
-  origin: allowBrowserOrigin,
+  origin: allowedOrigins,
   credentials: true,
 }));
 app.use(express.json({ limit: "50mb" }));
@@ -371,6 +362,7 @@ function normalizeMessagingUsername(value) {
 }
 
 if (testnetSubscriptionsEnabled) {
+  const isOneConnectTestnetOrigin = createTestnetOriginCheck();
   app.use("/api/pi-testnet/subscription", async (req, res, next) => {
     if (!await isOneConnectTestnetOrigin(req.get("Origin"))) return res.sendStatus(403);
     next();
