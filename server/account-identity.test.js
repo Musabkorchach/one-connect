@@ -19,6 +19,7 @@ import {
   identityBindingsCollection,
   resolveVerifiedPiAccount,
 } from "./account-identity.js";
+import { cleanDeletionPhase } from "./account-deletion-cleanup.js";
 import { archiveOwnedGroupsForDeletion } from "./group-ownership.js";
 import { pstnAbuseKey, terminateAccountPstn } from "./pstn-account.js";
 import { createAccountDeletion, deletionCollection } from "./account-deletion.js";
@@ -1489,15 +1490,17 @@ test("group send, read receipt and media upload cannot commit after removal or a
   assert.ok(!pending.memberAccountIds.includes(memberId));
 });
 
-test("flag-disabled groups keep their legacy HTTP and Socket.IO contracts", { timeout: 25000 }, async (t) => {
-  const { request, login, origin } = await startEmailTestServer(t, false);
-  const [owner, reader, third] = await Promise.all(["group-owner", "group-reader", "group-outsider"].map(async (name) => {
+test("production group management retains legacy history, roles, and live access", { timeout: 60000 }, async (t) => {
+  const { request, login, origin } = await startEmailTestServer(t, false, { NODE_ENV: "production" });
+  const [owner, reader, third, invitee] = await Promise.all(["group-owner", "group-reader", "group-outsider", "group-audit-owner"].map(async (name) => {
     const result = await login(name);
     assert.equal(result.status, 200);
     assert.equal(result.body.groupSocketMode, undefined);
     return result.body.sessionToken;
   }));
   const { socket } = await openMailSocket(t, origin, reader, "/");
+  const { socket: secondDevice } = await openMailSocket(t, origin, reader, "/");
+  const { socket: inviteSocket } = await openMailSocket(t, origin, invitee, "/");
   assert.equal((await rejectMailSocket(t, origin, reader, "/groups")).message, "Invalid namespace");
   const event = expectSocketEvent(socket, "group:updated");
   const created = await request("/api/groups", { token: owner, method: "POST", body: {
@@ -1507,6 +1510,12 @@ test("flag-disabled groups keep their legacy HTTP and Socket.IO contracts", { ti
   const groupId = created.body.group.id;
   assert.equal((await event).id, groupId);
   assert.deepEqual(created.body.group.members, ["group-owner", "group-reader", "group-outsider"]);
+  const callId = "legacy-group-call-test";
+  const startedCall = expectSocketEvent(socket, "group-call:started");
+  socket.emit("group-call:start", { groupId, callId, kind: "voice" });
+  assert.equal((await startedCall).groupId, groupId);
+  socket.emit("group-call:leave", { callId });
+
   const messageEvent = expectSocketEvent(socket, "group:message");
   const sent = await request(`/api/groups/${groupId}/messages`, {
     token: third, method: "POST", body: { id: "legacy-group-msg", kind: "text", text: "legacy group" },
@@ -1516,6 +1525,117 @@ test("flag-disabled groups keep their legacy HTTP and Socket.IO contracts", { ti
   const listing = await request("/api/groups", { token: reader });
   assert.equal(listing.body.legacyHistory, undefined);
   assert.ok(listing.body.groups.every((group) => group.name !== "Scoped group"));
+
+  const root = `/api/groups/${groupId}`;
+  const voice = new FormData();
+  voice.set("kind", "voice");
+  voice.set("file", new Blob([Buffer.from("RIFF0000WAVE")], { type: "audio/wav" }), "legacy.wav");
+  const uploaded = await request(root + "/media", { token: third, method: "POST", body: voice });
+  assert.equal(uploaded.status, 201);
+  assert.equal((await request(root + "/messages", { token: third, method: "POST",
+    body: { id: "legacy-group-voice", kind: "voice", text: "", mediaId: uploaded.body.mediaId } })).status, 201);
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${owner}` },
+  })).status, 200);
+  const action = (token, action, body = {}) => request(root + "/management", {
+    token, method: "POST", body: { ...body, action },
+  });
+  const details = token => request(root + "/management", { token });
+  assert.equal((await details(invitee)).status, 404);
+  assert.deepEqual((await details(reader)).body.group.members.map(member => member.role), ["owner", "member", "member"]);
+  assert.equal((await action(reader, "details", { name: "Denied", description: "", revision: 0 })).status, 403);
+
+  const updateA = expectSocketEvent(socket, "group:updated");
+  const updateB = expectSocketEvent(secondDevice, "group:updated");
+  assert.equal((await action(owner, "promote", { username: "group-reader" })).status, 200);
+  assert.equal((await updateA).id, groupId);
+  assert.equal((await updateB).id, groupId);
+  assert.equal((await details(reader)).body.group.ownRole, "admin");
+  assert.equal((await action(reader, "promote", { username: "group-outsider" })).status, 403);
+  assert.equal((await action(reader, "remove", { username: "group-owner" })).status, 403);
+
+  const revision = (await details(reader)).body.group.revision;
+  const edits = await Promise.all(["Updated one", "Updated two"].map(name =>
+    action(reader, "details", { name, description: "Group description", revision })));
+  assert.deepEqual(edits.map(result => result.status).sort(), [200, 409]);
+  assert.equal((await details(owner)).body.group.description, "Group description");
+
+  const inviteAdded = expectSocketEvent(inviteSocket, "group:invited");
+  assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
+  await inviteAdded;
+  assert.equal((await request("/api/group-management/invitations", { token: invitee })).body.invitations[0].id, groupId);
+  const inviteRemoved = expectSocketEvent(inviteSocket, "group:invited");
+  assert.equal((await action(owner, "revoke-invite", { username: "group-audit-owner" })).status, 200);
+  await inviteRemoved;
+  assert.deepEqual((await request("/api/group-management/invitations", { token: invitee })).body.invitations, []);
+  assert.equal((await action(invitee, "accept-invite")).status, 404);
+  assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await action(invitee, "accept-invite")).status, 200);
+  assert.equal((await action(owner, "demote", { username: "group-reader" })).status, 200);
+  assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 403);
+  assert.equal((await action(owner, "promote", { username: "group-reader" })).status, 200);
+  assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 200);
+
+  assert.equal((await action(owner, "leave")).status, 409);
+  const offer = await action(owner, "offer", { username: "group-reader" });
+  assert.equal(offer.status, 200);
+  assert.equal((await action(third, "accept-ownership", { offerId: offer.body.group.offer.id })).status, 409);
+  assert.equal((await action(reader, "accept-ownership", { offerId: offer.body.group.offer.id })).status, 200);
+  assert.equal((await action(owner, "leave")).status, 200);
+  assert.equal((await request(root + "/messages", { token: owner })).status, 404);
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${owner}` },
+  })).status, 404);
+  const history = await request(root + "/messages", { token: reader });
+  assert.equal(history.body.group.id, groupId);
+  assert.equal(history.body.messages[0].id, "legacy-group-msg");
+  assert.equal(history.body.messages[1].mediaId, uploaded.body.mediaId);
+  assert.equal((await request(root + "/messages", { token: invitee, method: "POST",
+    body: { id: "rejected", kind: "text", text: "rejected" } })).status, 404);
+});
+
+test("legacy group deletion uses verified identity and resumes without losing history", async () => {
+  const db = client.db("legacy_group_deletion");
+  const owned = new ObjectId();
+  const joined = new ObjectId();
+  const invited = new ObjectId();
+  const messageId = new ObjectId();
+  const mediaId = new ObjectId();
+  await db.collection(identityBindingsCollection).insertMany([
+    { _id: "verified-uid", accountId: "matching-account", username: "leaving", state: "deleting" },
+    { _id: "different-uid", accountId: "different-account", username: "leaving", state: "deleting" },
+  ]);
+  await db.collection("email_users").insertOne({ _id: "leaving", groupPiUid: "verified-uid" });
+  await db.collection("chat_groups").insertMany([
+    { _id: owned, ownerUsername: "leaving", members: ["leaving", "remaining"], invitations: ["pending"] },
+    { _id: joined, ownerUsername: "remaining", members: ["leaving", "remaining"], admins: ["leaving"],
+      ownershipOffer: { fromAccountId: "remaining", toAccountId: "leaving" } },
+    { _id: invited, ownerUsername: "remaining", members: ["remaining"], invitations: ["leaving"] },
+  ]);
+  await db.collection("group_messages").insertOne({ _id: messageId, groupId: owned.toHexString(), mediaId: mediaId.toHexString() });
+  await db.collection("group_media.files").insertOne({ _id: mediaId, metadata: { groupId: owned.toHexString() } });
+  const cleanup = (accountId, phase = "remove-group-access") =>
+    client.withSession(session => session.withTransaction(() => cleanDeletionPhase(db, accountId, phase, session)));
+
+  assert.deepEqual(await cleanup("different-account"), []);
+  assert.equal((await db.collection("chat_groups").findOne({ _id: owned })).state, undefined);
+  await assert.rejects(cleanup("matching-account", "verify-data-cleanup"), /Legacy group access/);
+  const notices = await cleanup("matching-account");
+  assert.equal(notices.length, 3);
+  assert.deepEqual(notices.find(notice => notice.id.equals(owned)).invitees, ["pending"]);
+  assert.deepEqual(await cleanup("matching-account"), []);
+  await cleanup("matching-account", "verify-data-cleanup");
+  const archived = await db.collection("chat_groups").findOne({ _id: owned });
+  assert.equal(archived.state, "archived");
+  assert.deepEqual(archived.members, ["remaining"]);
+  assert.deepEqual(archived.invitations, []);
+  const member = await db.collection("chat_groups").findOne({ _id: joined });
+  assert.deepEqual(member.members, ["remaining"]);
+  assert.deepEqual(member.admins, []);
+  assert.equal(member.ownershipOffer, undefined);
+  assert.deepEqual((await db.collection("chat_groups").findOne({ _id: invited })).invitations, []);
+  assert.equal((await db.collection("group_messages").findOne({ _id: messageId })).mediaId, mediaId.toHexString());
+  assert.equal((await db.collection("group_media.files").findOne({ _id: mediaId })).metadata.groupId, owned.toHexString());
 });
 
 test("ownership offers transfer atomically and deletion cleanup preserves group history", { timeout: 60000 }, async (t) => {

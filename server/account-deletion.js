@@ -9,7 +9,7 @@ export const deletionCollection = "account_deletion_jobs";
 
 const phases = ["revoke-access", "stop-calls", ...cleanupPhases, awaitingFileCleanup, awaitingFinalReview];
 
-export function createAccountDeletion({ db, client, revokeAccess, stopCalls, now = Date.now, leaseMs = 30000 }) {
+export function createAccountDeletion({ db, client, revokeAccess, stopCalls, publishGroupCleanup, now = Date.now, leaseMs = 30000 }) {
   const jobs = db.collection(deletionCollection);
   const bindings = db.collection(identityBindingsCollection);
   const transactionOptions = { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } };
@@ -66,13 +66,19 @@ export function createAccountDeletion({ db, client, revokeAccess, stopCalls, now
         return Boolean(saved.matchedCount);
       }
       if (databasePhase) {
-        return await client.withSession((session) => session.withTransaction(async () => {
+        let groupNotices;
+        const advanced = await client.withSession((session) => session.withTransaction(async () => {
           if (!await ownsLease()) return false;
           if (job.phase === awaitingFinalReview) return finalize(job, fence, session);
-          await cleanDeletionPhase(db, accountId, job.phase, session);
+          const result = await cleanDeletionPhase(db, accountId, job.phase, session);
+          if (job.phase === "remove-group-access") groupNotices = result;
           if (!await advance(session)) throw new Error("Deletion lease expired");
           return true;
         }, transactionOptions));
+        if (advanced && groupNotices && publishGroupCleanup) {
+          await publishGroupCleanup(groupNotices).catch(() => {});
+        }
+        return advanced;
       }
       if (job.phase === awaitingFileCleanup) {
         const binding = await bindings.findOne({ accountId, state: "deleting", privateDataErased: true });
@@ -159,10 +165,10 @@ export function createAccountDeletion({ db, client, revokeAccess, stopCalls, now
   return { enqueue, start, run, resumePending };
 }
 
-export function revokeAccountConnections(io, sessions, accountId) {
+export function revokeAccountConnections(io, sessions, accountId, verifiedPiUid) {
   const revoked = new Set();
   for (const [token, session] of sessions) {
-    if (session.accountId !== accountId) continue;
+    if (session.accountId !== accountId && (!verifiedPiUid || session.verifiedPiUid !== verifiedPiUid)) continue;
     revoked.add(token);
     sessions.delete(token);
   }

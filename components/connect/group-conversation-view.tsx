@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { GroupManagementSheet } from "./group-management";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useConnect } from "@/contexts/connect-context";
 import {
@@ -94,6 +95,7 @@ function GroupConversation({
   const [sending, setSending] = useState(false);
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showManagement, setShowManagement] = useState(false);
 
   const aliveRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -446,15 +448,16 @@ function GroupConversation({
         >
           <IconBack className="h-6 w-6" />
         </button>
-          <div className="min-w-0 flex-1">
+        <button type="button" onClick={() => setShowManagement(true)} className="min-w-0 flex-1 text-start">
           <h2 className="truncate font-bold">{group.name}</h2>
           <p className="text-xs text-muted-foreground">
             {group.members.length} {arabic ? "أعضاء" : "members"}
           </p>
-        </div>
+        </button>
         <button
           type="button"
           onClick={() => startGroupCall(group, "voice")}
+          disabled={group.state === "archived"}
           aria-label={arabic ? "مكالمة صوتية جماعية" : "Group voice call"}
           className="pc-press shrink-0 rounded-full p-2 text-turquoise"
         >
@@ -464,6 +467,7 @@ function GroupConversation({
         <button
           type="button"
           onClick={() => startGroupCall(group, "video")}
+          disabled={group.state === "archived"}
           aria-label={arabic ? "مكالمة فيديو جماعية" : "Group video call"}
           className="pc-press shrink-0 rounded-full p-2 text-turquoise"
         >
@@ -545,7 +549,8 @@ function GroupConversation({
         </p>
       )}
 
-            <div className="flex items-end gap-2 border-t border-border p-3 pc-safe-bottom">
+      {group.state === "archived" ? <p role="status" className="p-3">Archived group · Read only</p> : (
+      <div className="flex items-end gap-2 border-t border-border p-3 pc-safe-bottom">
         <GroupAttachments
           disabled={sending}
           onSend={sendMedia}
@@ -579,6 +584,9 @@ function GroupConversation({
           </button>
         </form>
       </div>
+      )}
+      {showManagement && <GroupManagementSheet groupId={group.id} token={token} username={me}
+        onClose={() => setShowManagement(false)} onLeave={onBack} />}
     </div>
   );
 }
