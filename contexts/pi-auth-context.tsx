@@ -189,6 +189,7 @@ interface PiAuthContextType {
   userId: string | null;
   sessionToken: string | null;
   sdk: SDKLiteInstance | null;
+  piSdkReady: boolean;
   reinitialize: () => Promise<void>;
 }
 
@@ -265,6 +266,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sdk, setSdk] = useState<SDKLiteInstance | null>(null);
+  const [piSdkReady, setPiSdkReady] = useState(false);
   const [signedOutLanguage, setSignedOutLanguage] = useState<LangId | null>(null);
   const [signedOutNotice, setSignedOutNotice] = useState<SignedOutNotice | null>(null);
   const [accountDeletionSupported, setAccountDeletionSupported] = useState(false);
@@ -295,6 +297,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     setUserId(null);
     setPiUsername("");
     setSdk(null);
+    setPiSdkReady(false);
     setHasError(false);
     setSignedOutLanguage(language);
     setSignedOutNotice(notice);
@@ -321,6 +324,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     authAttempt.current = attempt;
     const { signal } = attempt;
     setHasError(false);
+    setPiSdkReady(false);
     try {
       // Probe for parent credentials (App Studio iframe environment).
       // When running inside App Studio's restore-preview iframe, SDKLite.login()
@@ -372,6 +376,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
             sandbox: PI_NETWORK_CONFIG.SANDBOX,
           });
           if (signal.aborted) return;
+          setPiSdkReady(true);
 
           await loadSDKLite();
           if (signal.aborted) return;
@@ -397,6 +402,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       });
       if (signal.aborted) return;
       setAuthMessage("Loading SDKLite...");
+      setPiSdkReady(true);
       await loadSDKLite();
       if (signal.aborted) return;
 
@@ -512,6 +518,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
     userId,
     sessionToken,
     sdk,
+    piSdkReady,
     reinitialize: () => initialize(true, signedOutLanguage ?? undefined),
   };
 
