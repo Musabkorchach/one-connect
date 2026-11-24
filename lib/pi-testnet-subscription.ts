@@ -1,4 +1,12 @@
 export const monthlyTestnetPrice = "0.1";
+const testnetServiceId = "460";
+const testnetAppOrigin = "https://oneconnect1066.pinet.com";
+
+export function resolveTestnetSubscriptionServiceId(origin: string, configuredServiceId: string | undefined) {
+  if (origin !== testnetAppOrigin) return null;
+  const serviceId = configuredServiceId ?? testnetServiceId;
+  return serviceId === testnetServiceId ? serviceId : null;
+}
 
 const serviceIdPattern = /^(0|[1-9][0-9]{0,19})$/;
 export const testnetWalletPattern = /^G[A-Z2-7]{55}$/;
@@ -18,7 +26,7 @@ export async function submitTestnetSubscription(
   id: string,
   isCurrent: () => boolean,
 ): Promise<string> {
-  if (!testnetWalletPattern.test(wallet) || !serviceIdPattern.test(id) || (action === "subscribe" && id !== "460")) {
+  if (!testnetWalletPattern.test(wallet) || !serviceIdPattern.test(id) || (action === "subscribe" && id !== testnetServiceId)) {
     throw new Error("Invalid Testnet subscription");
   }
   const invoke = (mode: ExecutionMode["mode"]) => {
