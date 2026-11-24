@@ -22,6 +22,7 @@ import { registerExternalEmailRoutes } from "./external-email-routes.js";
 import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
+import { createTestnetOriginCheck } from "./pi-testnet-preview-origin.js";
 
 import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindingEnabled, migrationRequired } from "./pi-login.js";
 import {
@@ -185,8 +186,10 @@ const allowedOrigins = [
   "https://one-connect-lake.vercel.app",
   "https://one-connect-git-develop-musabkorchachs-projects.vercel.app",
   "https://demo-kzmkra2mcgav4p1ncaco.vusercontent.net",
+  "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
   "http://localhost:3000",
 ].filter(Boolean);
+const testnetSubscriptionsEnabled = process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -358,7 +361,12 @@ function normalizeMessagingUsername(value) {
     : "";
 }
 
-if (process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460") {
+if (testnetSubscriptionsEnabled) {
+  const isOneConnectTestnetOrigin = createTestnetOriginCheck();
+  app.use("/api/pi-testnet/subscription", async (req, res, next) => {
+    if (!await isOneConnectTestnetOrigin(req.get("Origin"))) return res.sendStatus(403);
+    next();
+  });
   const { registerPiTestnetSubscriptions } = await import("./pi-testnet-subscription-routes.js");
   registerPiTestnetSubscriptions({
     app, db, authenticateSession,

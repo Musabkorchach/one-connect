@@ -3,15 +3,14 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { API_URL } from "@/lib/api-client";
-import { monthlyTestnetPrice, submitTestnetSubscription, testnetWalletPattern } from "@/lib/pi-testnet-subscription";
+import { monthlyTestnetPrice, resolveTestnetSubscriptionServiceId, submitTestnetSubscription, testnetWalletPattern } from "@/lib/pi-testnet-subscription";
 import type { LangId } from "@/lib/connect/data";
 import { Button } from "./ui";
 
-const serviceId = process.env.NEXT_PUBLIC_PI_TESTNET_SUBSCRIPTION_SERVICE_ID;
 const endpoint = API_URL + "/api/pi-testnet/subscription";
 type Proof = { id: string; hash: string };
 type Status = {
-  plan: { active: boolean };
+  plan: { active: boolean; network: string; serviceId: string };
   wallet: string | null;
   pending: Proof | null;
   reserved: boolean;
@@ -43,13 +42,19 @@ async function request<T>(token: string, path = "", body?: object, signal?: Abor
 
 export function AccountSubscriptionStatus({ sessionToken, language }: { sessionToken: string; language: LangId }) {
   const { isCurrentSession } = usePiAuth();
-  if (!isCurrentSession(sessionToken)) return null;
-  return <SubscriptionPanel key={sessionToken} token={sessionToken} language={language} isCurrentSession={isCurrentSession} />;
+  if (typeof window === "undefined" || !isCurrentSession(sessionToken)) return null;
+  const serviceId = resolveTestnetSubscriptionServiceId(
+    window.location.origin,
+    process.env.NEXT_PUBLIC_PI_TESTNET_SUBSCRIPTION_SERVICE_ID,
+  );
+  if (!serviceId) return null;
+  return <SubscriptionPanel key={sessionToken} token={sessionToken} language={language} serviceId={serviceId} isCurrentSession={isCurrentSession} />;
 }
 
-function SubscriptionPanel({ token, language, isCurrentSession }: {
+function SubscriptionPanel({ token, language, serviceId, isCurrentSession }: {
   token: string;
   language: LangId;
+  serviceId: NonNullable<ReturnType<typeof resolveTestnetSubscriptionServiceId>>;
   isCurrentSession: (token: string) => boolean;
 }) {
   const [wallet, setWallet] = useState("");
@@ -62,17 +67,23 @@ function SubscriptionPanel({ token, language, isCurrentSession }: {
   const arabic = language === "ar";
   const current = useCallback(() => isCurrentSession(token), [isCurrentSession, token]);
 
+  const readStatus = useCallback(async (signal?: AbortSignal) => {
+    const status = await request<Status>(token, "", undefined, signal);
+    if (status?.plan?.network !== "Pi Testnet" || status.plan.serviceId !== serviceId ||
+        typeof status.plan.active !== "boolean") throw new Error("unavailable");
+    return status;
+  }, [serviceId, token]);
+
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      const status = await request<Status>(token, "", undefined, signal);
+      const status = await readStatus(signal);
       if (current() && !signal?.aborted) setResult(status);
     } catch {
       if (current() && !signal?.aborted) setResult(null);
     }
-  }, [current, token]);
+  }, [current, readStatus]);
 
   useEffect(() => {
-    if (serviceId !== "460") return;
     const abort = new AbortController();
     void refresh(abort.signal);
     return () => abort.abort();
@@ -87,7 +98,7 @@ function SubscriptionPanel({ token, language, isCurrentSession }: {
   }
 
   async function run(action: () => Promise<void>) {
-    if (!current() || inFlight.current || serviceId !== "460") return;
+    if (!current() || !result || inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setMessage(null);
@@ -118,7 +129,7 @@ function SubscriptionPanel({ token, language, isCurrentSession }: {
       if (!current()) return;
       const { id } = await request<{ id: string }>(token, "/prepare", { wallet: address, accessToken });
       if (!current()) return;
-      const hash = await submitTestnetSubscription(sdk, "subscribe", address, serviceId!, current);
+      const hash = await submitTestnetSubscription(sdk, "subscribe", address, serviceId, current);
       if (!current()) return;
       const value = { id, hash };
       setProof(value);
@@ -145,17 +156,23 @@ function SubscriptionPanel({ token, language, isCurrentSession }: {
   function manage(action: "cancel" | "renew") {
     void run(async () => {
       const sdk = window.Pi?.SmartContract?.Subscription;
-      const sub = result?.subscription;
-      if (!sdk || !result?.wallet || !sub || !("subscriptionId" in sub) ||
-          (action === "renew" && sub.status !== "active") || managementHash) throw new Error("unavailable");
-      const hash = await submitTestnetSubscription(sdk, action, result.wallet, sub.subscriptionId, current);
+      if (!sdk || managementHash) throw new Error("unavailable");
+      const { wallet: verifiedWallet, subscription: sub } = await readStatus();
+      if (!current()) return;
+      if (!verifiedWallet || !sub || !("subscriptionId" in sub) ||
+          (action === "cancel" ? !sub.autoRenew : sub.status !== "active" || sub.autoRenew)) {
+        throw new Error("unavailable");
+      }
+      const hash = await submitTestnetSubscription(sdk, action, verifiedWallet, sub.subscriptionId, current);
       if (!current()) return;
       setManagementHash(hash);
       await checkManagement(hash);
     });
   }
 
-  const subscription = result?.subscription;
+  if (!result) return null;
+
+  const subscription = result.subscription;
   const pending = proof ?? result?.pending;
   const statusText = subscription?.status === "active" ? (arabic ? "نشط" : "Active")
     : subscription?.status === "expired" ? (arabic ? "منتهٍ" : "Expired")
@@ -208,12 +225,10 @@ function SubscriptionPanel({ token, language, isCurrentSession }: {
           </Button>
         </div>
       )}
-      {serviceId === "460" && (
-        <Button className="w-full" type="button" variant="outline" disabled={busy}
-          onClick={() => void run(() => pending ? confirm(pending) : managementHash ? checkManagement(managementHash) : refresh())}>
-          {arabic ? "حدّث الحالة" : "Refresh status"}
-        </Button>
-      )}
+      <Button className="w-full" type="button" variant="outline" disabled={busy}
+        onClick={() => void run(() => pending ? confirm(pending) : managementHash ? checkManagement(managementHash) : refresh())}>
+        {arabic ? "حدّث الحالة" : "Refresh status"}
+      </Button>
       {message && <p role="status" className="text-sm text-muted-foreground">{messages[message]}</p>}
     </section>
   );

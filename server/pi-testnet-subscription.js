@@ -55,7 +55,7 @@ export const piTestnet = {
   async service() {
     const plan = await ledgerValue("Service", serviceKey);
     if (!matchesService(plan)) throw new Error("Unexpected One Connect Testnet service");
-    return { active: plan.is_active === true };
+    return { active: plan.is_active === true, network, serviceId };
   },
   isWallet: (value) => typeof value === "string" && StrKey.isValidEd25519PublicKey(value),
   async nextSequence(wallet) {

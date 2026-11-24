@@ -1,4 +1,15 @@
 export const monthlyTestnetPrice = "0.1";
+const testnetServiceId = "460";
+const registeredTestnetOrigin = "https://one-connect-git-develop-musabkorchachs-projects.vercel.app";
+const previewOriginPattern = /^https:\/\/demo-[a-z0-9]+\.vusercontent\.net$/;
+
+export function resolveTestnetSubscriptionServiceId(origin: string, configuredServiceId: string | undefined) {
+  // A preview host is only a candidate. The authenticated endpoint checks it
+  // against the frame currently published by One Connect's Access App link.
+  if (origin !== registeredTestnetOrigin && !previewOriginPattern.test(origin)) return null;
+  const serviceId = configuredServiceId ?? testnetServiceId;
+  return serviceId === testnetServiceId ? serviceId : null;
+}
 
 const serviceIdPattern = /^(0|[1-9][0-9]{0,19})$/;
 export const testnetWalletPattern = /^G[A-Z2-7]{55}$/;
@@ -18,7 +29,7 @@ export async function submitTestnetSubscription(
   id: string,
   isCurrent: () => boolean,
 ): Promise<string> {
-  if (!testnetWalletPattern.test(wallet) || !serviceIdPattern.test(id) || (action === "subscribe" && id !== "460")) {
+  if (!testnetWalletPattern.test(wallet) || !serviceIdPattern.test(id) || (action === "subscribe" && id !== testnetServiceId)) {
     throw new Error("Invalid Testnet subscription");
   }
   const invoke = (mode: ExecutionMode["mode"]) => {
