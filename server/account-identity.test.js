@@ -566,12 +566,13 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
   return { request, login, upload, webhook, child, origin: `http://127.0.0.1:${port}` };
 }
 
-test("both authorized subscription previews reach session checks independently of PiNet", async (t) => {
+test("all authorized subscription previews reach session checks independently of PiNet", async (t) => {
   const { request, login } = await startEmailTestServer(t, false, { PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460" });
   const path = "/api/pi-testnet/subscription";
   const first = "https://demo-kzmid74mzykg7dfhbw4w.vusercontent.net";
   const second = "https://demo-kzmokzvi7qilj4jvt5pu.vusercontent.net";
-  for (const origin of [first, second, first, second]) {
+  const current = "https://demo-kzmj9x7doc3tbnuv0jmh.vusercontent.net";
+  for (const origin of [first, second, current, first, second, current]) {
     assert.deepEqual(await request(path, { origin }), {
       status: 401, body: { error: "Missing session token" },
     });
@@ -583,7 +584,7 @@ test("both authorized subscription previews reach session checks independently o
   const loginResult = await login("subscription-no-uid");
   assert.equal(loginResult.status, 200);
   const token = loginResult.body.sessionToken;
-  const ineligible = await request(path, { origin: second, token });
+  const ineligible = await request(path, { origin: current, token });
   assert.equal(ineligible.status, 403);
   assert.equal(ineligible.body.code, "PI_TESTNET_SESSION_NOT_ELIGIBLE");
   for (const origin of [undefined, "https://demo-unrelated.vusercontent.net", second + ".example"]) {
