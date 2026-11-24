@@ -1,3 +1,5 @@
+import { insertWithScopedFile, AccountWriteRejected, saveScopedFile } from "./account-write-fence.js";
+import { findActiveEmailAccount, legacyEmailScope, scopedEmail } from "./email-account-access.js";
 import crypto from "node:crypto";
 import multer from "multer";
 import { ObjectId } from "mongodb";
@@ -46,7 +48,9 @@ function limitText(value, maximum) {
 export async function registerMailgunInboundRoutes({
   app,
   db,
-  io,
+  writeAccount,
+  publishEmailEvent,
+  bindAccounts,
   emailForUser,
   emailAttachmentsBucket,
 }) {
@@ -74,6 +78,7 @@ export async function registerMailgunInboundRoutes({
   }).any();
 
   const receive = async (req, res) => {
+    let scopedUpload = false;
     let uploadedAttachmentId = null;
     let inserted = false;
 
@@ -154,6 +159,7 @@ export async function registerMailgunInboundRoutes({
         type: "external",
         direction: "outgoing",
         replyToken: match[1],
+        ...(bindAccounts ? scopedEmail : legacyEmailScope),
       });
 
       if (!original) {
@@ -163,10 +169,15 @@ export async function registerMailgunInboundRoutes({
       }
 
       const username = original.ownerUsername;
+      const accountId = bindAccounts ? original.ownerAccountId : undefined;
+      if (bindAccounts && !(await findActiveEmailAccount(db, accountId))) {
+        return res.status(406).json({ error: "Reply destination not found" });
+      }
+      const ownership = accountId ? { accountScoped: true, ownerAccountId: accountId } : {};
 
       const id = new ObjectId(
         hash(
-          `${username}\0${match[1]}\0${messageId}`,
+          `${accountId ?? username}\0${match[1]}\0${messageId}`,
         ).slice(0, 24),
       );
 
@@ -191,33 +202,33 @@ export async function registerMailgunInboundRoutes({
           .replace(/[/\\\u0000-\u001f\u007f]/g, "_")
           .slice(0, 120) || "attachment";
 
-        const stream = emailAttachmentsBucket.openUploadStream(
-          fileName,
-          {
-            metadata: {
-              ownerUsername: username,
-              externalAddress: sender,
-              mimeType: "application/octet-stream",
-              uploadedAt: new Date(),
-            },
-          },
-        );
-
-        uploadedAttachmentId = stream.id;
-
-        try {
-          await new Promise((resolve, reject) => {
-            stream.once("error", reject);
-            stream.once("finish", resolve);
-            stream.end(file.buffer);
-          });
-        } catch (error) {
-          await stream.abort().catch(() => {});
-          throw error;
+        const metadata = {
+          ...ownership,
+          ownerUsername: username,
+          externalAddress: sender,
+          mimeType: "application/octet-stream",
+          uploadedAt: new Date(),
+        };
+        if (accountId) {
+          scopedUpload = true;
+          uploadedAttachmentId = await saveScopedFile(db, writeAccount, accountId, "email_attachments", fileName, file.buffer, metadata);
+        } else {
+          const stream = emailAttachmentsBucket.openUploadStream(fileName, { metadata });
+          uploadedAttachmentId = stream.id;
+          try {
+            await new Promise((resolve, reject) => {
+              stream.once("error", reject);
+              stream.once("finish", resolve);
+              stream.end(file.buffer);
+            });
+          } catch (error) {
+            await stream.abort().catch(() => {});
+            throw error;
+          }
         }
 
         attachmentFields = {
-          attachmentId: stream.id.toString(),
+          attachmentId: uploadedAttachmentId.toString(),
           attachmentName: fileName,
           attachmentSize: file.size,
         };
@@ -232,6 +243,7 @@ export async function registerMailgunInboundRoutes({
         threadId: original.threadId,
         type: "external",
         direction: "incoming",
+        ...ownership,
         ownerUsername: username,
         recipientUsername: username,
         externalAddress: sender,
@@ -246,21 +258,22 @@ export async function registerMailgunInboundRoutes({
         ...attachmentFields,
       };
 
-      await emails.insertOne(record);
+      await insertWithScopedFile(db, writeAccount, accountId, emails, record, "email_attachments", record.attachmentId);
       inserted = true;
 
-      io.to(`peer:${username}`).emit("email:new", {
-        email: emailForUser(record, username),
+      await publishEmailEvent({ accountId, username }, "email:new", {
+        email: emailForUser(record, username, accountId),
       });
 
       return res.status(200).json({ success: true });
     } catch (error) {
-      if (uploadedAttachmentId && !inserted) {
+      if (uploadedAttachmentId && !inserted && !scopedUpload) {
         await emailAttachmentsBucket
           .delete(uploadedAttachmentId)
           .catch(() => {});
       }
 
+      if (error instanceof AccountWriteRejected) return res.status(406).json({ error: "Reply destination not found" });
       if (error?.code === 11000) {
         return res.status(200).json({ success: true });
       }

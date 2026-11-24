@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createRemoteCallAudio, type RemoteCallAudio } from "./remote-call-audio";
 import { CallSession } from "@/lib/connect/call-session";
 import { useConnect } from "@/contexts/connect-context";
 import { getSocket, onCallEvent, sendCallEvent } from "@/lib/api-client";
@@ -19,8 +18,6 @@ export interface CallViewState extends CallDetails {
   phase: "incoming" | "preparing" | "ringing" | "connecting" | "active";
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
-  audio: RemoteCallAudio | null;
-  playbackBlocked: boolean;
   connectedAt: number | null;
   muted: boolean;
   videoEnabled: boolean;
@@ -42,7 +39,6 @@ export function useCallController(
   const sessionRef = useRef<{
     details: CallDetails;
     session: CallSession;
-    audio: RemoteCallAudio | null;
     connectedAt: number | null;
   } | null>(null);
 
@@ -57,10 +53,6 @@ export function useCallController(
       );
     };
 
-    const audio = details.direction === "outgoing"
-      ? createRemoteCallAudio(playbackBlocked => updateState({ playbackBlocked }))
-      : null;
-
     const session = new CallSession({
       ...details,
       configuration,
@@ -68,9 +60,6 @@ export function useCallController(
         updateState({ localStream: stream });
       },
       onRemoteStream: (stream) => {
-        const current = sessionRef.current;
-        if (current?.details.callId !== details.callId) return;
-        current.audio?.attach(stream);
         updateState({ remoteStream: stream });
       },
       onConnecting: () => {
@@ -97,7 +86,6 @@ export function useCallController(
         const current = sessionRef.current;
         if (current?.details.callId !== details.callId) return;
 
-        current.audio?.close();
         sessionRef.current = null;
         setCallState(null);
 
@@ -142,15 +130,13 @@ export function useCallController(
       },
     });
 
-    sessionRef.current = { details, session, audio, connectedAt: null };
+    sessionRef.current = { details, session, connectedAt: null };
 
     setCallState({
       ...details,
       phase: details.direction === "incoming" ? "incoming" : "preparing",
       localStream: null,
       remoteStream: null,
-      audio,
-      playbackBlocked: false,
       connectedAt: null,
       muted: false,
       videoEnabled: details.kind === "video",
@@ -213,23 +199,16 @@ export function useCallController(
     if (
       !current ||
       current.details.direction !== "incoming" ||
-      current.audio ||
       callState?.phase !== "incoming"
     ) {
       return;
     }
 
     const callId = current.details.callId;
-    const audio = createRemoteCallAudio((playbackBlocked) => {
-      setCallState((state) =>
-        state?.callId === callId ? { ...state, playbackBlocked } : state,
-      );
-    });
-    current.audio = audio;
 
     setCallState((state) =>
       state?.callId === callId && state.phase === "incoming"
-        ? { ...state, audio, phase: "preparing" }
+        ? { ...state, phase: "preparing" }
         : state,
     );
 

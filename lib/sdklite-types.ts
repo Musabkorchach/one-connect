@@ -73,6 +73,11 @@ declare global {
       init: () => Promise<SDKLiteInstance>;
     };
     Pi: {
+      authenticate?: (scopes: string[], onIncompletePaymentFound: (payment: unknown) => void) => Promise<{ accessToken: string }>;
+      SmartContract?: {
+        Subscription?: import("./pi-testnet-subscription").PiSubscriptionSdk;
+        pollTransaction?: (hash: string) => Promise<{ status: string }>;
+      };
       init: (config: { version: string; sandbox?: boolean }) => Promise<void>;
     };
   }

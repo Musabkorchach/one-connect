@@ -9,21 +9,42 @@ import dns from "dns";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import crypto from "node:crypto";
+import { createAccountDeletion, observeAccountDeletion, revokeAccountConnections } from "./account-deletion.js";
+import { registerAccountDeletionRoutes } from "./account-deletion-routes.js";
+import { insertWithScopedFile, accountWrites, createAccountWriteFence, prepareScopedBuckets, respondToBlockedWrite, saveScopedFile } from "./account-write-fence.js";
+import { createAccountCalls } from "./account-calls.js";
+import { createPrivateData } from "./account-private-data.js";
+import { registerSubscriptionStatus, subscriptionProofMode, subscriptionSettings } from "./account-entitlements.js";
+import { createAccountGroups } from "./account-groups.js";
+import { createAccountChat, legacyChat } from "./account-chat.js";
+import { createEmailSocket } from "./email-socket.js";
 import { registerExternalEmailRoutes } from "./external-email-routes.js";
 import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
 
+import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindingEnabled, migrationRequired } from "./pi-login.js";
+import {
+  createEmailAccess, emailAccountUnavailable, emailViewer, findEmailAccount, senderEmailKey,
+} from "./email-account-access.js";
+
 config();
 
 dns.setServers(["8.8.8.8"]);
 
+const bindAccounts = isAccountBindingEnabled(process.env);
+const useSubscriptionFixtures = subscriptionProofMode(process.env, bindAccounts);
 const mongoClient = new MongoClient(process.env.MONGODB_URI);
+if (bindAccounts) assertLocalAccountBindingDatabase(mongoClient.options);
 
 await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
 const db = mongoClient.db("oneconnect");
+const writeAccount = createAccountWriteFence(db, mongoClient);
+if (bindAccounts) await prepareScopedBuckets(db);
+const { requireEmailSession, findEmailRecipient, emailNotFound } =
+  await createEmailAccess({ db, bindAccounts, authenticateSession });
 const emailsCollection = db.collection("emails");
 const emailUsersCollection = db.collection("email_users");
 
@@ -192,6 +213,46 @@ const users = new Map();
 const conversations = new Map();
 const contacts = new Map();
 const userSessions = new Map();
+const { publishEmailEvent, disconnectEmailSession } =
+  createEmailSocket({ io, db, bindAccounts, userSessions });
+const {
+  requireChatSession, disconnectChatSession, uploadMetadata: chatUploadMetadata,
+  attachmentAccess: chatAttachmentAccess, deleteMessage: deleteAccountChatMessage,
+} = await createAccountChat({
+  app, io, db, writeAccount, bindAccounts, userSessions, authenticateSession, requireSession,
+  normalizeMessagingUsername, chatAttachmentsBucket, chatImagesBucket,
+});
+const accountCalls = bindAccounts ? await createAccountCalls({
+  app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername,
+}) : null;
+const privateData = bindAccounts ? await createPrivateData({
+  app, db, writeAccount, authenticateSession, normalizeMessagingUsername,
+}) : null;
+if (privateData) {
+  registerSubscriptionStatus({
+    app, db, privateData, settings: subscriptionSettings(process.env), useFixtures: useSubscriptionFixtures,
+  });
+}
+const accountGroups = bindAccounts ? await createAccountGroups({
+  app, io, db, mongoClient, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, groupMediaBucket,
+}) : null;
+const revokeDeletionAccess = (accountId) => revokeAccountConnections(io, userSessions, accountId);
+export const accountDeletion = bindAccounts ? createAccountDeletion({
+  db, client: mongoClient,
+  revokeAccess: revokeDeletionAccess,
+  stopCalls: (accountId, ownsLease) => accountCalls.endForDeletion(accountId, undefined, ownsLease),
+}) : null;
+if (accountDeletion) {
+  await registerAccountDeletionRoutes({
+    app, db, deletion: accountDeletion, userSessions, revokeAccess: revokeDeletionAccess,
+  });
+  const sweepDeletionSessions = observeAccountDeletion(db, io, userSessions);
+  const resumeDeletion = () => void Promise.all([accountDeletion.resumePending(), sweepDeletionSessions()]).catch(() => {
+    console.error("[ACCOUNT DELETION] Resume failed");
+  });
+  resumeDeletion();
+  setInterval(resumeDeletion, 5000).unref();
+}
 
 function detectChatImageType(buffer) {
   if (!Buffer.isBuffer(buffer)) return null;
@@ -297,7 +358,15 @@ function normalizeMessagingUsername(value) {
     : "";
 }
 
-function requireSession(req, res, next) {
+if (process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460") {
+  const { registerPiTestnetSubscriptions } = await import("./pi-testnet-subscription-routes.js");
+  registerPiTestnetSubscriptions({
+    app, db, authenticateSession,
+    sessionIsCurrent: (req) => userSessions.get(req.headers.authorization.slice(7))?.expiresAt > Date.now(),
+  });
+}
+
+function authenticateSession(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -319,9 +388,18 @@ function requireSession(req, res, next) {
   req.user = {
     userId: session.userId,
     piUsername: session.piUsername,
+    ...(session.verifiedPiUid ? { verifiedPiUid: session.verifiedPiUid } : {}),
+    ...(session.accountId ? { accountId: session.accountId } : {}),
   };
 
   next();
+}
+
+function requireSession(req, res, next) {
+  return authenticateSession(req, res, () => {
+    if (req.user.accountId) return res.status(409).json(migrationRequired);
+    next();
+  });
 }
 
 async function requireGroupMember(req, res, next) {
@@ -362,9 +440,8 @@ async function requireGroupMember(req, res, next) {
 
 app.post(
   "/api/groups/:groupId/media",
-  requireSession,
-  requireGroupMember,
-  (req, res) => {
+  accountGroups ? accountGroups.guardMedia(true) : [requireSession, requireGroupMember],
+  (req, res, next) => {
     groupMediaUpload.single("file")(req, res, async (uploadError) => {
       if (uploadError) {
         return res.status(
@@ -423,25 +500,32 @@ app.post(
         const groupId = req.chatGroup._id.toString();
 
         // Recheck membership after receiving the file.
-        const group = await groupsCollection.findOne({
-          _id: req.chatGroup._id,
-          members: req.groupUsername,
-        });
-
-        if (!group) {
-          return res.status(404).json({ error: "Group not found" });
+        if (accountGroups) {
+          if (!await accountGroups.authorizeMediaWrite(req, res, next)) return;
+        } else {
+          const group = await groupsCollection.findOne({
+            _id: req.chatGroup._id,
+            members: req.groupUsername,
+          });
+          if (!group) return res.status(404).json({ error: "Group not found" });
         }
 
-        uploadStream = groupMediaBucket.openUploadStream(fileName, {
-          metadata: {
-            groupId,
-            ownerUserId: req.user.userId,
-            senderUsername: req.groupUsername,
-            kind,
-            mimeType,
-            uploadedAt: Date.now(),
-          },
-        });
+        const metadata = {
+          groupId,
+          ...(accountGroups
+            ? { accountScoped: true, ownerAccountId: req.user.accountId }
+            : { ownerUserId: req.user.userId }),
+          senderUsername: req.groupUsername,
+          kind,
+          mimeType,
+          uploadedAt: Date.now(),
+        };
+        if (req.user.accountId) {
+          const stored = await saveScopedFile(db, accountGroups.writeForMember(groupId, req.user.accountId),
+            req.user.accountId, "group_media", fileName, file.buffer, metadata);
+          return res.status(201).json({ mediaId: stored.toHexString(), groupId, kind, fileName, mimeType, fileSize: file.size });
+        }
+        uploadStream = groupMediaBucket.openUploadStream(fileName, { metadata });
 
         await new Promise((resolve, reject) => {
           uploadStream.once("error", reject);
@@ -461,6 +545,8 @@ app.post(
         if (uploadStream) {
           await uploadStream.abort().catch(() => {});
         }
+
+        if (accountGroups) return accountGroups.report(res, error, next);
 
         console.error("[GROUP MEDIA UPLOAD ERROR]", error);
 
@@ -600,9 +686,8 @@ app.get("/api/groups", requireSession, async (req, res) => {
 
 app.get(
   "/api/groups/:groupId/media/:mediaId",
-  requireSession,
-  requireGroupMember,
-  async (req, res) => {
+  accountGroups ? accountGroups.guardMedia(false) : [requireSession, requireGroupMember],
+  async (req, res, next) => {
     res.setHeader("Cache-Control", "private, no-store");
 
     const { mediaId } = req.params;
@@ -618,21 +703,24 @@ app.get(
       const media = await groupMediaBucket.find({
         _id: id,
         "metadata.groupId": groupId,
+        "metadata.accountScoped": accountGroups ? true : { $ne: true },
       }).next();
 
       if (!media) {
         return res.status(404).json({ error: "Media not found" });
       }
 
-      const message = await groupMessagesCollection.findOne({
-        groupId,
-        mediaId,
-        senderUsername: media.metadata?.senderUsername,
-        kind: media.metadata?.kind,
-        deletedFor: { $ne: req.groupUsername },
-      });
-
-      if (!message) {
+      const linked = accountGroups
+        ? await accountGroups.authorizeMediaRead(req, res, next, media, mediaId)
+        : await groupMessagesCollection.findOne({
+            groupId,
+            mediaId,
+            senderUsername: media.metadata?.senderUsername,
+            kind: media.metadata?.kind,
+            deletedFor: { $ne: req.groupUsername },
+          });
+      if (accountGroups && linked === null) return;
+      if (!linked) {
         return res.status(404).json({ error: "Media not found" });
       }
 
@@ -847,6 +935,7 @@ app.post(
           const media = await groupMediaBucket.find({
             _id: new ObjectId(data.mediaId),
             "metadata.groupId": groupId,
+            "metadata.accountScoped": { $ne: true },
             "metadata.ownerUserId": req.user.userId,
             "metadata.senderUsername": senderUsername,
             "metadata.kind": data.kind,
@@ -1000,7 +1089,7 @@ app.post("/api/groups/:groupId/read", requireSession, async (req, res) => {
   }
 });
 
-app.post("/api/emails/attachments", requireSession, (req, res) => {
+app.post("/api/emails/attachments", requireEmailSession, (req, res) => {
   emailAttachmentUpload.single("file")(req, res, async (uploadError) => {
     if (uploadError) {
       return res.status(
@@ -1053,34 +1142,41 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
       .slice(0, 120) || "attachment";
 
     let uploadStream;
+    const { accountId } = req.user;
+    let registered;
 
     try {
       if (isInternal) {
-        const registered = await emailUsersCollection.findOne({
-          _id: recipientUsername,
-        });
+        registered = await findEmailRecipient(recipientUsername);
 
-        if (!registered) {
+        if (!registered || (accountId && registered.accountId === accountId)) {
           return res.status(404).json({
             error: "Recipient has not registered for One Connect email",
           });
         }
       }
 
-      uploadStream = emailAttachmentsBucket.openUploadStream(fileName, {
-        metadata: {
-          ownerUserId: req.user.userId,
-          senderUsername,
-          ...(isInternal
-            ? { recipientUsername }
-            : {
-                ownerUsername: senderUsername,
-                externalAddress: recipient,
-              }),
-          mimeType: "application/octet-stream",
-          uploadedAt: new Date(),
-        },
-      });
+      const metadata = {
+        ...(accountId ? {
+          accountScoped: true,
+          ownerAccountId: accountId,
+          ...(registered ? { recipientAccountId: registered.accountId } : {}),
+        } : { ownerUserId: req.user.userId }),
+        senderUsername,
+        ...(isInternal
+          ? { recipientUsername }
+          : {
+              ownerUsername: senderUsername,
+              externalAddress: recipient,
+            }),
+        mimeType: "application/octet-stream",
+        uploadedAt: new Date(),
+      };
+      if (req.user.accountId) {
+        const stored = await saveScopedFile(db, writeAccount, [accountId, registered?.accountId], "email_attachments", fileName, file.buffer, metadata);
+        return res.status(201).json({ attachmentId: stored.toHexString(), attachmentName: fileName, attachmentSize: file.size });
+      }
+      uploadStream = emailAttachmentsBucket.openUploadStream(fileName, { metadata });
 
       await new Promise((resolve, reject) => {
         uploadStream.once("error", reject);
@@ -1098,6 +1194,8 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
         await uploadStream.abort().catch(() => {});
       }
 
+      if (respondToBlockedWrite(error, res)) return;
+
       console.error("[EMAIL ATTACHMENT UPLOAD ERROR]", error);
 
       if (!res.headersSent) {
@@ -1109,9 +1207,9 @@ app.post("/api/emails/attachments", requireSession, (req, res) => {
   });
 });
 
-function emailForUser(record, username) {
-    if (record.type === "external") {
-    if (record.ownerUsername !== username) {
+function emailForUser(record, username, accountId) {
+  if (record.type === "external") {
+    if (accountId ? record.ownerAccountId !== accountId : record.ownerUsername !== username) {
       throw new Error("External email owner does not match session");
     }
 
@@ -1139,7 +1237,10 @@ function emailForUser(record, username) {
       at: record.at,
     };
   }
-  const fromMe = record.senderUsername === username;
+  const fromMe = accountId ? record.senderAccountId === accountId : record.senderUsername === username;
+  const deletedSender = accountId && record.senderAccountDeleted === true;
+  const deletedRecipient = accountId && record.recipientAccountDeleted === true;
+  const recipientLabel = deletedRecipient ? "حساب محذوف" : `@${record.recipientUsername}`;
 
   return {
     id: record._id.toString(),
@@ -1147,12 +1248,11 @@ function emailForUser(record, username) {
     type: "internal",
     folder: fromMe ? "sent" : "inbox",
     fromMe,
-    senderUsername: record.senderUsername,
-    recipientUsername: record.recipientUsername,
-    recipient: `@${record.recipientUsername}`,
-    senderName: fromMe
-      ? `@${record.recipientUsername}`
-      : `@${record.senderUsername}`,
+    senderUsername: deletedSender ? undefined : record.senderUsername,
+    recipientUsername: deletedRecipient ? undefined : record.recipientUsername,
+    ...((fromMe ? deletedRecipient : deletedSender) ? { peerDeleted: true } : {}),
+    recipient: recipientLabel,
+    senderName: fromMe ? recipientLabel : deletedSender ? "حساب محذوف" : `@${record.senderUsername}`,
     color: 200,
     subject: record.subject,
     body: record.body,
@@ -1167,7 +1267,9 @@ function emailForUser(record, username) {
 await registerMailgunInboundRoutes({
   app,
   db,
-  io,
+  writeAccount,
+  bindAccounts,
+  publishEmailEvent,
   emailForUser,
   emailAttachmentsBucket,
 });
@@ -1175,26 +1277,32 @@ await registerMailgunInboundRoutes({
 await registerPstnRoutes({
   app,
   db,
-  requireSession,
+  writeAccount,
+  bindAccounts,
+  requireSession: accountCalls?.requireCallsSession ?? requireSession,
   normalizeMessagingUsername,
 });
 
 registerPstnVoiceWebhook({
   app,
   db,
+  writeAccount,
+  bindAccounts,
 });
 
 registerExternalEmailRoutes({
   app,
   db,
-  io,
-  requireSession,
+  writeAccount,
+  publishEmailEvent,
+  requireSession: requireEmailSession,
   normalizeMessagingUsername,
   emailForUser,
   emailAttachmentsBucket,
 });
-app.post("/api/emails/internal", requireSession, async (req, res) => {
+app.post("/api/emails/internal", requireEmailSession, async (req, res) => {
   const data = req.body;
+  const { accountId } = req.user;
   const senderUsername = normalizeMessagingUsername(req.user.piUsername);
 
   if (!senderUsername) {
@@ -1248,16 +1356,15 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
 
   const subject = data.subject.trim() || "(no subject)";
   const matchesRequest = (record) =>
+    (!accountId || record.type === "internal") &&
     record.recipientUsername === recipientUsername &&
     record.subject === subject &&
     record.body === data.body &&
     (record.attachmentId ?? null) === attachmentId;
 
   try {
-    const existing = await emailsCollection.findOne({
-      senderUsername,
-      id: data.id,
-    });
+    const requestKey = senderEmailKey(accountId, senderUsername, data.id);
+    const existing = await emailsCollection.findOne(requestKey);
 
     if (existing) {
       if (!matchesRequest(existing)) {
@@ -1267,15 +1374,13 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
       }
 
       return res.json({
-        email: emailForUser(existing, senderUsername),
+        email: emailForUser(existing, senderUsername, accountId),
       });
     }
 
-    const recipient = await emailUsersCollection.findOne({
-      _id: recipientUsername,
-    });
+    const recipient = await findEmailRecipient(recipientUsername);
 
-    if (!recipient) {
+    if (!recipient || (accountId && recipient.accountId === accountId)) {
       return res.status(404).json({
         error: "Recipient has not registered for One Connect email",
       });
@@ -1286,9 +1391,15 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
     if (attachmentId) {
       attachment = await emailAttachmentsBucket.find({
         _id: new ObjectId(attachmentId),
-        "metadata.ownerUserId": req.user.userId,
-        "metadata.senderUsername": senderUsername,
-        "metadata.recipientUsername": recipientUsername,
+        ...(accountId ? {
+          "metadata.ownerAccountId": accountId,
+          "metadata.recipientAccountId": recipient.accountId,
+        } : {
+          "metadata.accountScoped": { $ne: true },
+          "metadata.ownerUserId": req.user.userId,
+          "metadata.senderUsername": senderUsername,
+          "metadata.recipientUsername": recipientUsername,
+        }),
       }).next();
 
       if (
@@ -1304,7 +1415,12 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
     }
 
     const record = {
-      id: data.id,
+      ...(accountId ? {
+        accountScoped: true,
+        accountMessageId: data.id,
+        senderAccountId: accountId,
+        recipientAccountId: recipient.accountId,
+      } : { id: data.id }),
       threadId: crypto.randomUUID(),
       type: "internal",
       senderUsername,
@@ -1325,14 +1441,12 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
     let result;
 
     try {
-      result = await emailsCollection.insertOne(record);
+      result = await insertWithScopedFile(db, writeAccount, accountId ? [accountId, recipient.accountId] : [],
+        emailsCollection, record, "email_attachments", record.attachmentId);
     } catch (error) {
       if (error?.code !== 11000) throw error;
 
-      const saved = await emailsCollection.findOne({
-        senderUsername,
-        id: data.id,
-      });
+      const saved = await emailsCollection.findOne(requestKey);
 
       if (!saved || !matchesRequest(saved)) {
         return res.status(409).json({
@@ -1341,26 +1455,30 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
       }
 
       return res.json({
-        email: emailForUser(saved, senderUsername),
+        email: emailForUser(saved, senderUsername, accountId),
       });
     }
 
     const saved = { ...record, _id: result.insertedId };
 
-    io.to(`peer:${recipientUsername}`).emit(
-      "email:new",
-      emailForUser(saved, recipientUsername),
-    );
-
-    io.to(`peer:${senderUsername}`).emit(
-      "email:new",
-      emailForUser(saved, senderUsername),
-    );
+    await Promise.all([
+      publishEmailEvent(
+        { accountId: saved.recipientAccountId, username: recipientUsername },
+        "email:new",
+        emailForUser(saved, recipientUsername, saved.recipientAccountId),
+      ),
+      publishEmailEvent(
+        { accountId, username: senderUsername },
+        "email:new",
+        emailForUser(saved, senderUsername, accountId),
+      ),
+    ]);
 
     return res.status(201).json({
-      email: emailForUser(saved, senderUsername),
+      email: emailForUser(saved, senderUsername, accountId),
     });
   } catch (error) {
+    if (respondToBlockedWrite(error, res)) return;
     console.error("[EMAIL SEND ERROR]", error);
     return res.status(500).json({
       error: "Email could not be sent",
@@ -1368,10 +1486,12 @@ app.post("/api/emails/internal", requireSession, async (req, res) => {
   }
 });
 
-app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
+app.get("/api/emails/:emailId/attachment", requireEmailSession, async (req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
 
   const username = normalizeMessagingUsername(req.user.piUsername);
+  const { accountId } = req.user;
+  const viewer = emailViewer(accountId, username);
   const { emailId } = req.params;
 
   if (!username) {
@@ -1383,32 +1503,34 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
   }
 
   try {
-    const email = await emailsCollection.findOne({
+    const emailFilter = {
       _id: new ObjectId(emailId),
+      ...viewer.scope,
       $or: [
         {
           type: "internal",
           $or: [
             {
-              senderUsername: username,
+              ...viewer.sender,
               senderDeleted: { $ne: true },
             },
             {
-              recipientUsername: username,
+              ...viewer.recipient,
               recipientDeleted: { $ne: true },
             },
           ],
         },
         {
           type: "external",
-          ownerUsername: username,
+          ...viewer.owner,
           senderDeleted: { $ne: true },
         },
       ],
-    });
+    };
+    const email = await emailsCollection.findOne(emailFilter);
 
+    if (!email) return await emailNotFound(res, accountId, emailId, "Email attachment not found");
     if (
-      !email ||
       typeof email.attachmentId !== "string" ||
       !/^[a-f0-9]{24}$/i.test(email.attachmentId)
     ) {
@@ -1417,17 +1539,22 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
 
     const id = new ObjectId(email.attachmentId);
 
+    const external = email.type === "external";
+    const ownership = accountId
+      ? { "metadata.ownerAccountId": external ? email.ownerAccountId : email.senderAccountId }
+      : external
+        ? { "metadata.ownerUsername": username }
+        : { "metadata.senderUsername": email.senderUsername };
+    const destination = external
+      ? { "metadata.externalAddress": email.externalAddress }
+      : accountId
+        ? { "metadata.recipientAccountId": email.recipientAccountId }
+        : { "metadata.recipientUsername": email.recipientUsername };
     const attachment = await emailAttachmentsBucket.find({
       _id: id,
-      ...(email.type === "external"
-        ? {
-            "metadata.ownerUsername": username,
-            "metadata.externalAddress": email.externalAddress,
-          }
-        : {
-            "metadata.senderUsername": email.senderUsername,
-            "metadata.recipientUsername": email.recipientUsername,
-          }),
+      "metadata.accountScoped": accountId ? true : { $ne: true },
+      ...ownership,
+      ...destination,
     }).next();
 
     if (
@@ -1437,6 +1564,13 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
       attachment.length > 10 * 1024 * 1024
     ) {
       return res.status(404).json({ error: "Email attachment not found" });
+    }
+
+    if (accountId) {
+      const visible = await emailsCollection.findOne({ ...emailFilter, attachmentId: email.attachmentId }, { projection: { _id: 1 } });
+      const account = await findEmailAccount(db, accountId);
+      if (account?.state !== "active") return res.status(403).json(emailAccountUnavailable(account));
+      if (!visible) return res.status(404).json({ error: "Email attachment not found" });
     }
 
     const encodedName = encodeURIComponent(
@@ -1487,10 +1621,12 @@ app.get("/api/emails/:emailId/attachment", requireSession, async (req, res) => {
   }
 });
 
-app.get("/api/emails", requireSession, async (req, res) => {
+app.get("/api/emails", requireEmailSession, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
   const username = normalizeMessagingUsername(req.user.piUsername);
+  const { accountId } = req.user;
+  const viewer = emailViewer(accountId, username);
 
   if (!username) {
     return res.status(401).json({ error: "Invalid user identity" });
@@ -1499,23 +1635,24 @@ app.get("/api/emails", requireSession, async (req, res) => {
   try {
     const records = await emailsCollection
       .find({
+        ...viewer.scope,
         $or: [
           {
             type: "internal",
             $or: [
               {
-                senderUsername: username,
+                ...viewer.sender,
                 senderDeleted: { $ne: true },
               },
               {
-                recipientUsername: username,
+                ...viewer.recipient,
                 recipientDeleted: { $ne: true },
               },
             ],
           },
           {
             type: "external",
-            ownerUsername: username,
+            ...viewer.owner,
             senderDeleted: { $ne: true },
           },
         ],
@@ -1524,8 +1661,13 @@ app.get("/api/emails", requireSession, async (req, res) => {
       .limit(200)
       .toArray();
 
+    if (accountId) {
+      const account = await findEmailAccount(db, accountId);
+      if (account?.state !== "active") return res.status(403).json(emailAccountUnavailable(account));
+    }
     return res.json({
-      emails: records.map((record) => emailForUser(record, username)),
+      emails: records.map((record) => emailForUser(record, username, accountId)),
+      ...(accountId ? { legacyHistory: migrationRequired } : {}),
     });
   } catch (error) {
     console.error("[EMAIL LOAD ERROR]", error);
@@ -1535,8 +1677,10 @@ app.get("/api/emails", requireSession, async (req, res) => {
   }
 });
 
-app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
+app.patch("/api/emails/:id/read", requireEmailSession, async (req, res) => {
   const username = normalizeMessagingUsername(req.user.piUsername);
+  const { accountId } = req.user;
+  const viewer = emailViewer(accountId, username);
   const { id } = req.params;
 
   if (!username) {
@@ -1548,19 +1692,20 @@ app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
   }
 
   try {
-    const result = await emailsCollection.updateOne(
+    const result = await accountWrites(emailsCollection, writeAccount, accountId).updateOne(
       {
         _id: new ObjectId(id),
+        ...viewer.scope,
         $or: [
           {
             type: "internal",
-            recipientUsername: username,
+            ...viewer.recipient,
             recipientDeleted: { $ne: true },
           },
           {
             type: "external",
             direction: "incoming",
-            ownerUsername: username,
+            ...viewer.owner,
             senderDeleted: { $ne: true },
           },
         ],
@@ -1571,13 +1716,14 @@ app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: "Email not found" });
+      return await emailNotFound(res, accountId, id, "Email not found");
     }
 
-    io.to(`peer:${username}`).emit("email:read", { id });
+    await publishEmailEvent({ accountId, username }, "email:read", { id });
 
     return res.json({ success: true });
   } catch (error) {
+    if (respondToBlockedWrite(error, res)) return;
     console.error("[EMAIL READ ERROR]", error);
     return res.status(500).json({
       error: "Email could not be marked as read",
@@ -1585,8 +1731,10 @@ app.patch("/api/emails/:id/read", requireSession, async (req, res) => {
   }
 });
 
-app.delete("/api/emails/:id", requireSession, async (req, res) => {
+app.delete("/api/emails/:id", requireEmailSession, async (req, res) => {
   const username = normalizeMessagingUsername(req.user.piUsername);
+  const { accountId } = req.user;
+  const viewer = emailViewer(accountId, username);
   const { id } = req.params;
 
   if (!username) {
@@ -1600,38 +1748,40 @@ app.delete("/api/emails/:id", requireSession, async (req, res) => {
   try {
     const record = await emailsCollection.findOne({
       _id: new ObjectId(id),
+      ...viewer.scope,
       $or: [
         {
           type: "internal",
           $or: [
-            { senderUsername: username },
-            { recipientUsername: username },
+            viewer.sender,
+            viewer.recipient,
           ],
         },
         {
           type: "external",
-          ownerUsername: username,
+          ...viewer.owner,
           senderDeleted: { $ne: true },
         },
       ],
     });
 
     if (!record) {
-      return res.status(404).json({ error: "Email not found" });
+      return await emailNotFound(res, accountId, id, "Email not found");
     }
 
     const fromMe =
       record.type === "external" ||
-      record.senderUsername === username;
+      (accountId ? record.senderAccountId === accountId : record.senderUsername === username);
 
-    await emailsCollection.updateOne(
+    await accountWrites(emailsCollection, writeAccount, accountId).updateOne(
       {
         _id: record._id,
+        ...viewer.scope,
         ...(record.type === "external"
-          ? { ownerUsername: username }
+          ? viewer.owner
           : fromMe
-            ? { senderUsername: username }
-            : { recipientUsername: username }),
+            ? viewer.sender
+            : viewer.recipient),
       },
       {
         $set: fromMe
@@ -1640,10 +1790,11 @@ app.delete("/api/emails/:id", requireSession, async (req, res) => {
       },
     );
 
-    io.to(`peer:${username}`).emit("email:deleted", { id });
+    await publishEmailEvent({ accountId, username }, "email:deleted", { id });
 
     return res.json({ success: true });
   } catch (error) {
+    if (respondToBlockedWrite(error, res)) return;
     console.error("[EMAIL DELETE ERROR]", error);
     return res.status(500).json({
       error: "Email could not be deleted",
@@ -1651,25 +1802,31 @@ app.delete("/api/emails/:id", requireSession, async (req, res) => {
   }
 });
 
-app.get("/api/state/:key", requireSession, async (req, res) => {
+app.get("/api/state/:key", privateData?.requirePrivateSession ?? requireSession, async (req, res) => {
   const { key } = req.params;
   res.set("Cache-Control", "no-store");
 
-  if (!allowedStateKeys.has(key)) {
+  if (!allowedStateKeys.has(key) && !(privateData && key === "connect.settings")) {
     return res.status(400).json({ error: "Invalid state key" });
   }
 
   try {
-    const record = await appStateCollection.findOne(
-      { ownerUserId: req.user.userId, key },
+    if (privateData && await privateData.readSpecialState(req, res, key)) return;
+    const collection = privateData?.state ?? appStateCollection;
+    const owner = privateData ? privateData.owner(req) : { ownerUserId: req.user.userId };
+    const record = await collection.findOne(
+      { ...owner, key },
       { projection: { _id: 0, blob: 1, revision: 1 } }
     );
 
-        if (key === "connect.invoice-drafts") {
+    if (privateData && !await privateData.checkActive(req, res)) return;
+    const marker = privateData ? { legacyHistory: migrationRequired } : {};
+    if (key === "connect.invoice-drafts") {
       if (!record) {
         return res.json({
           blob: null,
           revision: 0,
+          ...marker,
         });
       }
 
@@ -1683,20 +1840,21 @@ app.get("/api/state/:key", requireSession, async (req, res) => {
       return res.json({
         blob: record.blob,
         revision: record.revision,
+        ...marker,
       });
     }
-    return res.json(record ? { blob: record.blob } : null);
+    return res.json(privateData ? { blob: record?.blob ?? null, ...marker } : record ? { blob: record.blob } : null);
   } catch (error) {
     console.error("[APP STATE LOAD ERROR]", error);
     return res.status(500).json({ error: "State could not be loaded" });
   }
 });
 
-app.put("/api/state/:key", requireSession, async (req, res) => {
+app.put("/api/state/:key", privateData?.requirePrivateSession ?? requireSession, async (req, res) => {
   const { key } = req.params;
   const blob = req.body?.blob;
 
-  if (!allowedStateKeys.has(key)) {
+  if (!allowedStateKeys.has(key) && !(privateData && key === "connect.settings")) {
     return res.status(400).json({ error: "Invalid state key" });
   }
 
@@ -1709,7 +1867,11 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
   }
 
   try {
-        if (key === "connect.invoice-drafts") {
+    if (privateData && await privateData.writeSpecialState(req, res, key, blob)) return;
+    if (privateData && !await privateData.checkActive(req, res)) return;
+    const collection = accountWrites(privateData?.state ?? appStateCollection, writeAccount, req.user.accountId);
+    const owner = privateData ? privateData.owner(req) : { ownerUserId: req.user.userId };
+    if (key === "connect.invoice-drafts") {
       const expectedRevision = req.body?.expectedRevision;
 
       if (
@@ -1723,12 +1885,11 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
       }
 
       const nextRevision = expectedRevision + 1;
-      const ownerUserId = req.user.userId;
 
       if (expectedRevision === 0) {
         try {
-          await appStateCollection.insertOne({
-            ownerUserId,
+          await collection.insertOne({
+            ...owner,
             key,
             blob,
             revision: nextRevision,
@@ -1744,9 +1905,9 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
           throw error;
         }
       } else {
-        const result = await appStateCollection.updateOne(
+        const result = await collection.updateOne(
           {
-            ownerUserId,
+            ...owner,
             key,
             revision: expectedRevision,
           },
@@ -1770,8 +1931,8 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
         revision: nextRevision,
       });
     }
-    await appStateCollection.updateOne(
-      { ownerUserId: req.user.userId, key },
+    await collection.updateOne(
+      { ...owner, key },
       {
         $set: {
           blob,
@@ -1783,12 +1944,13 @@ app.put("/api/state/:key", requireSession, async (req, res) => {
 
     return res.status(204).end();
   } catch (error) {
+    if (respondToBlockedWrite(error, res)) return;
     console.error("[APP STATE SAVE ERROR]", error);
     return res.status(500).json({ error: "State could not be saved" });
   }
 });
 
-app.post("/api/chat/attachments", requireSession, (req, res) => {
+app.post("/api/chat/attachments", requireChatSession, (req, res) => {
   chatAttachmentUpload.single("file")(req, res, async (uploadError) => {
     if (uploadError) {
       return res.status(
@@ -1801,14 +1963,15 @@ app.post("/api/chat/attachments", requireSession, (req, res) => {
     }
 
     const senderUsername = normalizeMessagingUsername(req.user.piUsername);
-    const recipientUsername = normalizeMessagingUsername(req.body?.recipient);
+    const { accountId } = req.user;
+    const conversationId = req.body?.conversationId;
+    let recipientUsername = normalizeMessagingUsername(req.body?.recipient);
     const kind = req.body?.kind;
     const file = req.file;
 
     if (
       !senderUsername ||
-      !recipientUsername ||
-      senderUsername === recipientUsername ||
+      (accountId ? typeof conversationId !== "string" : !recipientUsername || senderUsername === recipientUsername) ||
       !["file", "video", "voice"].includes(kind)
     ) {
       return res.status(400).json({ error: "Invalid attachment details" });
@@ -1843,15 +2006,22 @@ if (!mimeType) {
       .slice(0, 120) || (kind === "video" ? "video" : "file");
 
     try {
-      const uploadStream = chatAttachmentsBucket.openUploadStream(fileName, {
-        metadata: {
-          ownerUserId: req.user.userId,
-          senderUsername,
-          recipientUsername,
-          kind,
-          mimeType,
-        },
-      });
+      const target = accountId ? await chatUploadMetadata(accountId, conversationId) : null;
+      if (accountId && !target) return res.status(404).json({ error: "Conversation is unavailable" });
+      const ownership = target?.ownership ?? { ownerUserId: req.user.userId };
+      if (target) recipientUsername = target.recipientUsername;
+      const metadata = {
+        ...ownership,
+        senderUsername,
+        recipientUsername,
+        kind,
+        mimeType,
+      };
+      if (req.user.accountId) {
+        const stored = await saveScopedFile(db, writeAccount, [accountId, ownership.recipientAccountId], "chat_attachments", fileName, file.buffer, metadata);
+        return res.status(201).json({ attachmentId: stored.toHexString(), kind, fileName, mimeType, fileSize: file.size });
+      }
+      const uploadStream = chatAttachmentsBucket.openUploadStream(fileName, { metadata });
 
       await new Promise((resolve, reject) => {
         uploadStream.once("error", reject);
@@ -1867,6 +2037,7 @@ if (!mimeType) {
         fileSize: file.size,
       });
     } catch (error) {
+      if (respondToBlockedWrite(error, res)) return;
       console.error("[CHAT ATTACHMENT UPLOAD ERROR]", error);
       return res.status(500).json({
         error: "Attachment could not be uploaded",
@@ -1875,7 +2046,7 @@ if (!mimeType) {
   });
 });
 
-app.post("/api/chat/images", requireSession, (req, res) => {
+app.post("/api/chat/images", requireChatSession, (req, res) => {
   chatImageUpload.single("file")(req, res, async (uploadError) => {
     if (uploadError) {
       return res.status(
@@ -1888,13 +2059,14 @@ app.post("/api/chat/images", requireSession, (req, res) => {
     }
 
     const senderUsername = normalizeMessagingUsername(req.user.piUsername);
-    const recipientUsername = normalizeMessagingUsername(req.body?.recipient);
+    const { accountId } = req.user;
+    const conversationId = req.body?.conversationId;
+    let recipientUsername = normalizeMessagingUsername(req.body?.recipient);
     const file = req.file;
 
     if (
       !senderUsername ||
-      !recipientUsername ||
-      senderUsername === recipientUsername
+      (accountId ? typeof conversationId !== "string" : !recipientUsername || senderUsername === recipientUsername)
     ) {
       return res.status(400).json({ error: "Invalid recipient" });
     }
@@ -1916,14 +2088,21 @@ app.post("/api/chat/images", requireSession, (req, res) => {
       .slice(0, 120) || "image";
 
     try {
-      const uploadStream = chatImagesBucket.openUploadStream(fileName, {
-        metadata: {
-          ownerUserId: req.user.userId,
-          senderUsername,
-          recipientUsername,
-          mimeType,
-        },
-      });
+      const target = accountId ? await chatUploadMetadata(accountId, conversationId) : null;
+      if (accountId && !target) return res.status(404).json({ error: "Conversation is unavailable" });
+      const ownership = target?.ownership ?? { ownerUserId: req.user.userId };
+      if (target) recipientUsername = target.recipientUsername;
+      const metadata = {
+        ...ownership,
+        senderUsername,
+        recipientUsername,
+        mimeType,
+      };
+      if (req.user.accountId) {
+        const stored = await saveScopedFile(db, writeAccount, [accountId, ownership.recipientAccountId], "chat_images", fileName, file.buffer, metadata);
+        return res.status(201).json({ imageId: stored.toHexString(), fileName, mimeType, fileSize: file.size });
+      }
+      const uploadStream = chatImagesBucket.openUploadStream(fileName, { metadata });
 
       await new Promise((resolve, reject) => {
         uploadStream.once("error", reject);
@@ -1938,6 +2117,7 @@ app.post("/api/chat/images", requireSession, (req, res) => {
         fileSize: file.size,
       });
     } catch (error) {
+      if (respondToBlockedWrite(error, res)) return;
       console.error("[CHAT IMAGE UPLOAD ERROR]", error);
       return res.status(500).json({
         error: "Image could not be uploaded",
@@ -1948,7 +2128,7 @@ app.post("/api/chat/images", requireSession, (req, res) => {
 
 app.get(
   "/api/chat/attachments/:attachmentId",
-  requireSession,
+  requireChatSession,
   async (req, res) => {
     const { attachmentId } = req.params;
 
@@ -1961,13 +2141,16 @@ app.get(
       const attachment = await chatAttachmentsBucket.find({ _id: id }).next();
       const username = normalizeMessagingUsername(req.user.piUsername);
 
-      if (
-        !attachment ||
-        !username ||
-        (
-          attachment.metadata?.senderUsername !== username &&
-          attachment.metadata?.recipientUsername !== username
-        )
+      const { accountId } = req.user;
+      if (accountId) {
+        const access = await chatAttachmentAccess(attachment, "attachmentId", accountId);
+        const binding = await findEmailAccount(db, accountId);
+        if (binding?.state !== "active") return res.status(403).json(emailAccountUnavailable(binding));
+        if (access === "migration") return res.status(409).json(migrationRequired);
+        if (!access) return res.status(404).json({ error: "Attachment not found" });
+      } else if (
+        !attachment || attachment.metadata?.accountScoped === true || !username ||
+        (attachment.metadata?.senderUsername !== username && attachment.metadata?.recipientUsername !== username)
       ) {
         return res.status(404).json({ error: "Attachment not found" });
       }
@@ -2032,7 +2215,7 @@ app.get(
   },
 );
 
-app.get("/api/chat/images/:imageId", requireSession, async (req, res) => {
+app.get("/api/chat/images/:imageId", requireChatSession, async (req, res) => {
   const { imageId } = req.params;
 
   if (!/^[a-fA-F0-9]{24}$/.test(imageId)) {
@@ -2044,13 +2227,16 @@ app.get("/api/chat/images/:imageId", requireSession, async (req, res) => {
     const image = await chatImagesBucket.find({ _id: id }).next();
     const username = normalizeMessagingUsername(req.user.piUsername);
 
-    if (
-      !image ||
-      !username ||
-      (
-        image.metadata?.senderUsername !== username &&
-        image.metadata?.recipientUsername !== username
-      )
+    const { accountId } = req.user;
+    if (accountId) {
+      const access = await chatAttachmentAccess(image, "imageId", accountId);
+      const binding = await findEmailAccount(db, accountId);
+      if (binding?.state !== "active") return res.status(403).json(emailAccountUnavailable(binding));
+      if (access === "migration") return res.status(409).json(migrationRequired);
+      if (!access) return res.status(404).json({ error: "Image not found" });
+    } else if (
+      !image || image.metadata?.accountScoped === true || !username ||
+      (image.metadata?.senderUsername !== username && image.metadata?.recipientUsername !== username)
     ) {
       return res.status(404).json({ error: "Image not found" });
     }
@@ -2103,78 +2289,19 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Auth: Verify Pi token and create session
-app.post("/api/auth/verify", express.json(), async (req, res) => {
-  const { accessToken } = req.body;
-
-  if (!accessToken) {
-  return res.status(400).json({ error: "Missing accessToken" });
-}
-
-  try {
-    // In production: verify token with Pi server
-    const piResponse = await fetch("https://api.minepi.com/v2/me", {
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-  },
-});
-
-if (!piResponse.ok) {
-  return res.status(401).json({ error: "Invalid Pi access token" });
-}
-
-const piUser = await piResponse.json();
-const piUsername = piUser.username;
-if (!piUsername) {
-  return res.status(401).json({ error: "Pi user identity not available" });
-}
-    const userId = `pi_${piUsername}`;
-    const sessionToken = crypto.randomBytes(32).toString("hex");
-
-        const messagingUsername = normalizeMessagingUsername(piUsername);
-
-    if (!messagingUsername) {
-      return res.status(401).json({
-        error: "Invalid Pi username",
-      });
-    }
-
-    await emailUsersCollection.updateOne(
-      { _id: messagingUsername },
-      {
-        $set: {
-          userId,
-          piUsername: messagingUsername,
-        },
-        $setOnInsert: {
-          createdAt: Date.now(),
-        },
-      },
-      { upsert: true },
-    );
-
-    users.set(userId, {
-      id: userId,
-      piUsername,
-      accessToken,
-      status: "available",
-      statusText: "",
-      createdAt: new Date(),
-    });
-
-    userSessions.set(sessionToken, { userId, piUsername, accessToken, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
-
-    res.json({ sessionToken, userId, piUsername, message: "Authenticated" });
-  } catch (error) {
-    console.error("Auth error:", error);
-    res.status(500).json({ error: "Authentication failed" });
-  }
-});
+app.post("/api/auth/verify", express.json(), createVerifyPiLogin({
+  db, emailUsersCollection, users, userSessions,
+  normalizeMessagingUsername, bindAccounts,
+}));
 // Revoke the current authenticated session
-app.post("/api/auth/logout", requireSession, (req, res) => {
+app.post("/api/auth/logout", authenticateSession, (req, res) => {
   const sessionToken = req.headers.authorization.substring(7);
 
   userSessions.delete(sessionToken);
+  disconnectEmailSession(sessionToken);
+  disconnectChatSession(sessionToken);
+  accountCalls?.disconnectSession(sessionToken);
+  accountGroups?.disconnectSession(sessionToken);
   for (const socket of io.sockets.sockets.values()) {
   if (socket.sessionToken === sessionToken) {
     socket.disconnect(true);
@@ -2287,7 +2414,7 @@ app.post("/api/messages/:userId", requireSession, express.json(), (req, res) => 
   res.json(message);
 });
 
-app.get("/api/calls/ice-servers", requireSession, async (req, res) => {
+app.get("/api/calls/ice-servers", accountCalls?.requireCallsSession ?? requireSession, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const cloudflareId = process.env.CLOUDFLARE_TURN_TOKEN_ID?.trim();
   const cloudflareToken = process.env.CLOUDFLARE_TURN_API_TOKEN?.trim();
@@ -2436,8 +2563,9 @@ app.get("/api/calls/ice-servers", requireSession, async (req, res) => {
 
 app.delete(
   "/api/chat/messages/:senderUsername/:messageId",
-  requireSession,
-  async (req, res) => {
+  requireChatSession,
+  async (req, res, next) => {
+    if (req.user.accountId) return deleteAccountChatMessage(req, res, next);
     const username = normalizeMessagingUsername(req.user.piUsername);
     const sender = normalizeMessagingUsername(req.params.senderUsername);
     const messageId = req.params.messageId;
@@ -2459,6 +2587,7 @@ app.delete(
 
     try {
       const filter = {
+        ...legacyChat,
         id: messageId,
         senderUsername: exactUsername(sender),
         $or: [
@@ -2642,6 +2771,12 @@ io.use((socket, next) => {
     return next(new Error("Invalid or expired session"));
   }
 
+  if (session.accountId) {
+    const error = new Error(migrationRequired.error);
+    error.data = { code: migrationRequired.code };
+    return next(error);
+  }
+
   socket.userId = session.userId;
   socket.piUsername = session.piUsername;
   socket.sessionToken = sessionToken;
@@ -2677,6 +2812,7 @@ io.on("connection", (socket) => {
     try {
       const messages = await messagesCollection
         .find({
+          ...legacyChat,
           deletedFor: { $ne: messagingUsername },
           $or: [
             {
@@ -2696,6 +2832,7 @@ io.on("connection", (socket) => {
 
       const deletedMessages = await messagesCollection
         .find({
+          ...legacyChat,
           deletedFor: messagingUsername,
           $or: [
             {
@@ -2800,6 +2937,7 @@ io.on("connection", (socket) => {
       try {
         imageRecord = await chatImagesBucket.find({
           _id: new ObjectId(imageId),
+          "metadata.accountScoped": { $ne: true },
           "metadata.ownerUserId": socket.userId,
           "metadata.senderUsername": messagingUsername,
           "metadata.recipientUsername": recipient,
@@ -2841,6 +2979,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
   try {
     attachmentRecord = await chatAttachmentsBucket.find({
       _id: new ObjectId(attachmentId),
+      "metadata.accountScoped": { $ne: true },
       "metadata.ownerUserId": socket.userId,
       "metadata.senderUsername": messagingUsername,
       "metadata.recipientUsername": recipient,
@@ -2943,6 +3082,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
   });
 
   const filter = {
+    ...legacyChat,
     id: { $in: [...new Set(ids)] },
     senderUsername: exactUsername(sender),
     recipientUsername: exactUsername(messagingUsername),

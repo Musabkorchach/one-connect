@@ -6,11 +6,6 @@ type OutputMediaDevices = MediaDevices & {
   selectAudioOutput?: () => Promise<MediaDeviceInfo>;
 };
 
-export function supportsCallAudioOutput(element: HTMLMediaElement): boolean {
-  return typeof (element as OutputMediaElement).setSinkId === "function" &&
-    typeof navigator.mediaDevices?.enumerateDevices === "function";
-}
-
 export async function getCallAudioOutputs(
   element: HTMLMediaElement,
 ): Promise<MediaDeviceInfo[]> {

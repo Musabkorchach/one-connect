@@ -1,3 +1,7 @@
+import { insertWithScopedFile, accountWrites, respondToBlockedWrite, AccountWriteRejected } from "./account-write-fence.js";
+import { carryMailQuota, settleMailSubmission, trackMailSubmission } from "./account-external-operations.js";
+import { findActiveEmailAccount } from "./email-account-access.js";
+import { senderEmailKey } from "./email-account-access.js";
 import crypto from "node:crypto";
 import { ObjectId } from "mongodb";
 import {
@@ -26,7 +30,8 @@ async function reserveDailyQuota(collection, key, limit) {
 export function registerExternalEmailRoutes({
   app,
   db,
-  io,
+  writeAccount,
+  publishEmailEvent,
   requireSession,
   normalizeMessagingUsername,
   emailForUser,
@@ -38,6 +43,8 @@ export function registerExternalEmailRoutes({
   app.post("/api/emails/external", requireSession, async (req, res) => {
     const username = normalizeMessagingUsername(req.user.piUsername);
     const data = req.body;
+    const { accountId } = req.user;
+    const mutations = accountWrites(emails, writeAccount, accountId);
 
     if (!username) {
       return res.status(401).json({ error: "Invalid user identity" });
@@ -85,16 +92,13 @@ export function registerExternalEmailRoutes({
     try {
       getMailgunConfig();
 
-      const existing = await emails.findOne({
-        senderUsername: username,
-        id: data.id,
-      });
+      const existing = await emails.findOne(senderEmailKey(accountId, username, data.id));
 
       if (existing) {
         const sameRequest =
           existing.type === "external" &&
           existing.direction === "outgoing" &&
-          existing.ownerUsername === username &&
+          (accountId ? existing.ownerAccountId === accountId : existing.ownerUsername === username) &&
           existing.externalAddress === recipient &&
           existing.subject === subject &&
           existing.body === data.body &&
@@ -107,7 +111,7 @@ export function registerExternalEmailRoutes({
         }
 
         if (existing.submissionState === "accepted") {
-          return res.json({ email: emailForUser(existing, username) });
+          return res.json({ email: emailForUser(existing, username, accountId) });
         }
 
         return res.status(409).json({
@@ -122,8 +126,14 @@ export function registerExternalEmailRoutes({
       if (attachmentId) {
         const file = await emailAttachmentsBucket.find({
           _id: new ObjectId(attachmentId),
-          "metadata.ownerUserId": req.user.userId,
-          "metadata.senderUsername": username,
+          ...(accountId ? {
+            "metadata.accountScoped": true,
+            "metadata.ownerAccountId": accountId,
+          } : {
+            "metadata.accountScoped": { $ne: true },
+            "metadata.ownerUserId": req.user.userId,
+            "metadata.senderUsername": username,
+          }),
           "metadata.externalAddress": recipient,
         }).next();
 
@@ -168,7 +178,12 @@ export function registerExternalEmailRoutes({
 
       record = {
         _id: new ObjectId(),
-        id: data.id,
+        ...(accountId ? {
+          accountScoped: true,
+          accountMessageId: data.id,
+          senderAccountId: accountId,
+          ownerAccountId: accountId,
+        } : { id: data.id }),
         threadId: crypto.randomUUID(),
         type: "external",
         direction: "outgoing",
@@ -191,7 +206,7 @@ export function registerExternalEmailRoutes({
       };
 
       try {
-        await emails.insertOne(record);
+        await insertWithScopedFile(db, writeAccount, accountId, emails, record, "email_attachments", record.attachmentId);
       } catch (error) {
         if (error?.code !== 11000) throw error;
 
@@ -201,11 +216,14 @@ export function registerExternalEmailRoutes({
       }
 
       const day = new Date().toISOString().slice(0, 10);
-      const userAllowed = await reserveDailyQuota(
-        usage,
-        `user:${username}:${day}`,
-        10,
-      );
+      const userQuotaKey = accountId
+        ? await writeAccount(accountId, async (session) => {
+          const binding = await findActiveEmailAccount(db, accountId);
+          if (!binding) throw new AccountWriteRejected();
+          return carryMailQuota(db, accountId, binding._id, day, session);
+        })
+        : `user:${username}:${day}`;
+      const userAllowed = await reserveDailyQuota(usage, userQuotaKey, 10);
       const appAllowed = userAllowed && await reserveDailyQuota(
         usage,
         `app:${day}`,
@@ -213,7 +231,7 @@ export function registerExternalEmailRoutes({
       );
 
       if (!appAllowed) {
-        await emails.updateOne(
+        await mutations.updateOne(
           { _id: record._id },
           {
             $set: {
@@ -228,14 +246,21 @@ export function registerExternalEmailRoutes({
         });
       }
 
-      await emails.updateOne(
-        { _id: record._id },
-        { $set: { submissionState: "submitting" } },
-      );
+      if (accountId) {
+        await writeAccount(accountId, async (session) => {
+          const updated = await emails.updateOne({ _id: record._id, ownerAccountId: accountId, submissionState: "preparing" },
+            { $set: { submissionState: "submitting" } }, { session });
+          if (!updated.matchedCount) throw new AccountWriteRejected();
+          await trackMailSubmission(db, accountId, record._id, session);
+        });
+      } else {
+        await mutations.updateOne({ _id: record._id }, { $set: { submissionState: "submitting" } });
+      }
 
       let confirmation;
 
       try {
+        if (accountId && !await findActiveEmailAccount(db, accountId)) throw new AccountWriteRejected();
         confirmation = await sendMailgunEmail({
           messageId: record._id.toString(),
           senderUsername: username,
@@ -250,7 +275,10 @@ export function registerExternalEmailRoutes({
           error instanceof MailgunSendError &&
           error.outcome !== "unknown";
 
-        await emails.updateOne(
+        if (accountId && (failed || error instanceof AccountWriteRejected)) {
+          await settleMailSubmission(db, accountId, record._id);
+        }
+        await mutations.updateOne(
           { _id: record._id, submissionState: "submitting" },
           {
             $set: {
@@ -263,7 +291,8 @@ export function registerExternalEmailRoutes({
         throw error;
       }
 
-      await emails.updateOne(
+      if (accountId) await settleMailSubmission(db, accountId, record._id);
+      await mutations.updateOne(
         { _id: record._id },
         {
           $set: {
@@ -274,12 +303,13 @@ export function registerExternalEmailRoutes({
       );
 
       const saved = await emails.findOne({ _id: record._id });
-      const email = emailForUser(saved, username);
+      const email = emailForUser(saved, username, accountId);
 
-      io.to(`peer:${username}`).emit("email:new", email);
+      await publishEmailEvent({ accountId, username }, "email:new", email);
 
       return res.status(201).json({ email });
     } catch (error) {
+      if (respondToBlockedWrite(error, res)) return;
       // Do not log provider credentials or email contents.
       console.error("[EXTERNAL EMAIL SEND ERROR]", {
         name: error?.name,

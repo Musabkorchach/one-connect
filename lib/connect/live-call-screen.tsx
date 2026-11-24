@@ -5,7 +5,6 @@ import { useConnect } from "@/contexts/connect-context";
 import type { CallViewState } from "@/lib/connect/use-call-controller";
 import { formatDuration } from "@/lib/connect/data";
 import { Avatar } from "@/components/connect/ui";
-import { CallAudioControls } from "@/components/connect/call-audio-controls";
 import { CallStream } from "./call-stream";
 import {
   IconMic,
@@ -31,7 +30,7 @@ export function LiveCallScreen({
   onVideoEnabledChange: (enabled: boolean) => void;
     onSwitchCamera: () => Promise<void>;
 }) {
-  const { t, lang } = useConnect();
+  const { t } = useConnect();
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
@@ -74,12 +73,16 @@ export function LiveCallScreen({
     >
       <div className="pc-aurora absolute inset-0" />
 
-      {call.kind === "video" && call.remoteStream && (
-        <CallStream
-          stream={call.remoteStream}
-          className="absolute inset-0 h-full w-full object-cover"
-        />
-      )}
+      <CallStream
+        stream={call.remoteStream}
+        playbackLabel={t.unmute}
+        outputLabel={t.speaker}
+        className={
+          hasVideo
+            ? "absolute inset-0 h-full w-full object-cover"
+            : "sr-only"
+        }
+      />
 
       <div className="pointer-events-none absolute inset-0 bg-black/30" />
 
@@ -87,6 +90,8 @@ export function LiveCallScreen({
         <div className="absolute right-4 top-24 z-10 h-40 w-28 overflow-hidden rounded-2xl border border-white/20 bg-black shadow-xl">
           <CallStream
             stream={call.localStream}
+            muted
+            playbackLabel={t.camera}
                         className={
               call.cameraFacingMode === "user"
                 ? "h-full w-full -scale-x-100 object-cover"
@@ -114,11 +119,6 @@ export function LiveCallScreen({
       </div>
 
       <div className="pc-safe-bottom relative z-[5] px-6 pb-8">
-        {call.audio && call.remoteStream && (
-          <div className="mb-4 text-white">
-            <CallAudioControls audio={call.audio} blocked={call.playbackBlocked} lang={lang} />
-          </div>
-        )}
         {!incoming && (
           <div className="mb-6 flex justify-center gap-4">
                         {call.kind === "video" && (

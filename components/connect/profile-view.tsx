@@ -17,47 +17,12 @@ import {
 import { LANGUAGES, fileToAvatar, type LangId, type UserStatus } from "@/lib/connect/data";
 import { IconLogout } from "./icons";
 import { usePiAuth } from "@/contexts/pi-auth-context";
-import { PRODUCT_CONFIG } from "@/lib/product-config";
+import { AccountSubscriptionStatus } from "./account-subscription-status";
 
 export function ProfileView() {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
-  const { sdk, products, restoredPurchases, premiumActive, setPremiumActive } = usePiAuth();
+  const { sessionToken } = usePiAuth();
   const [editOpen, setEditOpen] = useState(false);
-  const [premiumBusy, setPremiumBusy] = useState(false);
-
-  const premiumProduct = products?.find(
-    (product) => product.id === PRODUCT_CONFIG.PRODUCT_6a7b58c52ac65f143bd43595,
-  );
-  const restoredList = Array.isArray(restoredPurchases)
-    ? restoredPurchases
-    : (restoredPurchases as unknown as { purchases?: { productId: string; quantity: number }[] } | null)?.purchases;
-  const premiumQuantity = restoredList?.find(
-    (purchase) => purchase.productId === premiumProduct?.slug,
-  )?.quantity ?? 0;
-
-  const buyPremium = async () => {
-    if (!premiumProduct || !sdk || premiumBusy) return;
-    setPremiumBusy(true);
-    try {
-      const result = await sdk.makePurchase(premiumProduct.slug);
-      if (result.ok) {
-        await setPremiumActive(true);
-        pushToast(`${premiumProduct.name} purchased successfully.`, "success");
-      }
-    } catch (error) {
-      const code = typeof error === "object" && error !== null && "code" in error
-        ? String(error.code)
-        : "purchase_error";
-      const message = code === "purchase_cancelled"
-        ? "Purchase cancelled."
-        : code === "product_not_found"
-          ? "Premium Access is currently unavailable."
-          : "Purchase could not be completed.";
-      pushToast(message, "error");
-    } finally {
-      setPremiumBusy(false);
-    }
-  };
   const [langOpen, setLangOpen] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -152,47 +117,11 @@ export function ProfileView() {
         </button>
       </div>
 
-      {/* future premium access — intentionally limited to Profile/Settings */}
-      <div className="mt-4 px-4">
-        <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">Premium Access</h3>
-        <div className="rounded-2xl pc-glass p-4">
-          <div className="flex items-start gap-3">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gold/15 text-gold">
-              <IconSparkle className="h-5 w-5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="font-semibold text-foreground">{premiumProduct?.name || "One Connect Premium Access"}</p>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                {premiumProduct?.description || "Future premium access for One Connect. Pricing and subscription rules will be finalized after backend integration."}
-              </p>
-              {premiumQuantity > 0 && (
-                <p className="mt-2 text-xs font-semibold text-success">Access restored</p>
-              )}
-            </div>
-          </div>
-          {premiumActive ? (
-            <div className="mt-4 rounded-xl bg-success/10 px-4 py-3 text-center text-sm font-semibold text-success">
-              Premium Active
-            </div>
-          ) : (
-            <Button
-              variant="primary"
-              className="mt-4 w-full py-3"
-              disabled={!premiumProduct || !sdk || premiumBusy}
-              onClick={buyPremium}
-            >
-              {premiumBusy
-                ? "Processing..."
-                : premiumProduct
-                  ? `Get Premium Access · ${premiumProduct.price_in_pi} Pi`
-                  : "Premium Access unavailable"}
-            </Button>
-          )}
-          {!premiumProduct && products !== null && (
-            <p className="mt-2 text-center text-xs text-destructive">This product is not currently available.</p>
-          )}
+      {sessionToken && (
+        <div className="mt-4 px-4">
+          <AccountSubscriptionStatus sessionToken={sessionToken} language={profile.language} />
         </div>
-      </div>
+      )}
 
       {/* about */}
       <div className="mt-4 px-4">

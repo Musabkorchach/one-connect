@@ -498,7 +498,7 @@ function MessageList({
   locale: string;
   t: ReturnType<typeof useConnect>["t"];
 }) {
-  const { deleteMessage } = useConnect();
+  const { deleteMessage, pushToast } = useConnect();
   const [selected, setSelected] = useState<Message | null>(null);
   const [deleting, setDeleting] = useState(false);
   const deletingRef = useRef(false);
@@ -551,7 +551,7 @@ function MessageList({
               key={`${m.fromMe ? "out" : "in"}:${m.id}`}
               data-read-message-id={!m.fromMe ? m.id : undefined}
             >
-              <Bubble m={m} locale={locale} t={t} />
+              <ConversationBubble m={m} locale={locale} t={t} pushToast={pushToast} />
 
               <div
                 className={cx(
@@ -594,12 +594,13 @@ function MessageList({
 function ChatImage({
   imageId,
   fileName,
+  pushToast,
 }: {
   imageId: string;
   fileName?: string;
+  pushToast: (message: string) => void;
 }) {
   const { sessionToken } = usePiAuth();
-  const { pushToast } = useConnect();
   const [imageBlob, setImageBlob] = useState<Blob | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -857,14 +858,16 @@ function ChatAttachment({
   );
 }
 
-function Bubble({
+export function ConversationBubble({
   m,
   locale,
   t,
+  pushToast,
 }: {
   m: Message;
   locale: string;
   t: ReturnType<typeof useConnect>["t"];
+  pushToast: (message: string) => void;
 }) {
   const mine = m.fromMe;
 
@@ -873,7 +876,7 @@ function Bubble({
       <div className={cx("flex pc-fade-up", mine ? "justify-end" : "justify-start")}>
         <div className={cx("max-w-[70%] overflow-hidden rounded-2xl p-1", mine ? "bg-primary/20" : "bg-card")}>
           {m.imageId ? (
-            <ChatImage imageId={m.imageId} fileName={m.fileName} />
+            <ChatImage imageId={m.imageId} fileName={m.fileName} pushToast={pushToast} />
           ) : (
             <div className="flex aspect-[4/3] w-52 items-center justify-center rounded-xl bg-muted/40 px-3 text-center text-xs text-muted-foreground">
               Image content was not uploaded.

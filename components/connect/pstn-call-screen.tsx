@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
+import { formatPstnQuotaReset } from "@/lib/api-client";
 import type { PstnCallState } from "@/lib/connect/use-pstn-call-controller";
-import { useConnect } from "@/contexts/connect-context";
-import { CallAudioControls } from "./call-audio-controls";
 
 export function PstnCallScreen({
   call,
@@ -16,7 +15,6 @@ export function PstnCallScreen({
   onMutedChange: (muted: boolean) => void;
 }) {
   const [seconds, setSeconds] = useState(0);
-  const { lang } = useConnect();
 
   useEffect(() => {
     const connectedAt = call.connectedAt;
@@ -71,50 +69,13 @@ export function PstnCallScreen({
       )}
 
       <p className="mt-4 text-sm text-muted-foreground">
-        Test call · Maximum 2 minutes
+        Maximum 2 minutes
       </p>
 
-      {call.phase === "connected" && (
-        <div className="mt-6 w-full max-w-xs space-y-4 text-start" dir="rtl">
-          <p className="text-sm font-semibold">فحص الصوت</p>
-
-          <div>
-            <p className="mb-1 text-xs text-muted-foreground">
-              الميكروفون — صوتك
-              {" · "}
-              {call.inputVolume === undefined
-                ? "بانتظار القياس"
-                : `${Math.round(call.inputVolume * 100)}%`}
-            </p>
-            <progress
-              aria-label="مستوى صوت الميكروفون"
-              max={1}
-              value={call.inputVolume ?? 0}
-              className="h-3 w-full accent-teal-400"
-            />
-          </div>
-
-          <div>
-            <p className="mb-1 text-xs text-muted-foreground">
-              الصوت المستقبَل — الطرف الآخر
-              {" · "}
-              {call.outputVolume === undefined
-                ? "بانتظار القياس"
-                : `${Math.round(call.outputVolume * 100)}%`}
-            </p>
-            <progress
-              aria-label="مستوى الصوت المستقبَل"
-              max={1}
-              value={call.outputVolume ?? 0}
-              className="h-3 w-full accent-teal-400"
-            />
-          </div>
-         </div>
-       )}
-      {(call.phase === "connected" || call.playbackBlocked) && (
-        <div className="mt-4">
-          <CallAudioControls audio={call.audio} blocked={call.playbackBlocked} lang={lang} />
-        </div>
+      {call.quotaResetsAt !== undefined && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Daily quota resets at {formatPstnQuotaReset(call.quotaResetsAt)}
+        </p>
       )}
       <div className="mt-12 flex items-center justify-center gap-8">
         <button

@@ -1,7 +1,7 @@
 import io from "socket.io-client";
 import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 
-const API_URL =
+export const API_URL =
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
@@ -405,7 +405,10 @@ export async function verifyPiAuth(accessToken: string) {
     body: JSON.stringify({ accessToken }),
   });
 
-  if (!response.ok) throw new Error("Auth verification failed");
+  if (!response.ok) {
+    const { code } = await response.json().catch(() => ({})) ?? {};
+    throw Object.assign(new Error("Auth verification failed"), { code });
+  }
   return response.json();
 }
 
@@ -466,6 +469,7 @@ export async function deleteChatMessage(
   sessionToken: string,
   senderUsername: string,
   messageId: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!sessionToken) {
     throw new Error("Please sign in before deleting messages.");
@@ -485,6 +489,7 @@ export async function deleteChatMessage(
     `${API_URL}/api/chat/messages/${encodeURIComponent(sender)}/${encodeURIComponent(messageId)}`,
     {
       method: "DELETE",
+      signal,
       headers: {
         Authorization: `Bearer ${sessionToken}`,
       },
@@ -914,6 +919,7 @@ export async function uploadChatAttachment(
   kind: "file" | "video" | "voice",
   file: File,
   sessionToken: string,
+  options?: { accountConversation?: boolean; signal?: AbortSignal },
 ): Promise<{
   attachmentId: string;
   kind: "file" | "video" | "voice";
@@ -932,7 +938,7 @@ if (!file.size || file.size > maxSize) {
 }
 
   const formData = new FormData();
-  formData.append("recipient", recipient);
+  formData.append(options?.accountConversation ? "conversationId" : "recipient", recipient);
   formData.append("kind", kind);
   formData.append("file", file);
 
@@ -942,6 +948,7 @@ if (!file.size || file.size > maxSize) {
       Authorization: `Bearer ${sessionToken}`,
     },
     body: formData,
+    signal: options?.signal,
   });
 
   if (!response.ok) {
@@ -982,7 +989,8 @@ if (!file.size || file.size > maxSize) {
 export async function uploadChatImage(
   recipient: string,
   file: File,
-  sessionToken: string
+  sessionToken: string,
+  options?: { accountConversation?: boolean; signal?: AbortSignal },
 ): Promise<{
   imageId: string;
   fileName: string;
@@ -994,7 +1002,7 @@ export async function uploadChatImage(
   }
 
   const formData = new FormData();
-  formData.append("recipient", recipient);
+  formData.append(options?.accountConversation ? "conversationId" : "recipient", recipient);
   formData.append("file", file);
 
   const response = await fetch(`${API_URL}/api/chat/images`, {
@@ -1003,6 +1011,7 @@ export async function uploadChatImage(
       Authorization: `Bearer ${sessionToken}`,
     },
     body: formData,
+    signal: options?.signal,
   });
 
   if (!response.ok) {
@@ -1037,6 +1046,72 @@ export async function uploadFile(userId: string, file: File) {
 
   if (!response.ok) throw new Error("File upload failed");
   return response.json();
+}
+
+export function createAccountChatSocket(sessionToken: string) {
+  return io(WS_URL.replace(/\/$/, "") + "/chat", {
+    auth: { sessionToken }, autoConnect: false, forceNew: true, reconnectionAttempts: 5,
+  });
+}
+
+export class AccountChatError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+export async function requestAccountChat(
+  sessionToken: string,
+  signal: AbortSignal,
+  request: { conversationId?: string; username?: string } = {},
+): Promise<unknown> {
+  const suffix = request.conversationId ? "/" + encodeURIComponent(request.conversationId) : "";
+  const response = await fetch(API_URL + "/api/chat/conversations" + suffix, {
+    method: request.username === undefined ? "GET" : "POST",
+    headers: { Authorization: "Bearer " + sessionToken, "Content-Type": "application/json" },
+    body: request.username === undefined ? undefined : JSON.stringify({ username: request.username }),
+    cache: "no-store",
+    signal,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new AccountChatError(
+      typeof data?.code === "string" ? data.code : "CHAT_UNAVAILABLE",
+      typeof data?.error === "string" ? data.error : "Conversation request failed.",
+    );
+  }
+  return data;
+}
+
+export function createAccountEmailSocket(sessionToken: string) {
+  return io(WS_URL.replace(/\/$/, "") + "/email", {
+    auth: { sessionToken },
+    autoConnect: false,
+    forceNew: true,
+    reconnectionAttempts: 5,
+  });
+}
+
+export class AccountMailboxError extends Error {
+  constructor(readonly code: string) {
+    super("Account mailbox is unavailable");
+  }
+}
+
+export async function getAccountMailbox(sessionToken: string, signal: AbortSignal): Promise<unknown[]> {
+  const response = await fetch(API_URL + "/api/emails", {
+    headers: { Authorization: "Bearer " + sessionToken },
+    cache: "no-store",
+    signal,
+  });
+  const data = await response.json();
+  if (!response.ok) throw new AccountMailboxError(data?.code ?? "EMAIL_UNAVAILABLE");
+  // Accept only snapshots marked as account-scoped by the email API.
+  if (data?.legacyHistory?.code !== "ACCOUNT_MIGRATION_REQUIRED") {
+    throw new AccountMailboxError("ACCOUNT_MIGRATION_REQUIRED");
+  }
+  if (!Array.isArray(data.emails)) throw new Error("Invalid account email response");
+  return data.emails;
 }
 
 export async function getInternalEmails(
@@ -1313,6 +1388,29 @@ export async function downloadEmailAttachment(
   }
 
   return blob;
+}
+
+export function createAccountGroupSocket(sessionToken: string) {
+  return io(WS_URL.replace(/\/$/, "") + "/groups", {
+    auth: { sessionToken }, autoConnect: false, forceNew: true, reconnectionAttempts: 5,
+  });
+}
+
+export async function requestAccountGroup(
+  sessionToken: string, signal: AbortSignal, path = "",
+  method: "GET" | "POST" | "DELETE" = "GET", body?: Record<string, unknown>,
+): Promise<unknown> {
+  const response = await fetch(API_URL + "/api/groups" + path, {
+    method, signal, cache: "no-store",
+    headers: { Authorization: "Bearer " + sessionToken, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new AccountChatError(
+    data?.code ?? (response.status === 404 ? "GROUP_NOT_FOUND" : "GROUP_UNAVAILABLE"),
+    data?.error ?? "Group request failed.",
+  );
+  return data;
 }
 
 export interface GroupRecord {
@@ -1763,12 +1861,19 @@ export function sendGroupCallEvent<K extends keyof GroupCallOutgoingEvents>(
   return true;
 }
 
+export function formatPstnQuotaReset(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
+  }).format(timestamp) + " UTC";
+}
+
 export interface PreparedPstnCall {
   attemptId: string;
   phone: string;
   token: string;
   expiresAt: number;
   maxDurationSeconds: number;
+  quotaResetsAt?: number;
 }
 
 export async function preparePstnCall(
@@ -1802,8 +1907,12 @@ export async function preparePstnCall(
       typeof data.error === "string"
         ? data.error
         : "Unable to prepare the phone call.";
-
-    throw new Error(message);
+    const reset = data && typeof data === "object" && "quotaResetsAt" in data
+      ? data.quotaResetsAt
+      : undefined;
+    throw new Error(typeof reset === "number" && Number.isSafeInteger(reset)
+      ? `${message} Resets at ${formatPstnQuotaReset(reset)}.`
+      : message);
   }
 
   if (!data || typeof data !== "object") {
@@ -1837,6 +1946,9 @@ export async function preparePstnCall(
     token: call.token,
     expiresAt: call.expiresAt,
     maxDurationSeconds: call.maxDurationSeconds,
+    quotaResetsAt: typeof call.quotaResetsAt === "number" && Number.isSafeInteger(call.quotaResetsAt)
+      ? call.quotaResetsAt
+      : undefined,
   };
 }
 
@@ -1848,6 +1960,7 @@ export interface InvoiceDraftStateRecord {
 export async function getInvoiceDraftState(
   sessionToken: string,
   signal?: AbortSignal,
+  accountScoped = false,
 ): Promise<InvoiceDraftStateRecord> {
   if (!sessionToken.trim()) {
     throw new Error("An authenticated session is required");
@@ -1881,6 +1994,9 @@ export async function getInvoiceDraftState(
   }
 
   const record = payload as Record<string, unknown>;
+  if (accountScoped && (record.legacyHistory as { code?: string } | undefined)?.code !== "ACCOUNT_MIGRATION_REQUIRED") {
+    throw new Error("ACCOUNT_MIGRATION_REQUIRED");
+  }
   const revision = record.revision;
   const blob = record.blob;
 
@@ -1923,6 +2039,7 @@ export async function saveInvoiceDraftState(
   blob: Record<string, unknown>,
   expectedRevision: number,
   sessionToken: string,
+  signal?: AbortSignal,
 ): Promise<number> {
   if (!sessionToken.trim()) {
     throw new Error("An authenticated session is required");
@@ -1940,6 +2057,7 @@ export async function saveInvoiceDraftState(
     `${API_URL}/api/state/connect.invoice-drafts`,
     {
       method: "PUT",
+      signal,
       headers: {
         Authorization: `Bearer ${sessionToken}`,
         "Content-Type": "application/json",
@@ -1983,4 +2101,21 @@ export async function saveInvoiceDraftState(
   }
 
   return revision;
+}
+
+export async function requestPrivateData(
+  sessionToken: string, signal: AbortSignal, path: "/contacts" | "/profile",
+  method: "GET" | "PUT" | "POST" = "GET", body?: Record<string, unknown>,
+): Promise<{ profile?: unknown; contacts?: unknown }> {
+  const response = await fetch(API_URL + "/api" + path, {
+    method, signal, cache: "no-store",
+    headers: { Authorization: "Bearer " + sessionToken, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(typeof data?.error === "string" ? data.error : "Private data request failed.");
+  if (method !== "POST" && data?.legacyHistory?.code !== "ACCOUNT_MIGRATION_REQUIRED") {
+    throw new Error("ACCOUNT_MIGRATION_REQUIRED");
+  }
+  return data;
 }

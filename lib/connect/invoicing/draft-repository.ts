@@ -22,10 +22,12 @@ export async function loadInvoiceDrafts(
   sessionToken: string,
   ownerUserId: string,
   signal?: AbortSignal,
+  accountScoped = false,
 ): Promise<InvoiceDraftSnapshot> {
   const record = await getInvoiceDraftState(
     sessionToken,
     signal,
+    accountScoped,
   );
 
   const blob = record.blob === null
@@ -43,6 +45,7 @@ export async function saveInvoiceDrafts(
   expectedRevision: number,
   sessionToken: string,
   ownerUserId: string,
+  signal?: AbortSignal,
 ): Promise<InvoiceDraftSnapshot> {
   const blob = invoiceDraftsToBlob(drafts, ownerUserId);
 
@@ -50,6 +53,7 @@ export async function saveInvoiceDrafts(
     blob,
     expectedRevision,
     sessionToken,
+    signal,
   );
 
   return {
@@ -63,6 +67,7 @@ export async function createAndSaveInvoiceDraft(
   sessionToken: string,
   ownerUserId: string,
   language: LangId,
+  signal?: AbortSignal,
 ): Promise<{
   draft: InvoiceDraft;
   snapshot: InvoiceDraftSnapshot;
@@ -87,6 +92,7 @@ export async function createAndSaveInvoiceDraft(
     snapshot.revision,
     sessionToken,
     ownerUserId,
+    signal,
   );
 
   return {
@@ -101,6 +107,7 @@ export async function updateAndSaveInvoiceDraft(
   patch: Partial<InvoiceContent>,
   sessionToken: string,
   ownerUserId: string,
+  signal?: AbortSignal,
 ): Promise<{
   draft: InvoiceDraft;
   snapshot: InvoiceDraftSnapshot;
@@ -134,6 +141,7 @@ export async function updateAndSaveInvoiceDraft(
     snapshot.revision,
     sessionToken,
     ownerUserId,
+    signal,
   );
 
   return {

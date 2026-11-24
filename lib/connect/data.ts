@@ -27,6 +27,7 @@ export interface Email {
   fromMe: boolean;
   senderUsername?: string;
   recipientUsername?: string;
+  peerDeleted?: boolean;
   recipient: string;         // @username for internal, email@domain.com for external
   senderName: string;        // display name for sender
   color: number;             // hue for avatar (internal only; external uses gray)
@@ -616,6 +617,7 @@ export function emailsToBlob(items: Email[]): Record<string, unknown> {
 function parseExternalEmail(
   value: unknown,
   ownUsername: string,
+  mode: "legacy" | "account",
 ): Email | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -627,7 +629,7 @@ function parseExternalEmail(
   if (
     !/^[a-z0-9._-]{1,32}$/.test(me) ||
     e.type !== "external" ||
-    e.ownerUsername !== me ||
+    (mode === "legacy" && e.ownerUsername !== me) ||
     typeof e.id !== "string" ||
     !/^[a-f0-9]{24}$/i.test(e.id) ||
     typeof e.threadId !== "string" ||
@@ -655,8 +657,8 @@ function parseExternalEmail(
   const fromMe = e.fromMe;
 
   if (
-    (fromMe && e.senderUsername !== me) ||
-    (!fromMe && e.recipientUsername !== me)
+    mode === "legacy" &&
+    (fromMe ? e.senderUsername !== me : e.recipientUsername !== me)
   ) {
     return null;
   }
@@ -715,6 +717,7 @@ function parseExternalEmail(
 export function parseInternalEmail(
   value: unknown,
   ownUsername: string,
+  mode: "legacy" | "account" = "legacy",
 ): Email | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -722,7 +725,7 @@ export function parseInternalEmail(
 
   const e = value as Record<string, unknown>;
   if (e.type === "external") {
-    return parseExternalEmail(value, ownUsername);
+    return parseExternalEmail(value, ownUsername, mode);
   }
   const me = ownUsername.trim().replace(/^@/, "").toLowerCase();
   const usernamePattern = /^[a-z0-9._-]{1,32}$/;
@@ -735,10 +738,6 @@ export function parseInternalEmail(
     typeof e.threadId !== "string" ||
     e.threadId.length === 0 ||
     e.threadId.length > 80 ||
-    typeof e.senderUsername !== "string" ||
-    !usernamePattern.test(e.senderUsername) ||
-    typeof e.recipientUsername !== "string" ||
-    !usernamePattern.test(e.recipientUsername) ||
     typeof e.subject !== "string" ||
     e.subject.length > 120 ||
     typeof e.body !== "string" ||
@@ -782,15 +781,18 @@ export function parseInternalEmail(
     };
   }
 
-  const fromMe = e.senderUsername === me;
+  const fromMe = mode === "account" ? e.fromMe : e.senderUsername === me;
 
-  if (!fromMe && e.recipientUsername !== me) {
+  if (typeof fromMe !== "boolean" || (mode === "legacy" && !fromMe && e.recipientUsername !== me)) {
     return null;
   }
 
-  const counterpart = fromMe
-    ? e.recipientUsername
-    : e.senderUsername;
+  const sender = typeof e.senderUsername === "string" && usernamePattern.test(e.senderUsername) ? e.senderUsername : undefined;
+  const recipient = typeof e.recipientUsername === "string" && usernamePattern.test(e.recipientUsername) ? e.recipientUsername : undefined;
+  const peerDeleted = mode === "account" && e.peerDeleted === true;
+  const counterpart = fromMe ? recipient : sender;
+  if (!(fromMe ? sender : recipient) || (peerDeleted ? counterpart !== undefined : !counterpart)) return null;
+  const deletedLabel = "حساب محذوف";
 
   return {
     id: e.id,
@@ -798,11 +800,12 @@ export function parseInternalEmail(
     type: "internal",
     folder: fromMe ? "sent" : "inbox",
     fromMe,
-    senderUsername: e.senderUsername,
-    recipientUsername: e.recipientUsername,
-    recipient: `@${e.recipientUsername}`,
-    senderName: `@${counterpart}`,
-    color: hueFromString(counterpart),
+    senderUsername: sender,
+    recipientUsername: recipient,
+    ...(peerDeleted ? { peerDeleted: true } : {}),
+    recipient: recipient ? `@${recipient}` : deletedLabel,
+    senderName: counterpart ? `@${counterpart}` : deletedLabel,
+    color: counterpart ? hueFromString(counterpart) : 0,
     subject: e.subject,
     body: e.body,
     ...attachment,

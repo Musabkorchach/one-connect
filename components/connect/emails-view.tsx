@@ -20,8 +20,17 @@ import {
 } from "./icons";
 import { formatDate, timeAgo, type Email, type EmailFolder } from "@/lib/connect/data";
 
+type MailboxViewProps = Pick<ReturnType<typeof useConnect>,
+  "t" | "lang" | "emails" | "sendEmail" | "markEmailRead" | "deleteEmail" | "pushToast" | "contacts"
+> & { saveDraft?: ReturnType<typeof useConnect>["saveDraft"] };
+
 export function EmailsView() {
-  const { t, emails } = useConnect();
+  const mailbox = useConnect();
+  return <MailboxView mailbox={mailbox} />;
+}
+
+export function MailboxView({ mailbox }: { mailbox: MailboxViewProps }) {
+  const { t, emails, saveDraft } = mailbox;
   const [folder, setFolder] = useState<EmailFolder>("inbox");
   const [composeOpen, setComposeOpen] = useState(false);
   const [reading, setReading] = useState<Email | null>(null);
@@ -58,7 +67,7 @@ export function EmailsView() {
 
       {/* folder tabs */}
       <div className="flex gap-2 px-4 pt-3">
-        {folders.map((f) => (
+        {folders.filter((f) => f.id !== "drafts" || saveDraft).map((f) => (
           <button
             key={f.id}
             onClick={() => setFolder(f.id)}
@@ -123,7 +132,8 @@ export function EmailsView() {
       )}
 
       <ReadEmail
-        email={reading}
+        mailbox={mailbox}
+        email={saveDraft ? reading : emails.find((email) => email.id === reading?.id) ?? null}
         onClose={() => setReading(null)}
         onReply={(e) => {
           setReading(null);
@@ -133,6 +143,7 @@ export function EmailsView() {
       />
 
       <ComposeEmail
+        mailbox={mailbox}
         open={composeOpen}
         onClose={() => setComposeOpen(false)}
         replyTo={replyTo}
@@ -142,16 +153,18 @@ export function EmailsView() {
 }
 
 function ReadEmail({
+  mailbox,
   email,
   onClose,
   onReply,
 }: {
+  mailbox: MailboxViewProps;
   email: Email | null;
   onClose: () => void;
   onReply: (e: Email) => void;
 }) {
-  const { t, markEmailRead, deleteEmail, lang, pushToast } = useConnect();
-  const { sessionToken } = usePiAuth();
+  const { t, markEmailRead, deleteEmail, lang, pushToast } = mailbox;
+  const { sessionToken, isCurrentSession } = usePiAuth();
   const [confirm, setConfirm] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const downloadingRef = useRef(false);
@@ -184,6 +197,7 @@ function ReadEmail({
       const blob = await downloadEmailAttachment(token, selected.id);
 
       if (
+        !isCurrentSession(token) ||
         downloadContextRef.current.sessionToken !== token ||
         downloadContextRef.current.emailId !== selected.id
       ) {
@@ -208,6 +222,7 @@ function ReadEmail({
       }
     } catch (error) {
       if (
+        !isCurrentSession(token) ||
         downloadContextRef.current.sessionToken !== token ||
         downloadContextRef.current.emailId !== selected.id
       ) {
@@ -290,7 +305,7 @@ function ReadEmail({
             </div>
           )}
 
-          {email.folder !== "drafts" && (
+          {email.folder !== "drafts" && !email.peerDeleted && (
             <Button variant="primary" className="mt-6 w-full py-3.5" onClick={() => onReply(email)}>
               <IconSend className="h-5 w-5 rtl:rotate-180" />
               {t.reply}
@@ -322,15 +337,17 @@ function ReadEmail({
 }
 
 function ComposeEmail({
+  mailbox,
   open,
   onClose,
   replyTo,
 }: {
+  mailbox: MailboxViewProps;
   open: boolean;
   onClose: () => void;
   replyTo: Email | null;
 }) {
-  const { t, sendEmail, saveDraft, pushToast, contacts } = useConnect();
+  const { t, sendEmail, saveDraft, pushToast, contacts } = mailbox;
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -429,7 +446,7 @@ function ComposeEmail({
   };
 
   const draft = () => {
-    if (sendingRef.current) return;
+    if (sendingRef.current || !saveDraft) return;
 
     const recipient = to.trim().toLowerCase();
 
@@ -450,11 +467,11 @@ function ComposeEmail({
         if (!sendingRef.current) onClose();
       }}
       title={t.compose}
-      right={
+      right={saveDraft && (
         <IconButton className="h-9 w-9 text-gold" onClick={draft} aria-label={t.saveDraft}>
           <IconEdit className="h-5 w-5" />
         </IconButton>
-      }
+      )}
     >
       <fieldset
         disabled={sending}
