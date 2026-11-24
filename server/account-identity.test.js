@@ -469,6 +469,7 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
     globalThis.fetch = async (url, options) => {
       if (url === "https://api.minepi.com/v2/me") {
         const token = options.headers.Authorization.slice(7);
+        if (token === "subscription-no-uid") return Response.json({ username: token });
         if (token === "delete-http-different-uid") return Response.json({ uid: "different-uid", username: "delete-http" });
         const username = ["group-audit-owner", "delete-restart-audit", "delete-http", "delete-http-peer", "delete-http-rate", "alice", "bob", "eve", "dan", "fran", "pat", "chat-a", "chat-b", "chat-c", "group-owner", "group-reader", "group-removed", "group-invite", "group-outsider", "owner-transfer", "owner-successor", "owner-reader", "priv-a", "priv-b", "priv-c", "priv-legacy", "call-a", "call-b", "call-c", "phone-a", "phone-b", "delete-fixture", "delete-peer"].includes(token) ? token : undefined;
         return username ? Response.json({ uid: token + "-uid", username }) : new Response(null, { status: 401 });
@@ -529,8 +530,9 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
     child.once("close", (code) => { clearTimeout(timer); reject(new Error(`Email fixture exited ${code}: ${errors}`)); });
   });
 
-  async function request(path, { token, method = "GET", body } = {}) {
+  async function request(path, { token, method = "GET", body, origin } = {}) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    if (origin) headers.Origin = origin;
     if (body && !(body instanceof FormData)) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(body);
@@ -563,6 +565,33 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
   }
   return { request, login, upload, webhook, child, origin: `http://127.0.0.1:${port}` };
 }
+
+test("both authorized subscription previews reach session checks independently of PiNet", async (t) => {
+  const { request, login } = await startEmailTestServer(t, false, { PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460" });
+  const path = "/api/pi-testnet/subscription";
+  const first = "https://demo-kzmid74mzykg7dfhbw4w.vusercontent.net";
+  const second = "https://demo-kzmokzvi7qilj4jvt5pu.vusercontent.net";
+  for (const origin of [first, second, first, second]) {
+    assert.deepEqual(await request(path, { origin }), {
+      status: 401, body: { error: "Missing session token" },
+    });
+    assert.deepEqual(await request(path, { origin, token: "invalid-session" }), {
+      status: 401, body: { error: "Invalid session token" },
+    });
+  }
+
+  const loginResult = await login("subscription-no-uid");
+  assert.equal(loginResult.status, 200);
+  const token = loginResult.body.sessionToken;
+  const ineligible = await request(path, { origin: second, token });
+  assert.equal(ineligible.status, 403);
+  assert.equal(ineligible.body.code, "PI_TESTNET_SESSION_NOT_ELIGIBLE");
+  for (const origin of [undefined, "https://demo-unrelated.vusercontent.net", second + ".example"]) {
+    const forbidden = await request(path, { origin, token });
+    assert.equal(forbidden.status, 403);
+    assert.equal(forbidden.body.code, "PI_TESTNET_ORIGIN_NOT_ALLOWED");
+  }
+});
 
 test("real HTTP email routes isolate generations, preserve recipient copies and reject inactive accounts", async (t) => {
   const db = client.db("oneconnect");

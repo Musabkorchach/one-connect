@@ -20,7 +20,12 @@ export function registerPiTestnetSubscriptions({ app, db, authenticateSession, s
     return async (req, res) => {
       res.set("Cache-Control", "no-store");
       const uid = req.user.verifiedPiUid;
-      if (!uid || req.user.accountId) return res.sendStatus(403);
+      if (!uid || req.user.accountId) {
+        return res.status(403).json({
+          code: "PI_TESTNET_SESSION_NOT_ELIGIBLE",
+          error: "One Connect Testnet subscriptions require a verified Pi session without experimental account binding.",
+        });
+      }
       try {
         indexes ??= collection.createIndex({ uid: 1 }, { unique: true }).catch((error) => { indexes = undefined; throw error; });
         await indexes;

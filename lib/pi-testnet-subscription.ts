@@ -4,8 +4,8 @@ const registeredTestnetOrigin = "https://one-connect-git-develop-musabkorchachs-
 const previewOriginPattern = /^https:\/\/demo-[a-z0-9]+\.vusercontent\.net$/;
 
 export function resolveTestnetSubscriptionServiceId(origin: string, configuredServiceId: string | undefined) {
-  // A preview host is only a candidate. The authenticated endpoint checks it
-  // against the frame currently published by One Connect's Access App link.
+  // A preview host is only a candidate. The server enforces the exact
+  // One Connect Testnet origin allowlist and verifies the Pi session.
   if (origin !== registeredTestnetOrigin && !previewOriginPattern.test(origin)) return null;
   const serviceId = configuredServiceId ?? testnetServiceId;
   return serviceId === testnetServiceId ? serviceId : null;
