@@ -1567,6 +1567,16 @@ test("production group management retains legacy history, roles, and live access
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM14AAAAASUVORK5CYII=", "base64");
   icon.set("kind", "image");
   icon.set("file", new Blob([image], { type: "image/png" }), "group.png");
+  const invalidPhoto = (bytes, name) => {
+    const form = new FormData();
+    form.set("kind", "image");
+    form.set("file", new Blob([bytes], { type: "image/png" }), name);
+    return request(root + "/media", { token: reader, method: "POST", body: form });
+  };
+  assert.equal((await invalidPhoto(Buffer.from("not an image"), "forged.png")).status, 415);
+  const oversize = Buffer.alloc(5 * 1024 * 1024 + 1);
+  image.copy(oversize);
+  assert.equal((await invalidPhoto(oversize, "too-large.png")).status, 413);
   const photo = await request(root + "/media", { token: reader, method: "POST", body: icon });
   assert.equal(photo.status, 201);
   const photoId = photo.body.mediaId;
@@ -1710,10 +1720,15 @@ test("production group management retains legacy history, roles, and live access
   const invitation = accessLink.searchParams.get("groupInvite");
   const join = token => request("/api/group-management/join-request", { token, method: "POST", body: { invitation } });
   assert.equal((await join()).status, 401);
-  assert.equal((await join(invitee)).status, 200);
-  assert.equal((await join(invitee)).status, 200);
+  const beforeApproval = { status: 200, body: { pending: true } };
+  assert.deepEqual(await join(invitee), beforeApproval);
+  assert.deepEqual(await join(invitee), beforeApproval);
   assert.deepEqual((await details(reader)).body.group.joinRequests, ["group-audit-owner"]);
   assert.equal((await details(invitee)).status, 404);
+  assert.equal((await request(root + "/messages?filter=search&q=legacy", { token: invitee })).status, 404);
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${invitee}` },
+  })).status, 404);
   assert.equal((await action(third, "approve-join", { username: "group-audit-owner" })).status, 403);
   assert.equal((await action(reader, "approve-join", { username: "group-audit-owner" })).status, 200);
   assert.equal((await details(invitee)).status, 200);
@@ -1721,10 +1736,21 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await join(owner)).body.code, "GROUP_LINK_UNAVAILABLE");
   const another = await action(reader, "create-link");
   const expired = new URL(another.body.invitationUrl).searchParams.get("groupInvite");
+  assert.equal((await join(owner)).body.code, "GROUP_LINK_UNAVAILABLE");
+  const requestJoin = invitation => request("/api/group-management/join-request", {
+    token: owner, method: "POST", body: { invitation },
+  });
+  assert.deepEqual(await requestJoin(expired), beforeApproval);
   await client.db("oneconnect").collection("chat_groups").updateOne({ _id: new ObjectId(groupId) },
     { $set: { "inviteLink.expiresAt": Date.now() - 1000 } });
-  assert.equal((await request("/api/group-management/join-request", { token: owner, method: "POST",
-    body: { invitation: expired } })).body.code, "GROUP_LINK_UNAVAILABLE");
+  assert.equal((await requestJoin(expired)).body.code, "GROUP_LINK_UNAVAILABLE");
+  assert.equal((await action(reader, "approve-join", { username: "group-owner" })).status, 404);
+  const temporary = new URL((await action(reader, "create-link")).body.invitationUrl).searchParams.get("groupInvite");
+  assert.deepEqual(await requestJoin(temporary), beforeApproval);
+  assert.equal((await action(reader, "revoke-link")).status, 200);
+  assert.equal((await requestJoin(temporary)).body.code, "GROUP_LINK_UNAVAILABLE");
+  assert.equal((await action(reader, "approve-join", { username: "group-owner" })).status, 404);
+  assert.equal((await details(owner)).status, 404);
 
   assert.equal((await action(third, "topic:create", { title: "Unauthorized" })).status, 403);
   const topicResult = await action(reader, "topic:create", { title: "Logistics" });
@@ -1762,6 +1788,18 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await details(third)).body.group.planning.events[0].attending, true);
   assert.equal((await action(reader, "event:close", { id: eventId })).status, 200);
   assert.equal((await action(third, "event:rsvp", { id: eventId, attending: false })).status, 409);
+
+  assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await details(invitee)).status, 404);
+  for (const query of ["filter=search&q=legacy", "filter=media", "filter=files", "filter=links", "topic=" + topicId]) {
+    assert.equal((await request(root + "/messages?" + query, { token: invitee })).status, 404);
+  }
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${invitee}` },
+  })).status, 404);
+  assert.equal((await action(invitee, "poll:vote", { id: pollId, choice: 0 })).status, 404);
+  assert.equal((await action(invitee, "event:rsvp", { id: eventId, attending: true })).status, 404);
+
 
 
 });

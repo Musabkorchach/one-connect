@@ -1495,7 +1495,7 @@ export function getGroupInvitations(token: string, signal: AbortSignal) {
 
 
 export function requestGroupJoin(token: string, invitation: string, signal: AbortSignal) {
-  return groupRequest<{ pending: boolean; groupName: string }>(
+  return groupRequest<{ pending: boolean }>(
     "/api/group-management/join-request", token, "POST", { invitation }, signal);
 }
 

@@ -6,6 +6,7 @@ import { isCurrentOwnershipOffer, ownershipOffer } from "./group-ownership.js";
 
 const accessAppUrl = "https://apppiconnectuvr9006.pinet.com/";
 const inviteLifeMs = 24 * 60 * 60 * 1000;
+const activeInviteExpiry = { $expr: { $gt: ["$inviteLink.expiresAt", { $toLong: "$$NOW" }] } };
 
 function inviteDigest(secret) {
   return createHash("sha256").update(secret).digest("hex");
@@ -102,19 +103,20 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
   }));
 
   app.post("/api/group-management/join-request", requireSession, authenticated(async (req, res, username) => {
+    res.set("Cache-Control", "private, no-store");
     const { invitation } = req.body ?? {};
     if (typeof invitation !== "string" || !/^[a-f0-9]{24}\.[A-Za-z0-9_-]{43}$/.test(invitation)) {
       return error(res, 400, "Invalid invitation link");
     }
     const [id, secret] = invitation.split(".");
     const filter = { _id: new ObjectId(id), "inviteLink.digest": inviteDigest(secret),
-      "inviteLink.expiresAt": { $gt: Date.now() }, state: { $ne: "archived" } };
+      ...activeInviteExpiry, state: { $ne: "archived" } };
     const group = await groups.findOne(filter);
     if (!group) return error(res, 404, "Invitation link has expired or was revoked", "GROUP_LINK_UNAVAILABLE");
     if (group.members.includes(username)) return error(res, 409, "This person is already a member", "GROUP_ALREADY_MEMBER");
     const requests = group.joinRequests ?? [];
     const uid = req.user.verifiedPiUid;
-    if (requests.some(request => request.uid === uid)) return res.json({ pending: true, groupName: group.name });
+    if (requests.some(request => request.uid === uid)) return res.json({ pending: true });
     if (requests.length >= 50) return error(res, 409, "Too many pending join requests");
     const updated = await groups.findOneAndUpdate({
       ...filter, managementRevision: group.managementRevision, members: { $ne: username },
@@ -122,7 +124,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     { returnDocument: "after" });
     if (!updated) return error(res, 409, "Group changed. Refresh and retry.", "GROUP_CONCURRENT_UPDATE");
     await publish(updated);
-    return res.json({ pending: true, groupName: updated.name });
+    return res.json({ pending: true });
   }));
 
   app.get("/api/groups/:groupId/reports/:reportId", requireSession, authenticated(async (req, res, username) => {
@@ -330,7 +332,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
 
     const filter = {
       _id, managementRevision: group.managementRevision ?? { $exists: false },
-      ...((action === "approve-join" || action === "decline-join") && { "inviteLink.expiresAt": { $gt: Date.now() } }),
+      ...((action === "approve-join" || action === "decline-join") && activeInviteExpiry),
       state: { $ne: "archived" }, [invitationResponse ? "invitations" : "members"]: username,
     };
     const at = Date.now();

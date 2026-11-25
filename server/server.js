@@ -440,6 +440,9 @@ function requireSession(req, res, next) {
   });
 }
 
+const groupImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const groupImageLimit = 5 * 1024 * 1024;
+
 function publishLegacyGroup(group) {
   for (const username of group.members) io.to(`peer:${username}`).emit("group:updated", groupForClient(group, username));
 }
@@ -450,6 +453,8 @@ if (!bindAccounts) registerLegacyGroupManagement({
   authorizePhoto(req, group, photoId) {
     return groupMediaBucket.find({
       _id: photoId,
+      length: { $gt: 0, $lte: groupImageLimit },
+      "metadata.mimeType": { $in: groupImageTypes },
       "metadata.groupId": group._id.toHexString(),
       "metadata.ownerUserId": req.user.userId,
       "metadata.accountScoped": { $ne: true },
@@ -604,7 +609,7 @@ app.post(
       }
 
       const maxSize =
-        (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+        kind === "image" || kind === "voice" ? groupImageLimit : 25 * 1024 * 1024;
 
       if (file.size > maxSize) {
         return res.status(413).json({
@@ -868,7 +873,7 @@ app.get(
       const mimeType = media.metadata.mimeType;
 
       const allowedTypes = {
-        image: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        image: groupImageTypes,
         video: ["video/mp4", "video/webm"],
         voice: ["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"],
         file: ["application/octet-stream"],
