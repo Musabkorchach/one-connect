@@ -456,6 +456,14 @@ if (!bindAccounts) registerLegacyGroupManagement({
       "metadata.kind": "image",
     }).next();
   },
+  findModerationMessage(group, username, ref, showContent) {
+    return groupMessagesCollection.findOne({
+      groupId: group._id.toHexString(), id: ref.id, senderUsername: ref.senderUsername,
+      deletedFor: { $ne: username }, activity: { $exists: false },
+    }, { projection: showContent
+      ? { _id: 0, groupId: 1, text: 1, kind: 1, mediaId: 1, fileName: 1 }
+      : { _id: 1 } });
+  },
   publish: publishLegacyGroup,
   commitActivity(filter, update, message) {
     return mongoClient.withSession(session => session.withTransaction(async () => {
@@ -476,12 +484,48 @@ if (!bindAccounts) registerLegacyGroupManagement({
 });
 
 class LegacyGroupAccessLost extends Error {}
-class GroupPostingDenied extends Error {}
+class GroupPostingDenied extends Error {
+  constructor(message, code, status = 403, retryAfterSeconds) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+function canModerateGroup(group, username) {
+  return group.ownerUsername === username || group.admins?.includes(username);
+}
 
 function checkGroupPosting(group, username) {
-  if (group.adminsOnly === true && group.ownerUsername !== username && !group.admins?.includes(username)) {
-    throw new GroupPostingDenied();
+  const now = Date.now();
+  const restricted = group.restrictions?.find(entry => entry.username === username && entry.until > now);
+  if (restricted) {
+    throw new GroupPostingDenied("Posting is temporarily restricted", "GROUP_POSTING_RESTRICTED", 403, Math.ceil((restricted.until - now) / 1000));
   }
+  if (group.adminsOnly === true && !canModerateGroup(group, username)) {
+    throw new GroupPostingDenied("Only administrators may post", "GROUP_ADMINS_ONLY");
+  }
+}
+
+async function checkGroupSlowMode(group, username, groupId, session) {
+  const seconds = group.slowModeSeconds;
+  if (!seconds || canModerateGroup(group, username)) return;
+  const interval = seconds * 1000;
+  const now = Date.now();
+  const last = await groupMessagesCollection.findOne(
+    { groupId, senderUsername: username, at: { $gt: now - interval }, activity: { $exists: false } },
+    { session, sort: { at: -1 }, projection: { at: 1 } },
+  );
+  if (last) throw new GroupPostingDenied("Slow mode is active", "GROUP_SLOW_MODE", 429, Math.ceil((last.at + interval - now) / 1000));
+}
+
+function reportGroupPostingError(res, failure) {
+  if (failure.retryAfterSeconds) res.set("Retry-After", String(failure.retryAfterSeconds));
+  return res.status(failure.status).json({
+    error: failure.message, code: failure.code,
+    ...(failure.retryAfterSeconds && { retryAfterSeconds: failure.retryAfterSeconds }),
+  });
 }
 
 async function writeLegacyGroup(groupId, username, execute) {
@@ -635,7 +679,7 @@ app.post(
         });
       } catch (error) {
         if (accountGroups) return accountGroups.report(res, error, next);
-        if (error instanceof GroupPostingDenied) return res.status(403).json({ error: "Only administrators may post", code: "GROUP_ADMINS_ONLY" });
+        if (error instanceof GroupPostingDenied) return reportGroupPostingError(res, error);
         if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
 
         console.error("[GROUP MEDIA UPLOAD ERROR]", error);
@@ -895,6 +939,8 @@ function groupForClient(group, username) {
     ownerUsername: group.ownerUsername,
     members: group.members,
     enhancedGroups: true,
+    moderationEnabled: true,
+    mentionAlerts: group.mentionAlertsBy?.includes(username) ?? false,
     topics: groupTopics(group),
     adminsOnly: group.adminsOnly === true,
     photoId: group.photoId ?? null,
@@ -1071,6 +1117,7 @@ app.post(
 
         if (!message) {
           checkGroupPosting(currentGroup, senderUsername);
+          await checkGroupSlowMode(currentGroup, senderUsername, groupId, session);
           if (topicId && !currentGroup.topics?.some(entry => entry.id === topicId && !entry.closed)) return { topicUnavailable: true };
           if (replyTo && !await groupMessagesCollection.findOne({
             groupId, id: replyTo.id, senderUsername: replyTo.senderUsername, topicId: topicId ?? { $exists: false },
@@ -1143,11 +1190,15 @@ app.post(
 
       const result = groupMessageForClient(message);
 
-      const current = await groupsCollection.findOne({ _id: group._id }, { projection: { members: 1 } });
+      const current = await groupsCollection.findOne({ _id: group._id }, { projection: { members: 1, mutedBy: 1, mentionAlertsBy: 1 } });
       for (const username of members.filter(name => current?.members.includes(name))) {
         io.to(`peer:${username}`).emit("group:message", {
           message: result,
         });
+        if (created && username !== senderUsername && message.mentions?.includes(username) &&
+            current.mentionAlertsBy?.includes(username) && !current.mutedBy?.includes(username)) {
+          io.to(`peer:${username}`).emit("group:mention", { groupId });
+        }
       }
 
       return res.status(created ? 201 : 200).json({
@@ -1155,7 +1206,7 @@ app.post(
       });
     } catch (error) {
       if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
-      if (error instanceof GroupPostingDenied) return res.status(403).json({ error: "Only administrators may post", code: "GROUP_ADMINS_ONLY" });
+      if (error instanceof GroupPostingDenied) return reportGroupPostingError(res, error);
       console.error("[GROUP MESSAGE SEND ERROR]", error);
       return res.status(500).json({
         error: "Group message could not be sent",

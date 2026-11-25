@@ -1766,6 +1766,99 @@ test("production group management retains legacy history, roles, and live access
 
 });
 
+test("group moderation protects reports and enforces posting under concurrency", { timeout: 60000 }, async t => {
+  const { request, login, origin } = await startEmailTestServer(t, false, { NODE_ENV: "production" });
+  const names = ["group-owner", "group-reader", "group-outsider", "group-audit-owner"];
+  const [owner, admin, member, newcomer] = await Promise.all(names.map(async name => (await login(name)).body.sessionToken));
+  const created = await request("/api/groups", { token: owner, method: "POST",
+    body: { name: "Moderation fixture", members: names.slice(1) } });
+  assert.equal(created.status, 201);
+  const groupId = created.body.group.id;
+  const root = "/api/groups/" + groupId;
+  const action = (token, action, fields = {}) => request(root + "/management", {
+    token, method: "POST", body: { action, ...fields },
+  });
+  const details = token => request(root + "/management", { token });
+  const send = (token, id, text) => request(root + "/messages", {
+    token, method: "POST", body: { id, kind: "text", text },
+  });
+  assert.equal((await action(owner, "promote", { username: names[1] })).status, 200);
+  assert.equal((await action(member, "rules", { rules: "Forbidden" })).status, 403);
+  assert.equal((await action(admin, "rules", { rules: "Keep discussion on topic" })).status, 200);
+  assert.equal((await details(member)).body.group.moderation.rules, "Keep discussion on topic");
+  assert.equal((await details(member)).body.group.moderation.audit, undefined);
+  assert.equal((await details(member)).body.group.moderation.reports, undefined);
+
+  assert.equal((await send(admin, "report-fixture", "Text visible only through the authorized message view")).status, 201);
+  const message = { id: "report-fixture", senderUsername: names[1] };
+  const report = () => action(member, "report", { message, reason: "spam" });
+  assert.equal((await report()).status, 200);
+  assert.equal((await report()).body.code, "GROUP_REPORT_EXISTS");
+  assert.equal((await action(member, "report", { message: { ...message, id: "missing" }, reason: "spam" })).status, 404);
+  const { reports, audit } = (await details(admin)).body.group.moderation;
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].message.text, undefined);
+  assert.ok(audit.some(entry => entry.action === "rules"));
+  assert.ok(audit.every(entry => !("rules" in entry)));
+  const preview = token => request(root + "/reports/" + reports[0].id, { token });
+  assert.equal((await preview(member)).status, 404);
+  assert.equal((await preview(admin)).body.message.text, "Text visible only through the authorized message view");
+  assert.equal((await action(member, "resolve-report", { id: reports[0].id })).status, 403);
+  assert.equal((await action(admin, "resolve-report", { id: reports[0].id })).status, 200);
+  assert.equal((await preview(admin)).status, 404);
+
+  assert.equal((await action(admin, "restrict", { username: names[0], seconds: 300 })).status, 403);
+  assert.equal((await action(admin, "restrict", { username: names[2], seconds: 300 })).status, 200);
+  const restricted = await send(member, "blocked", "blocked");
+  assert.equal(restricted.status, 403);
+  assert.equal(restricted.body.code, "GROUP_POSTING_RESTRICTED");
+  assert.ok((await details(member)).body.group.moderation.restrictedUntil > Date.now());
+  assert.equal((await details(member)).body.group.moderation.restrictions, undefined);
+  const voice = new FormData();
+  voice.set("kind", "voice");
+  voice.set("file", new Blob([Buffer.from("RIFF0000WAVE")], { type: "audio/wav" }), "restricted.wav");
+  assert.equal((await request(root + "/media", { token: member, method: "POST", body: voice })).body.code, "GROUP_POSTING_RESTRICTED");
+  await client.db("oneconnect").collection("chat_groups").updateOne({ _id: new ObjectId(groupId) },
+    { $set: { "restrictions.0.until": Date.now() - 1000 } });
+  assert.equal((await send(member, "after-expiry", "allowed")).status, 201);
+  assert.equal((await action(admin, "restrict", { username: names[2], seconds: 300 })).status, 200);
+  assert.equal((await action(admin, "unrestrict", { username: names[2] })).status, 200);
+
+  assert.equal((await action(admin, "slow-mode", { seconds: 15 })).status, 200);
+  const concurrent = await Promise.all([send(newcomer, "slow-a", "first"), send(newcomer, "slow-b", "second")]);
+  assert.deepEqual(concurrent.map(response => response.status).sort(), [201, 429]);
+  const rejected = concurrent.find(response => response.status === 429);
+  assert.equal(rejected.body.code, "GROUP_SLOW_MODE");
+  assert.ok(rejected.body.retryAfterSeconds > 0);
+  assert.equal((await send(newcomer, concurrent.find(response => response.status === 201).body.message.id, "retry")).status, 200);
+
+  const { socket } = await openMailSocket(t, origin, member, "/");
+  assert.equal((await action(member, "notification-preference", { mentionAlerts: true })).status, 200);
+  assert.equal((await details(newcomer)).body.group.mentionAlerts, false);
+  const alerted = expectSocketEvent(socket, "group:mention");
+  assert.equal((await send(admin, "mention-alert", "Hello @group-outsider")).status, 201);
+  assert.deepEqual(await alerted, { groupId });
+  assert.equal((await action(member, "notification-preference", { muted: true })).status, 200);
+  let alerts = 0;
+  socket.on("group:mention", () => alerts++);
+  const mutedMessage = expectSocketEvent(socket, "group:message");
+  assert.equal((await send(admin, "muted-alert", "Hello @group-outsider")).status, 201);
+  assert.equal((await mutedMessage).message.id, "muted-alert");
+  await wait(100);
+  assert.equal(alerts, 0);
+  const collection = client.db("oneconnect").collection("chat_groups");
+  const key = { _id: new ObjectId(groupId) };
+  const stored = await collection.findOne(key);
+  assert.ok(stored.audit.every(entry => !("text" in entry)));
+  const priorAudit = Array.from({ length: 100 }, (_, at) => ({ action: "rules", actor: names[0], at }));
+  await collection.updateOne(key, { $set: { audit: priorAudit } });
+  assert.equal((await action(admin, "slow-mode", { seconds: 0 })).status, 200);
+  const retained = (await details(owner)).body.group.moderation.audit;
+  assert.equal(retained.length, 100);
+  assert.equal(retained[0].action, "slow-mode");
+  assert.equal(retained.at(-1).at, 1);
+});
+
 test("legacy group deletion uses verified identity and resumes without losing history", async () => {
   const db = client.db("legacy_group_deletion");
   const owned = new ObjectId();
