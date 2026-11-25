@@ -26,7 +26,7 @@ export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
   return notices;
 }
 
-export function registerLegacyGroupManagement({ app, groups, users, requireSession, normalize, publish, revoke, inviteChanged }) {
+export function registerLegacyGroupManagement({ app, groups, users, authorizePhoto, requireSession, normalize, publish, revoke, inviteChanged }) {
   const base = "/api/groups/:groupId/management";
   const invitationPath = "/api/group-management/invitations";
   const error = (res, status, message, code) => res.status(status).json({ error: message, ...(code && { code }) });
@@ -54,6 +54,7 @@ export function registerLegacyGroupManagement({ app, groups, users, requireSessi
       ownRole: owner ? "owner" : admin ? "admin" : "member",
       canManage: active && (owner || admin), canLeave: active && !owner,
       adminsOnly: group.adminsOnly === true,
+      photoId: group.photoId ?? null,
       invitations: active && (owner || admin) ? group.invitations ?? [] : [],
       offer: active && offer && (owner || offer.toAccountId === username) ? offer : null,
       revision: group.managementRevision ?? 0,
@@ -103,6 +104,15 @@ export function registerLegacyGroupManagement({ app, groups, users, requireSessi
             typeof description !== "string" || description.trim().length > 500) return error(res, 400, "Invalid group details");
         Object.assign(changes, { name: name.trim(), description: description.trim() });
         break;
+      case "photo": {
+        if (!manage) return error(res, 403, "Group management permission required");
+        const { photoId } = req.body;
+        if (photoId === null) { unset.photoId = ""; break; }
+        if (typeof photoId !== "string" || !/^[a-f0-9]{24}$/.test(photoId) ||
+            !await authorizePhoto(req, group, new ObjectId(photoId))) return error(res, 400, "Invalid group photo");
+        changes.photoId = photoId;
+        break;
+      }
       case "posting-policy":
         if (!owner) return error(res, 403, "Only the owner may change posting permissions");
         if (typeof req.body.adminsOnly !== "boolean") return error(res, 400, "Invalid posting policy");

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, type GroupManagement } from "@/lib/api-client";
+import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, uploadGroupMedia, type GroupManagement } from "@/lib/api-client";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { ConfirmDialog, Sheet } from "./feedback";
+import { GroupAvatar } from "./group-avatar";
 import { GroupHistoryBrowser } from "./group-history-browser";
 import { useConnect } from "@/contexts/connect-context";
 import { getGroupCopy } from "@/lib/connect/i18n";
@@ -57,14 +58,16 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     return () => { scope.abort(); unsub(); disconnectRefresh(); };
   }, [groupId, token]);
 
-  async function act(action: string, data = {}) {
+  async function act(action: string, data = {}, photo?: File) {
     const scope = lifetime.current;
     if (!scope || scope.signal.aborted || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     setError("");
     try {
-      const { group: result } = await manageGroup(token, groupId, action, data, scope.signal);
+      const payload = photo ? { photoId: (await uploadGroupMedia(token, groupId, "image", photo, scope.signal)).mediaId } : data;
+      if (scope.signal.aborted) return;
+      const { group: result } = await manageGroup(token, groupId, action, payload, scope.signal);
       if (scope.signal.aborted) return;
       if (action === "leave" && !result) onLeave();
       else refreshRef.current();
@@ -94,7 +97,25 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
         {!group && !error && <p role="status">Loading group information…</p>}
         {group && (
           <>
-            <h3 className="font-semibold">{group.name}</h3>
+            <div className="flex items-center gap-3">
+              <GroupAvatar groupId={groupId} name={group.name} photoId={group.photoId} size={52} />
+              <h3 className="font-semibold">{group.name}</h3>
+            </div>
+            {group.canManage && <div className="flex flex-wrap gap-2">
+              <label className={actionButton + " inline-flex items-center focus-within:outline"}>
+                {copy.changePhoto}
+                <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="sr-only"
+                  aria-label={copy.changePhoto} disabled={busy} onChange={event => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void act("photo", {}, file);
+                  }} />
+              </label>
+              {group.photoId && <button type="button" className={actionButton} disabled={busy}
+                onClick={() => setConfirmation({ label: copy.removePhoto, action: "photo", data: { photoId: null } })}>
+                {copy.removePhoto}
+              </button>}
+            </div>}
             <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>
             {group.description && <p className="whitespace-pre-wrap">{group.description}</p>}
             <p>{copy.owner} ? @{group.owner}</p>

@@ -1552,6 +1552,26 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await updateA).id, groupId);
   assert.equal((await updateB).id, groupId);
   assert.equal((await details(reader)).body.group.ownRole, "admin");
+  const icon = new FormData();
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM14AAAAASUVORK5CYII=", "base64");
+  icon.set("kind", "image");
+  icon.set("file", new Blob([image], { type: "image/png" }), "group.png");
+  const photo = await request(root + "/media", { token: reader, method: "POST", body: icon });
+  assert.equal(photo.status, 201);
+  const photoId = photo.body.mediaId;
+  const displayPhoto = token => fetch(origin + root + "/media/" + photoId, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal((await displayPhoto(owner)).status, 404);
+  assert.equal((await action(third, "photo", { photoId })).status, 403);
+  assert.equal((await action(owner, "photo", { photoId })).status, 400);
+  assert.equal((await action(reader, "photo", { photoId })).status, 200);
+  assert.equal((await details(owner)).body.group.photoId, photoId);
+  const download = await displayPhoto(owner);
+  assert.equal(download.status, 200);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), image);
+  assert.equal((await displayPhoto(invitee)).status, 404);
+  assert.equal((await action(owner, "photo", { photoId: null })).status, 200);
+  assert.equal((await displayPhoto(owner)).status, 404);
+
   const alreadyMember = await action(reader, "invite", { username: "group-outsider" });
   assert.equal(alreadyMember.status, 409);
   assert.equal(alreadyMember.body.code, "GROUP_ALREADY_MEMBER");

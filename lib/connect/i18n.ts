@@ -813,6 +813,7 @@ export function getDeletionCopy(lang: LangId) {
 }
 
 const groupEnglish = {
+  changePhoto: "Change group photo", removePhoto: "Remove group photo",
   adminsOnly: "Only the owner and administrators can send messages.", postingPolicy: "Administrators only",
   history: "Search and shared content",
   search: "Search",
@@ -843,6 +844,7 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
     links: "الروابط",
     loadMore: "عرض المزيد",
     empty: "لا توجد نتائج",
+    changePhoto: "تغيير صورة المجموعة", removePhoto: "حذف صورة المجموعة",
     postingPolicy: "الإرسال للمشرفين فقط",
     adminsOnly: "يمكن للمالك والمشرفين فقط إرسال الرسائل.",
     title: "معلومات المجموعة",
@@ -884,6 +886,7 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
     links: "Liens",
     loadMore: "Afficher plus",
     empty: "Aucun message correspondant",
+    changePhoto: "Modifier la photo du groupe", removePhoto: "Retirer la photo du groupe",
     postingPolicy: "Administrateurs uniquement",
     adminsOnly: "Seuls le propriétaire et les administrateurs peuvent envoyer des messages.",
     title: "Informations du groupe",

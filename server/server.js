@@ -446,6 +446,15 @@ function publishLegacyGroup(group) {
 if (!bindAccounts) registerLegacyGroupManagement({
   app, groups: groupsCollection, users: emailUsersCollection, requireSession,
   normalize: normalizeMessagingUsername,
+  authorizePhoto(req, group, photoId) {
+    return groupMediaBucket.find({
+      _id: photoId,
+      "metadata.groupId": group._id.toHexString(),
+      "metadata.ownerUserId": req.user.userId,
+      "metadata.accountScoped": { $ne: true },
+      "metadata.kind": "image",
+    }).next();
+  },
   publish: publishLegacyGroup,
   revoke(group, username) {
     io.to(`peer:${username}`).emit("group:access-revoked", { groupId: group._id.toHexString() });
@@ -778,9 +787,12 @@ app.get(
         return res.status(404).json({ error: "Media not found" });
       }
 
+      const photo = !accountGroups && media.metadata.kind === "image" && await groupsCollection.findOne({
+        _id: req.chatGroup._id, members: req.groupUsername, photoId: mediaId,
+      }, { projection: { _id: 1 } });
       const linked = accountGroups
         ? await accountGroups.authorizeMediaRead(req, res, next, media, mediaId)
-        : await groupMessagesCollection.findOne({
+        : photo || await groupMessagesCollection.findOne({
             groupId,
             mediaId,
             senderUsername: media.metadata?.senderUsername,
@@ -870,6 +882,7 @@ function groupForClient(group) {
     ownerUsername: group.ownerUsername,
     members: group.members,
     adminsOnly: group.adminsOnly === true,
+    photoId: group.photoId ?? null,
     admins: group.admins ?? [],
     state: group.state ?? "active",
     createdAt: group.createdAt,
