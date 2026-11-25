@@ -576,7 +576,8 @@ test("all authorized subscription previews reach session checks independently of
   const current = "https://demo-kzmj9x7doc3tbnuv0jmh.vusercontent.net";
   const latest = "https://demo-kzmovxi2wuipz4n4bbzo.vusercontent.net";
   const appStudioPreview = "https://demo-kzmqjs94lpvvyhvefiaw.vusercontent.net";
-  const previews = [first, second, current, latest, appStudioPreview];
+  const registeredPreview = "https://demo-kzmn749ln5p2u45ulw12.vusercontent.net";
+  const previews = [first, second, current, latest, appStudioPreview, registeredPreview];
   for (const origin of [...previews, ...previews]) {
     assert.deepEqual(await request(path, { origin }), {
       status: 401, body: { error: "Missing session token" },
@@ -589,10 +590,10 @@ test("all authorized subscription previews reach session checks independently of
   const loginResult = await login("subscription-no-uid");
   assert.equal(loginResult.status, 200);
   const token = loginResult.body.sessionToken;
-  const ineligible = await request(path, { origin: appStudioPreview, token });
+  const ineligible = await request(path, { origin: registeredPreview, token });
   assert.equal(ineligible.status, 403);
   assert.equal(ineligible.body.code, "PI_TESTNET_SESSION_NOT_ELIGIBLE");
-  for (const origin of [undefined, "https://demo-unrelated.vusercontent.net", appStudioPreview + ".example"]) {
+  for (const origin of [undefined, "https://demo-unrelated.vusercontent.net", appStudioPreview + ".example", registeredPreview + ".example"]) {
     const forbidden = await request(path, { origin, token });
     assert.equal(forbidden.status, 403);
     assert.equal(forbidden.body.code, "PI_TESTNET_ORIGIN_NOT_ALLOWED");
