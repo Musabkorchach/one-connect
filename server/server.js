@@ -25,6 +25,7 @@ import { registerExternalEmailRoutes } from "./external-email-routes.js";
 import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
+import { registerTokenMetadataRoutes } from "./token-metadata-routes.js";
 
 import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindingEnabled, migrationRequired } from "./pi-login.js";
 import {
@@ -211,6 +212,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb" }));
+registerTokenMetadataRoutes(app);
 app.use(express.static(new URL("../public", import.meta.url).pathname));
 
 // In-memory storage (replace with MongoDB in production)
