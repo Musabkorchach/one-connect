@@ -906,7 +906,13 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
     return res.status(400).json({ error: "Invalid group ID" });
   }
 
-  const before = req.query.before;
+  const { before, filter: category, q } = req.query;
+  if (category !== undefined && !["search", "media", "files", "links"].includes(category)) {
+    return res.status(400).json({ error: "Invalid history filter" });
+  }
+  if (category === "search" && (typeof q !== "string" || !q.trim() || q.length > 120)) {
+    return res.status(400).json({ error: "Invalid search query" });
+  }
 
   if (
     before !== undefined &&
@@ -934,6 +940,11 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
       filter._id = { $lt: new ObjectId(before) };
     }
 
+    if (category === "search") filter.text = { $regex: q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+    if (category === "media") filter.kind = { $in: ["image", "video", "voice"] };
+    if (category === "files") filter.kind = "file";
+    if (category === "links") filter.text = { $regex: "https?://[^\\s<>]+", $options: "i" };
+
     const records = await groupMessagesCollection
       .find(filter)
       .sort({ _id: -1 })
@@ -946,7 +957,7 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
       return res.status(404).json({ error: "Group not found" });
     }
 
-    return res.json({
+    return res.set("Cache-Control", "private, no-store").json({
       group: groupForClient(group),
       messages: page.slice().reverse().map(groupMessageForClient),
       hasMore,

@@ -1454,6 +1454,17 @@ export function getGroupInvitations(token: string, signal: AbortSignal) {
     "/api/group-management/invitations", token, "GET", undefined, signal);
 }
 
+export type GroupHistoryFilter = "search" | "media" | "files" | "links";
+
+export function getFilteredGroupHistory(token: string, groupId: string, filter: GroupHistoryFilter, query: string,
+  before: string | null, signal: AbortSignal) {
+  const params = new URLSearchParams({ filter });
+  if (filter === "search") params.set("q", query);
+  if (before) params.set("before", before);
+  return groupRequest<{ messages: GroupMessageRecord[]; nextCursor: string | null }>(
+    `/api/groups/${groupId}/messages?${params}`, token, "GET", undefined, signal);
+}
+
 export type GroupMediaKind = "image" | "file" | "video" | "voice";
 
 export interface GroupMessageRecord {

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, type GroupManagement } from "@/lib/api-client";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { ConfirmDialog, Sheet } from "./feedback";
+import { GroupHistoryBrowser } from "./group-history-browser";
 import { useConnect } from "@/contexts/connect-context";
 import { getGroupCopy } from "@/lib/connect/i18n";
 
@@ -29,6 +30,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
   const { lang } = useConnect();
   const copy = getGroupCopy(lang);
   const [confirmation, setConfirmation] = useState<{ label: string; action: string; data?: Record<string, unknown> } | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
   const [group, setGroup] = useState<GroupManagement | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -74,6 +76,10 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     }
   }
 
+  if (showHistory) {
+    return <GroupHistoryBrowser groupId={groupId} token={token} onClose={() => setShowHistory(false)} />;
+  }
+
   return (
     <Sheet open title={copy.title} onClose={onClose}>
       <ConfirmDialog open={confirmation !== null} title={copy.confirm} message={confirmation?.label ?? ""}
@@ -89,6 +95,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
         {group && (
           <>
             <h3 className="font-semibold">{group.name}</h3>
+            <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>
             {group.description && <p className="whitespace-pre-wrap">{group.description}</p>}
             <p>{copy.owner} ? @{group.owner}</p>
             <ul aria-label={copy.members} className="space-y-2">

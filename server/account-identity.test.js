@@ -1615,6 +1615,18 @@ test("production group management retains legacy history, roles, and live access
   assert.equal(history.body.group.id, groupId);
   assert.equal(history.body.messages[0].id, "legacy-group-msg");
   assert.equal(history.body.messages[1].mediaId, uploaded.body.mediaId);
+
+  const literalText = "Literal .* https://example.test/shared";
+  assert.equal((await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "filtered-history", kind: "text", text: literalText } })).status, 201);
+  const search = await request(root + "/messages?filter=search&q=" + encodeURIComponent(".*"), { token: reader });
+  assert.deepEqual(search.body.messages.map(message => message.id), ["filtered-history"]);
+  const media = await request(root + "/messages?filter=media", { token: reader });
+  assert.deepEqual(media.body.messages.map(message => message.mediaId), [uploaded.body.mediaId]);
+  const links = await request(root + "/messages?filter=links", { token: reader });
+  assert.deepEqual(links.body.messages.map(message => message.text), [literalText]);
+  assert.equal((await request(root + "/messages?filter=links", { token: owner })).status, 404);
+
   assert.equal((await request(root + "/messages", { token: invitee, method: "POST",
     body: { id: "rejected", kind: "text", text: "rejected" } })).status, 404);
 });

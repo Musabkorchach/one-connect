@@ -814,6 +814,13 @@ export function getDeletionCopy(lang: LangId) {
 
 const groupEnglish = {
   adminsOnly: "Only the owner and administrators can send messages.", postingPolicy: "Administrators only",
+  history: "Search and shared content",
+  search: "Search",
+  media: "Media",
+  files: "Files",
+  links: "Links",
+  loadMore: "Load more",
+  empty: "No matching messages",
   title: "Group information", loading: "Loading group information…", owner: "Owner",
   members: "Group members", invitations: "Group invitations", admin: "Admin", member: "Member",
   remove: "Remove member", demote: "Remove admin role", promote: "Make admin",
@@ -829,6 +836,13 @@ const groupEnglish = {
 
 const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
   ar: {
+    history: "البحث والمحتوى المشترك",
+    search: "بحث",
+    media: "الوسائط",
+    files: "الملفات",
+    links: "الروابط",
+    loadMore: "عرض المزيد",
+    empty: "لا توجد نتائج",
     postingPolicy: "الإرسال للمشرفين فقط",
     adminsOnly: "يمكن للمالك والمشرفين فقط إرسال الرسائل.",
     title: "معلومات المجموعة",
@@ -863,6 +877,13 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
     notVerified: "على المدعو تسجيل الدخول أولًا بحساب Pi موثّق.",
   },
   fr: {
+    history: "Recherche et contenu partagé",
+    search: "Rechercher",
+    media: "Médias",
+    files: "Fichiers",
+    links: "Liens",
+    loadMore: "Afficher plus",
+    empty: "Aucun message correspondant",
     postingPolicy: "Administrateurs uniquement",
     adminsOnly: "Seuls le propriétaire et les administrateurs peuvent envoyer des messages.",
     title: "Informations du groupe",
