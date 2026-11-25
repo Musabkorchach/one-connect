@@ -454,6 +454,13 @@ if (!bindAccounts) registerLegacyGroupManagement({
 });
 
 class LegacyGroupAccessLost extends Error {}
+class GroupPostingDenied extends Error {}
+
+function checkGroupPosting(group, username) {
+  if (group.adminsOnly === true && group.ownerUsername !== username && !group.admins?.includes(username)) {
+    throw new GroupPostingDenied();
+  }
+}
 
 async function writeLegacyGroup(groupId, username, execute) {
   return mongoClient.withSession(session => session.withTransaction(async () => {
@@ -590,7 +597,10 @@ app.post(
           return res.status(201).json({ mediaId: stored.toHexString(), groupId, kind, fileName, mimeType, fileSize: file.size });
         }
         const stored = await saveScopedFile(db,
-          (_accounts, execute) => writeLegacyGroup(groupId, req.groupUsername, execute),
+          (_accounts, execute) => writeLegacyGroup(groupId, req.groupUsername, (session, group) => {
+            checkGroupPosting(group, req.groupUsername);
+            return execute(session);
+          }),
           null, "group_media", fileName, file.buffer, metadata);
 
         return res.status(201).json({
@@ -603,6 +613,7 @@ app.post(
         });
       } catch (error) {
         if (accountGroups) return accountGroups.report(res, error, next);
+        if (error instanceof GroupPostingDenied) return res.status(403).json({ error: "Only administrators may post", code: "GROUP_ADMINS_ONLY" });
         if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
 
         console.error("[GROUP MEDIA UPLOAD ERROR]", error);
@@ -858,6 +869,8 @@ function groupForClient(group) {
     name: group.name,
     ownerUsername: group.ownerUsername,
     members: group.members,
+    adminsOnly: group.adminsOnly === true,
+    admins: group.admins ?? [],
     state: group.state ?? "active",
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
@@ -994,6 +1007,7 @@ app.post(
         let created = false;
 
         if (!message) {
+          checkGroupPosting(currentGroup, senderUsername);
           let mediaFields = {};
 
           if (data.kind !== "text") {
@@ -1066,6 +1080,7 @@ app.post(
       });
     } catch (error) {
       if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
+      if (error instanceof GroupPostingDenied) return res.status(403).json({ error: "Only administrators may post", code: "GROUP_ADMINS_ONLY" });
       console.error("[GROUP MESSAGE SEND ERROR]", error);
       return res.status(500).json({
         error: "Group message could not be sent",

@@ -1418,6 +1418,8 @@ export interface GroupRecord {
   name: string;
   ownerUsername: string;
   members: string[];
+  adminsOnly?: boolean;
+  admins?: string[];
   createdAt: number;
   updatedAt: number;
   unreadCount: number;
@@ -1433,6 +1435,7 @@ export interface GroupManagement {
   ownRole: "owner" | "admin" | "member";
   canManage: boolean;
   canLeave: boolean;
+  adminsOnly?: boolean;
   invitations: string[];
   offer: { id: string; fromAccountId: string; toAccountId: string } | null;
   revision: number;

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { GroupManagementSheet } from "./group-management";
+import { getGroupCopy } from "@/lib/connect/i18n";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useConnect } from "@/contexts/connect-context";
 import {
@@ -549,7 +550,10 @@ function GroupConversation({
         </p>
       )}
 
-      {group.state === "archived" ? <p role="status" className="p-3">Archived group · Read only</p> : (
+      {group.state === "archived" ? <p role="status" className="p-3">Archived group · Read only</p> :
+        group.adminsOnly && group.ownerUsername !== me && !group.admins?.includes(me) ? (
+          <p role="status" className="p-3">{getGroupCopy(lang).adminsOnly}</p>
+        ) : (
       <div className="flex items-end gap-2 border-t border-border p-3 pc-safe-bottom">
         <GroupAttachments
           disabled={sending}

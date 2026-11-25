@@ -1558,6 +1558,24 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await action(reader, "promote", { username: "group-outsider" })).status, 403);
   assert.equal((await action(reader, "remove", { username: "group-owner" })).status, 403);
 
+  assert.equal((await action(reader, "posting-policy", { adminsOnly: true })).status, 403);
+  const policyA = expectSocketEvent(socket, "group:updated");
+  const policyB = expectSocketEvent(secondDevice, "group:updated");
+  assert.equal((await action(owner, "posting-policy", { adminsOnly: true })).status, 200);
+  assert.equal((await policyA).adminsOnly, true);
+  assert.equal((await policyB).adminsOnly, true);
+  const deniedPost = await request(root + "/messages", { token: third, method: "POST",
+    body: { id: "blocked-by-posting-policy", kind: "text", text: "blocked" } });
+  assert.equal(deniedPost.status, 403);
+  assert.equal(deniedPost.body.code, "GROUP_ADMINS_ONLY");
+  const deniedUpload = await request(root + "/media", { token: third, method: "POST", body: voice });
+  assert.equal(deniedUpload.status, 403);
+  const managerPost = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "manager-post", kind: "text", text: "allowed" } });
+  assert.equal(managerPost.status, 201);
+  assert.equal((await action(owner, "posting-policy", { adminsOnly: false })).status, 200);
+
+
   const revision = (await details(reader)).body.group.revision;
   const edits = await Promise.all(["Updated one", "Updated two"].map(name =>
     action(reader, "details", { name, description: "Group description", revision })));

@@ -53,6 +53,7 @@ export function registerLegacyGroupManagement({ app, groups, users, requireSessi
       })),
       ownRole: owner ? "owner" : admin ? "admin" : "member",
       canManage: active && (owner || admin), canLeave: active && !owner,
+      adminsOnly: group.adminsOnly === true,
       invitations: active && (owner || admin) ? group.invitations ?? [] : [],
       offer: active && offer && (owner || offer.toAccountId === username) ? offer : null,
       revision: group.managementRevision ?? 0,
@@ -101,6 +102,11 @@ export function registerLegacyGroupManagement({ app, groups, users, requireSessi
         if (typeof name !== "string" || !name.trim() || name.trim().length > 80 ||
             typeof description !== "string" || description.trim().length > 500) return error(res, 400, "Invalid group details");
         Object.assign(changes, { name: name.trim(), description: description.trim() });
+        break;
+      case "posting-policy":
+        if (!owner) return error(res, 403, "Only the owner may change posting permissions");
+        if (typeof req.body.adminsOnly !== "boolean") return error(res, 400, "Invalid posting policy");
+        changes.adminsOnly = req.body.adminsOnly;
         break;
       case "invite":
       case "revoke-invite":
