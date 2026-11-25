@@ -14,7 +14,7 @@ export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
     const owned = group.ownerUsername === username;
     const invitations = group.invitations ?? [];
     const update = {
-      $pull: { members: username, admins: username, ...(!owned && { invitations: username }) },
+      $pull: { members: username, admins: username, mutedBy: username, ...(!owned && { invitations: username }) },
       $inc: { managementRevision: 1 },
       $max: { updatedAt: Date.now() },
       ...(owned && { $set: { state: "archived", invitations: [] } }),
@@ -26,7 +26,7 @@ export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
   return notices;
 }
 
-export function registerLegacyGroupManagement({ app, groups, users, authorizePhoto, requireSession, normalize, publish, revoke, inviteChanged }) {
+export function registerLegacyGroupManagement({ app, groups, users, authorizePhoto, requireSession, normalize, publish, revoke, inviteChanged, commitActivity, publishActivity }) {
   const base = "/api/groups/:groupId/management";
   const invitationPath = "/api/group-management/invitations";
   const error = (res, status, message, code) => res.status(status).json({ error: message, ...(code && { code }) });
@@ -55,6 +55,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
       canManage: active && (owner || admin), canLeave: active && !owner,
       adminsOnly: group.adminsOnly === true,
       photoId: group.photoId ?? null,
+      muted: group.mutedBy?.includes(username) ?? false,
       invitations: active && (owner || admin) ? group.invitations ?? [] : [],
       offer: active && offer && (owner || offer.toAccountId === username) ? offer : null,
       revision: group.managementRevision ?? 0,
@@ -104,6 +105,12 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
             typeof description !== "string" || description.trim().length > 500) return error(res, 400, "Invalid group details");
         Object.assign(changes, { name: name.trim(), description: description.trim() });
         break;
+      case "notification-preference": {
+        if (typeof req.body.muted !== "boolean") return error(res, 400, "Invalid notification preference");
+        const mutedBy = group.mutedBy ?? [];
+        changes.mutedBy = req.body.muted ? [...new Set([...mutedBy, username])] : mutedBy.filter(person => person !== username);
+        break;
+      }
       case "photo": {
         if (!manage) return error(res, 403, "Group management permission required");
         const { photoId } = req.body;
@@ -157,6 +164,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
         }
         changes.members = group.members.filter(person => person !== departed);
         changes.admins = admins.filter(person => person !== departed);
+        changes.mutedBy = (group.mutedBy ?? []).filter(person => person !== departed);
         if (group.ownershipOffer?.toAccountId === departed) unset.ownershipOffer = "";
         break;
       case "offer":
@@ -182,15 +190,34 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
         return error(res, 400, "Unknown group action");
     }
 
-    const result = await groups.findOneAndUpdate({
+    const filter = {
       _id, managementRevision: group.managementRevision ?? { $exists: false },
       state: { $ne: "archived" }, [invitationResponse ? "invitations" : "members"]: username,
-    }, {
-      $set: changes, $inc: { managementRevision: 1 }, $max: { updatedAt: Date.now() },
+    };
+    const at = Date.now();
+    const update = {
+      $set: changes, $inc: { managementRevision: 1 }, $max: { updatedAt: at },
       ...(Object.keys(unset).length && { $unset: unset }),
-    }, { returnDocument: "after" });
+    };
+    const activity = ({
+      details: "updated the group details.",
+      "accept-invite": "joined the group.",
+      leave: "left the group.",
+      remove: "removed a member.",
+      promote: "appointed an administrator.",
+      demote: "removed an administrator role.",
+      "accept-ownership": "accepted group ownership.",
+    })[action];
+    const message = activity ? {
+      _id: new ObjectId(), groupId: _id.toHexString(), id: "group-activity-" + new ObjectId().toHexString(),
+      kind: "text", senderUsername: username, text: "@" + username + " " + activity, at, readBy: [username], deletedFor: [],
+      activity: { action, ...(["remove", "promote", "demote"].includes(action) && { target }) },
+    } : null;
+    const result = message ? await commitActivity(filter, update, message) :
+      await groups.findOneAndUpdate(filter, update, { returnDocument: "after" });
     if (!result) return error(res, 409, "Group changed. Refresh and retry.");
     await publish(result);
+    if (message) publishActivity(result, message);
     if (departed) await revoke(result, departed);
     if (notifyInvite) inviteChanged(notifyInvite);
     return res.json({ group: result.members.includes(username) ? view(result, username) : null });

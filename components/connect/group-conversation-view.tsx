@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { GroupManagementSheet } from "./group-management";
-import { getGroupCopy } from "@/lib/connect/i18n";
+import { getGroupActivityLabel, getGroupCopy } from "@/lib/connect/i18n";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useConnect } from "@/contexts/connect-context";
 import {
@@ -505,6 +505,13 @@ function GroupConversation({
 
         {messages.map((message) => {
           const own = message.senderUsername === me;
+          if (message.activity) {
+            return <p key={messageKey(message)} className="mb-3 text-center text-xs text-muted-foreground"
+              data-group-unread={!own && !message.readBy.includes(me) ? message.id : undefined}>
+              <bdi>@{message.senderUsername}</bdi>{" "}{getGroupActivityLabel(lang, message.activity.action)}
+              {message.activity.target && <>{" "}<bdi>@{message.activity.target}</bdi></>}
+            </p>;
+          }
 
           return (
             <div

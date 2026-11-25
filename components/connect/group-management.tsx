@@ -149,6 +149,13 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
               </div>
             )}
             {group.ownRole === "owner" && group.offer && <p role="status">{copy.sentOffer} @{group.offer.toAccountId}.</p>}
+            {(group.canManage || group.canLeave) && (
+              <label className="flex min-h-11 items-center gap-3">
+                <input type="checkbox" checked={group.muted === true} disabled={busy}
+                  onChange={event => void act("notification-preference", { muted: event.target.checked })} />
+                {copy.muteBadges}
+              </label>
+            )}
             {group.canManage && group.ownRole === "owner" && (
               <label className="flex min-h-11 items-center gap-3">
                 <input type="checkbox" checked={group.adminsOnly === true} disabled={busy}

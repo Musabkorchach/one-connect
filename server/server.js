@@ -440,7 +440,7 @@ function requireSession(req, res, next) {
 }
 
 function publishLegacyGroup(group) {
-  for (const username of group.members) io.to(`peer:${username}`).emit("group:updated", groupForClient(group));
+  for (const username of group.members) io.to(`peer:${username}`).emit("group:updated", groupForClient(group, username));
 }
 
 if (!bindAccounts) registerLegacyGroupManagement({
@@ -456,6 +456,18 @@ if (!bindAccounts) registerLegacyGroupManagement({
     }).next();
   },
   publish: publishLegacyGroup,
+  commitActivity(filter, update, message) {
+    return mongoClient.withSession(session => session.withTransaction(async () => {
+      const group = await groupsCollection.findOneAndUpdate(filter, update, { session, returnDocument: "after" });
+      if (group) await groupMessagesCollection.insertOne(message, { session });
+      return group;
+    }));
+  },
+  publishActivity(group, message) {
+    for (const username of group.members) {
+      io.to(`peer:${username}`).emit("group:message", { message: groupMessageForClient(message) });
+    }
+  },
   revoke(group, username) {
     io.to(`peer:${username}`).emit("group:access-revoked", { groupId: group._id.toHexString() });
   },
@@ -751,7 +763,7 @@ app.get("/api/groups", requireSession, async (req, res) => {
 
     return res.json({
       groups: groups.map((group) => ({
-        ...groupForClient(group),
+        ...groupForClient(group, username),
         unreadCount: unreadByGroup.get(group._id.toString()) || 0,
       })),
     });
@@ -875,7 +887,7 @@ app.get(
   },
 );
 
-function groupForClient(group) {
+function groupForClient(group, username) {
   return {
     id: group._id.toString(),
     name: group.name,
@@ -883,6 +895,7 @@ function groupForClient(group) {
     members: group.members,
     adminsOnly: group.adminsOnly === true,
     photoId: group.photoId ?? null,
+    muted: group.mutedBy?.includes(username) ?? false,
     admins: group.admins ?? [],
     state: group.state ?? "active",
     createdAt: group.createdAt,
@@ -898,6 +911,7 @@ function groupMessageForClient(message) {
     senderUsername: message.senderUsername,
     kind: message.kind,
     text: message.text,
+    ...(message.activity && { activity: message.activity }),
     at: message.at,
     readBy: message.readBy || [],
     mediaId: message.mediaId,
@@ -971,7 +985,7 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
     }
 
     return res.set("Cache-Control", "private, no-store").json({
-      group: groupForClient(group),
+      group: groupForClient(group, username),
       messages: page.slice().reverse().map(groupMessageForClient),
       hasMore,
       nextCursor: hasMore
@@ -1028,6 +1042,7 @@ app.post(
         };
 
         let message = await groupMessagesCollection.findOne(identity, { session });
+        if (message?.activity) return { message: null };
         let created = false;
 
         if (!message) {

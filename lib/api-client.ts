@@ -1420,6 +1420,7 @@ export interface GroupRecord {
   members: string[];
   adminsOnly?: boolean;
   photoId?: string | null;
+  muted?: boolean;
   admins?: string[];
   createdAt: number;
   updatedAt: number;
@@ -1438,6 +1439,7 @@ export interface GroupManagement {
   canLeave: boolean;
   adminsOnly?: boolean;
   photoId?: string | null;
+  muted?: boolean;
   invitations: string[];
   offer: { id: string; fromAccountId: string; toAccountId: string } | null;
   revision: number;
@@ -1469,11 +1471,14 @@ export function getFilteredGroupHistory(token: string, groupId: string, filter: 
 
 export type GroupMediaKind = "image" | "file" | "video" | "voice";
 
+export type GroupActivityAction = "details" | "accept-invite" | "leave" | "remove" | "promote" | "demote" | "accept-ownership";
+
 export interface GroupMessageRecord {
   id: string;
   groupId: string;
   senderUsername: string;
   kind: "text" | GroupMediaKind;
+  activity?: { action: GroupActivityAction; target?: string };
   text: string;
   at: number;
   readBy: string[];

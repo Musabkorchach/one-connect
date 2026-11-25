@@ -71,7 +71,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
                   {group.members.length} {arabic ? "أعضاء" : "members"}
                 </span>
               </span>
-             {group.unreadCount > 0 && (
+             {!group.muted && group.unreadCount > 0 && (
                 <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-bold text-primary-foreground">
                   {group.unreadCount}
                 </span>

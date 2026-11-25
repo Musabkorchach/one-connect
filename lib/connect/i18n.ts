@@ -813,6 +813,7 @@ export function getDeletionCopy(lang: LangId) {
 }
 
 const groupEnglish = {
+  muteBadges: "Mute unread badges for this group",
   changePhoto: "Change group photo", removePhoto: "Remove group photo",
   adminsOnly: "Only the owner and administrators can send messages.", postingPolicy: "Administrators only",
   history: "Search and shared content",
@@ -845,6 +846,7 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
     loadMore: "عرض المزيد",
     empty: "لا توجد نتائج",
     changePhoto: "تغيير صورة المجموعة", removePhoto: "حذف صورة المجموعة",
+    muteBadges: "كتم شارات الرسائل غير المقروءة لهذه المجموعة",
     postingPolicy: "الإرسال للمشرفين فقط",
     adminsOnly: "يمكن للمالك والمشرفين فقط إرسال الرسائل.",
     title: "معلومات المجموعة",
@@ -887,6 +889,7 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
     loadMore: "Afficher plus",
     empty: "Aucun message correspondant",
     changePhoto: "Modifier la photo du groupe", removePhoto: "Retirer la photo du groupe",
+    muteBadges: "Masquer les badges de messages non lus de ce groupe",
     postingPolicy: "Administrateurs uniquement",
     adminsOnly: "Seuls le propriétaire et les administrateurs peuvent envoyer des messages.",
     title: "Informations du groupe",
@@ -924,4 +927,38 @@ const groupTranslations: Partial<Record<LangId, typeof groupEnglish>> = {
 
 export function getGroupCopy(lang: LangId) {
   return groupTranslations[lang] ?? groupEnglish;
+}
+
+const groupActivity = {
+  en: {
+    "details": "updated group details",
+    "accept-invite": "joined the group",
+    "leave": "left the group",
+    "remove": "removed",
+    "promote": "appointed as administrator",
+    "demote": "removed the administrator role from",
+    "accept-ownership": "accepted group ownership",
+  },
+  ar: {
+    "details": "عدّل تفاصيل المجموعة",
+    "accept-invite": "انضم إلى المجموعة",
+    "leave": "غادر المجموعة",
+    "remove": "أزال",
+    "promote": "عيّن مشرفًا",
+    "demote": "أزال صلاحيات الإشراف عن",
+    "accept-ownership": "قبِل ملكية المجموعة",
+  },
+  fr: {
+    "details": "a modifié les détails du groupe",
+    "accept-invite": "a rejoint le groupe",
+    "leave": "a quitté le groupe",
+    "remove": "a retiré",
+    "promote": "a nommé comme administrateur",
+    "demote": "a retiré le rôle administrateur à",
+    "accept-ownership": "a accepté la propriété du groupe",
+  },
+} as const;
+
+export function getGroupActivityLabel(lang: LangId, action: keyof typeof groupActivity.en) {
+  return groupActivity[lang === "ar" || lang === "fr" ? lang : "en"][action];
 }

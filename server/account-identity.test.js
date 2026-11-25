@@ -1511,6 +1511,17 @@ test("production group management retains legacy history, roles, and live access
   const groupId = created.body.group.id;
   assert.equal((await event).id, groupId);
   assert.deepEqual(created.body.group.members, ["group-owner", "group-reader", "group-outsider"]);
+  const preferenceUrl = `/api/groups/${groupId}/management`;
+  const mutedA = expectSocketEvent(socket, "group:updated");
+  const mutedB = expectSocketEvent(secondDevice, "group:updated");
+  assert.equal((await request(preferenceUrl, { token: reader, method: "POST",
+    body: { action: "notification-preference", muted: true } })).status, 200);
+  assert.equal((await mutedA).muted, true);
+  assert.equal((await mutedB).muted, true);
+  assert.equal((await request(preferenceUrl, { token: owner })).body.group.muted, false);
+  const mutedGroups = await request("/api/groups", { token: reader });
+  assert.equal(mutedGroups.body.groups.find(group => group.id === groupId).muted, true);
+
   const callId = "legacy-group-call-test";
   const startedCall = expectSocketEvent(socket, "group-call:started");
   socket.emit("group-call:start", { groupId, callId, kind: "voice" });
@@ -1544,7 +1555,7 @@ test("production group management retains legacy history, roles, and live access
   const details = token => request(root + "/management", { token });
   assert.equal((await details(invitee)).status, 404);
   assert.deepEqual((await details(reader)).body.group.members.map(member => member.role), ["owner", "member", "member"]);
-  assert.equal((await action(reader, "details", { name: "Denied", description: "", revision: 0 })).status, 403);
+  assert.equal((await action(reader, "details", { name: "Denied", description: "", revision: 1 })).status, 403);
 
   const updateA = expectSocketEvent(socket, "group:updated");
   const updateB = expectSocketEvent(secondDevice, "group:updated");
@@ -1635,6 +1646,12 @@ test("production group management retains legacy history, roles, and live access
   assert.equal(history.body.group.id, groupId);
   assert.equal(history.body.messages[0].id, "legacy-group-msg");
   assert.equal(history.body.messages[1].mediaId, uploaded.body.mediaId);
+  const activity = history.body.messages.filter(message => message.activity);
+  assert.ok(activity.some(message => message.activity.action === "promote" && message.activity.target === "group-reader"));
+  assert.ok(activity.some(message => message.activity.action === "accept-ownership" && message.senderUsername === "group-reader"));
+  assert.ok(activity.some(message => message.activity.action === "leave" && message.senderUsername === "group-owner"));
+  assert.equal(activity.filter(message => message.activity.action === "details").length, 1);
+
 
   const literalText = "Literal .* https://example.test/shared";
   assert.equal((await request(root + "/messages", { token: reader, method: "POST",
