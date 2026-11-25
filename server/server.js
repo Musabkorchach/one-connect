@@ -17,6 +17,7 @@ import { createPrivateData } from "./account-private-data.js";
 import { registerSubscriptionStatus, subscriptionProofMode, subscriptionSettings } from "./account-entitlements.js";
 import { createAccountGroups } from "./account-groups.js";
 import { registerLegacyGroupManagement } from "./legacy-group-management.js";
+import { groupTopics } from "./group-planning.js";
 import { identityBindingsCollection } from "./account-identity.js";
 import { createAccountChat, legacyChat } from "./account-chat.js";
 import { createEmailSocket } from "./email-socket.js";
@@ -439,14 +440,48 @@ function requireSession(req, res, next) {
   });
 }
 
+const groupImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const groupImageLimit = 5 * 1024 * 1024;
+
 function publishLegacyGroup(group) {
-  for (const username of group.members) io.to(`peer:${username}`).emit("group:updated", groupForClient(group));
+  for (const username of group.members) io.to(`peer:${username}`).emit("group:updated", groupForClient(group, username));
 }
 
 if (!bindAccounts) registerLegacyGroupManagement({
   app, groups: groupsCollection, users: emailUsersCollection, requireSession,
   normalize: normalizeMessagingUsername,
+  authorizePhoto(req, group, photoId) {
+    return groupMediaBucket.find({
+      _id: photoId,
+      length: { $gt: 0, $lte: groupImageLimit },
+      "metadata.mimeType": { $in: groupImageTypes },
+      "metadata.groupId": group._id.toHexString(),
+      "metadata.ownerUserId": req.user.userId,
+      "metadata.accountScoped": { $ne: true },
+      "metadata.kind": "image",
+    }).next();
+  },
+  findModerationMessage(group, username, ref, showContent) {
+    return groupMessagesCollection.findOne({
+      groupId: group._id.toHexString(), id: ref.id, senderUsername: ref.senderUsername,
+      deletedFor: { $ne: username }, activity: { $exists: false },
+    }, { projection: showContent
+      ? { _id: 0, groupId: 1, text: 1, kind: 1, mediaId: 1, fileName: 1 }
+      : { _id: 1 } });
+  },
   publish: publishLegacyGroup,
+  commitActivity(filter, update, message) {
+    return mongoClient.withSession(session => session.withTransaction(async () => {
+      const group = await groupsCollection.findOneAndUpdate(filter, update, { session, returnDocument: "after" });
+      if (group) await groupMessagesCollection.insertOne(message, { session });
+      return group;
+    }));
+  },
+  publishActivity(group, message) {
+    for (const username of group.members) {
+      io.to(`peer:${username}`).emit("group:message", { message: groupMessageForClient(message) });
+    }
+  },
   revoke(group, username) {
     io.to(`peer:${username}`).emit("group:access-revoked", { groupId: group._id.toHexString() });
   },
@@ -454,6 +489,49 @@ if (!bindAccounts) registerLegacyGroupManagement({
 });
 
 class LegacyGroupAccessLost extends Error {}
+class GroupPostingDenied extends Error {
+  constructor(message, code, status = 403, retryAfterSeconds) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+function canModerateGroup(group, username) {
+  return group.ownerUsername === username || group.admins?.includes(username);
+}
+
+function checkGroupPosting(group, username) {
+  const now = Date.now();
+  const restricted = group.restrictions?.find(entry => entry.username === username && entry.until > now);
+  if (restricted) {
+    throw new GroupPostingDenied("Posting is temporarily restricted", "GROUP_POSTING_RESTRICTED", 403, Math.ceil((restricted.until - now) / 1000));
+  }
+  if (group.adminsOnly === true && !canModerateGroup(group, username)) {
+    throw new GroupPostingDenied("Only administrators may post", "GROUP_ADMINS_ONLY");
+  }
+}
+
+async function checkGroupSlowMode(group, username, groupId, session) {
+  const seconds = group.slowModeSeconds;
+  if (!seconds || canModerateGroup(group, username)) return;
+  const interval = seconds * 1000;
+  const now = Date.now();
+  const last = await groupMessagesCollection.findOne(
+    { groupId, senderUsername: username, at: { $gt: now - interval }, activity: { $exists: false } },
+    { session, sort: { at: -1 }, projection: { at: 1 } },
+  );
+  if (last) throw new GroupPostingDenied("Slow mode is active", "GROUP_SLOW_MODE", 429, Math.ceil((last.at + interval - now) / 1000));
+}
+
+function reportGroupPostingError(res, failure) {
+  if (failure.retryAfterSeconds) res.set("Retry-After", String(failure.retryAfterSeconds));
+  return res.status(failure.status).json({
+    error: failure.message, code: failure.code,
+    ...(failure.retryAfterSeconds && { retryAfterSeconds: failure.retryAfterSeconds }),
+  });
+}
 
 async function writeLegacyGroup(groupId, username, execute) {
   return mongoClient.withSession(session => session.withTransaction(async () => {
@@ -531,7 +609,7 @@ app.post(
       }
 
       const maxSize =
-        (kind === "image" || kind === "voice" ? 5 : 25) * 1024 * 1024;
+        kind === "image" || kind === "voice" ? groupImageLimit : 25 * 1024 * 1024;
 
       if (file.size > maxSize) {
         return res.status(413).json({
@@ -590,7 +668,10 @@ app.post(
           return res.status(201).json({ mediaId: stored.toHexString(), groupId, kind, fileName, mimeType, fileSize: file.size });
         }
         const stored = await saveScopedFile(db,
-          (_accounts, execute) => writeLegacyGroup(groupId, req.groupUsername, execute),
+          (_accounts, execute) => writeLegacyGroup(groupId, req.groupUsername, (session, group) => {
+            checkGroupPosting(group, req.groupUsername);
+            return execute(session);
+          }),
           null, "group_media", fileName, file.buffer, metadata);
 
         return res.status(201).json({
@@ -603,6 +684,7 @@ app.post(
         });
       } catch (error) {
         if (accountGroups) return accountGroups.report(res, error, next);
+        if (error instanceof GroupPostingDenied) return reportGroupPostingError(res, error);
         if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
 
         console.error("[GROUP MEDIA UPLOAD ERROR]", error);
@@ -731,7 +813,7 @@ app.get("/api/groups", requireSession, async (req, res) => {
 
     return res.json({
       groups: groups.map((group) => ({
-        ...groupForClient(group),
+        ...groupForClient(group, username),
         unreadCount: unreadByGroup.get(group._id.toString()) || 0,
       })),
     });
@@ -767,9 +849,12 @@ app.get(
         return res.status(404).json({ error: "Media not found" });
       }
 
+      const photo = !accountGroups && media.metadata.kind === "image" && await groupsCollection.findOne({
+        _id: req.chatGroup._id, members: req.groupUsername, photoId: mediaId,
+      }, { projection: { _id: 1 } });
       const linked = accountGroups
         ? await accountGroups.authorizeMediaRead(req, res, next, media, mediaId)
-        : await groupMessagesCollection.findOne({
+        : photo || await groupMessagesCollection.findOne({
             groupId,
             mediaId,
             senderUsername: media.metadata?.senderUsername,
@@ -788,7 +873,7 @@ app.get(
       const mimeType = media.metadata.mimeType;
 
       const allowedTypes = {
-        image: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        image: groupImageTypes,
         video: ["video/mp4", "video/webm"],
         voice: ["audio/webm", "audio/mp4", "audio/ogg", "audio/wav"],
         file: ["application/octet-stream"],
@@ -852,12 +937,21 @@ app.get(
   },
 );
 
-function groupForClient(group) {
+function groupForClient(group, username) {
   return {
     id: group._id.toString(),
     name: group.name,
     ownerUsername: group.ownerUsername,
     members: group.members,
+    enhancedGroups: true,
+    moderationEnabled: true,
+    mentionAlerts: group.mentionAlertsBy?.includes(username) ?? false,
+    topics: groupTopics(group),
+    adminsOnly: group.adminsOnly === true,
+    photoId: group.photoId ?? null,
+    muted: group.mutedBy?.includes(username) ?? false,
+    pinned: group.pinned ?? null,
+    admins: group.admins ?? [],
     state: group.state ?? "active",
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
@@ -872,6 +966,11 @@ function groupMessageForClient(message) {
     senderUsername: message.senderUsername,
     kind: message.kind,
     text: message.text,
+    ...(message.activity && { activity: message.activity }),
+    ...(message.replyTo && { replyTo: message.replyTo }),
+    ...(message.topicId && { topicId: message.topicId }),
+    ...(message.mentions?.length && { mentions: message.mentions }),
+    ...(message.reactions && { reactions: message.reactions, reactionRevision: message.reactionRevision }),
     at: message.at,
     readBy: message.readBy || [],
     mediaId: message.mediaId,
@@ -893,7 +992,16 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
     return res.status(400).json({ error: "Invalid group ID" });
   }
 
-  const before = req.query.before;
+  const { before, filter: category, q, topic } = req.query;
+  if (topic !== undefined && (typeof topic !== "string" || !/^[a-f0-9]{24}$/.test(topic))) {
+    return res.status(400).json({ error: "Invalid topic" });
+  }
+  if (category !== undefined && !["search", "media", "files", "links"].includes(category)) {
+    return res.status(400).json({ error: "Invalid history filter" });
+  }
+  if (category === "search" && (typeof q !== "string" || !q.trim() || q.length > 120)) {
+    return res.status(400).json({ error: "Invalid search query" });
+  }
 
   if (
     before !== undefined &&
@@ -921,6 +1029,14 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
       filter._id = { $lt: new ObjectId(before) };
     }
 
+    if (topic && !group.topics?.some(entry => entry.id === topic)) return res.status(404).json({ error: "Topic not found" });
+    if (topic) filter.topicId = topic;
+    else if (!category) filter.topicId = { $exists: false };
+    if (category === "search") filter.text = { $regex: q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+    if (category === "media") filter.kind = { $in: ["image", "video", "voice"] };
+    if (category === "files") filter.kind = "file";
+    if (category === "links") filter.text = { $regex: "https?://[^\\s<>]+", $options: "i" };
+
     const records = await groupMessagesCollection
       .find(filter)
       .sort({ _id: -1 })
@@ -933,8 +1049,8 @@ app.get("/api/groups/:groupId/messages", requireSession, async (req, res) => {
       return res.status(404).json({ error: "Group not found" });
     }
 
-    return res.json({
-      group: groupForClient(group),
+    return res.set("Cache-Control", "private, no-store").json({
+      group: groupForClient(group, username),
       messages: page.slice().reverse().map(groupMessageForClient),
       hasMore,
       nextCursor: hasMore
@@ -982,8 +1098,18 @@ app.post(
       return res.status(400).json({ error: "Invalid media ID" });
     }
 
+    const { replyTo, topicId } = data;
+    if (topicId !== undefined && (typeof topicId !== "string" || !/^[a-f0-9]{24}$/.test(topicId))) {
+      return res.status(400).json({ error: "Invalid topic" });
+    }
+    if (replyTo !== undefined && (!replyTo || typeof replyTo.id !== "string" || !replyTo.id.trim() ||
+        replyTo.id.length > 120 || typeof replyTo.senderUsername !== "string" ||
+        normalizeMessagingUsername(replyTo.senderUsername) !== replyTo.senderUsername)) {
+      return res.status(400).json({ error: "Invalid reply reference", code: "GROUP_REPLY_INVALID" });
+    }
+
     try {
-      const { message, created, members } = await writeLegacyGroup(groupId, senderUsername, async (session, currentGroup) => {
+      const { message, created, members, replyUnavailable, topicUnavailable } = await writeLegacyGroup(groupId, senderUsername, async (session, currentGroup) => {
         const identity = {
           groupId,
           senderUsername,
@@ -991,9 +1117,17 @@ app.post(
         };
 
         let message = await groupMessagesCollection.findOne(identity, { session });
+        if (message?.activity) return { message: null };
         let created = false;
 
         if (!message) {
+          checkGroupPosting(currentGroup, senderUsername);
+          await checkGroupSlowMode(currentGroup, senderUsername, groupId, session);
+          if (topicId && !currentGroup.topics?.some(entry => entry.id === topicId && !entry.closed)) return { topicUnavailable: true };
+          if (replyTo && !await groupMessagesCollection.findOne({
+            groupId, id: replyTo.id, senderUsername: replyTo.senderUsername, topicId: topicId ?? { $exists: false },
+            deletedFor: { $ne: senderUsername }, activity: { $exists: false },
+          }, { session, projection: { _id: 1 } })) return { replyUnavailable: true };
           let mediaFields = {};
 
           if (data.kind !== "text") {
@@ -1027,11 +1161,16 @@ app.post(
             };
           }
 
+          const mentions = [...new Set([...data.text.matchAll(/(?<![a-z0-9_.@-])@([a-z0-9_.-]{1,32})(?![a-z0-9_.-])/gi)]
+            .map(([, username]) => username.toLowerCase()).filter(username => currentGroup.members.includes(username)))];
           const candidate = {
             _id: new ObjectId(),
             ...identity,
             kind: data.kind,
             text: data.text.trim(),
+            ...(replyTo && { replyTo: { id: replyTo.id, senderUsername: replyTo.senderUsername } }),
+            ...(topicId && { topicId }),
+            ...(mentions.length && { mentions }),
             ...mediaFields,
             at: Date.now(),
             readBy: [senderUsername],
@@ -1050,15 +1189,21 @@ app.post(
         );
         return { message, created, members: currentGroup.members };
       });
+      if (topicUnavailable) return res.status(409).json({ error: "Topic is unavailable", code: "GROUP_TOPIC_UNAVAILABLE" });
+      if (replyUnavailable) return res.status(404).json({ error: "Original message is unavailable", code: "GROUP_REPLY_UNAVAILABLE" });
       if (!message) return res.status(400).json({ error: "Media is unavailable or does not match this message" });
 
       const result = groupMessageForClient(message);
 
-      const current = await groupsCollection.findOne({ _id: group._id }, { projection: { members: 1 } });
+      const current = await groupsCollection.findOne({ _id: group._id }, { projection: { members: 1, mutedBy: 1, mentionAlertsBy: 1 } });
       for (const username of members.filter(name => current?.members.includes(name))) {
         io.to(`peer:${username}`).emit("group:message", {
           message: result,
         });
+        if (created && username !== senderUsername && message.mentions?.includes(username) &&
+            current.mentionAlertsBy?.includes(username) && !current.mutedBy?.includes(username)) {
+          io.to(`peer:${username}`).emit("group:mention", { groupId });
+        }
       }
 
       return res.status(created ? 201 : 200).json({
@@ -1066,6 +1211,7 @@ app.post(
       });
     } catch (error) {
       if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
+      if (error instanceof GroupPostingDenied) return reportGroupPostingError(res, error);
       console.error("[GROUP MESSAGE SEND ERROR]", error);
       return res.status(500).json({
         error: "Group message could not be sent",
@@ -1073,6 +1219,65 @@ app.post(
     }
   },
 );
+
+const groupReactions = ["like", "heart", "laugh"];
+
+if (!accountGroups) app.post("/api/groups/:groupId/interactions", requireSession, requireGroupMember, async (req, res, next) => {
+  const { action, target, reaction } = req.body ?? {};
+  if (!["react", "pin", "unpin"].includes(action) || !target ||
+      typeof target.id !== "string" || !target.id.trim() || target.id.length > 120 ||
+      typeof target.senderUsername !== "string" ||
+      normalizeMessagingUsername(target.senderUsername) !== target.senderUsername ||
+      (action === "react" && reaction !== null && !groupReactions.includes(reaction))) {
+    return res.status(400).json({ error: "Invalid group interaction" });
+  }
+  const groupId = req.chatGroup._id.toHexString();
+  const username = req.groupUsername;
+  try {
+    const result = await writeLegacyGroup(groupId, username, async (session, group) => {
+      if (action !== "react" && group.ownerUsername !== username && !group.admins?.includes(username)) {
+        return { status: 403, error: "Group management permission required" };
+      }
+      const identity = { id: target.id, senderUsername: target.senderUsername };
+      const message = await groupMessagesCollection.findOne({
+        ...identity, groupId, deletedFor: { $ne: username }, activity: { $exists: false },
+      }, { session });
+      if (!message) return { status: 404, error: "Group message is unavailable" };
+      if (action === "react") {
+        const reactions = {};
+        for (const key of groupReactions) {
+          const people = (message.reactions?.[key] ?? []).filter(person => person !== username && group.members.includes(person));
+          if (key === reaction) people.push(username);
+          if (people.length) reactions[key] = people;
+        }
+        const reactionRevision = (message.reactionRevision ?? 0) + 1;
+        await groupMessagesCollection.updateOne({ _id: message._id }, { $set: { reactions, reactionRevision } }, { session });
+        return { message: { ...message, reactions, reactionRevision } };
+      }
+      if (action === "unpin" && (group.pinned?.id !== identity.id || group.pinned?.senderUsername !== identity.senderUsername)) {
+        return { status: 409, error: "Pinned message changed" };
+      }
+      const pinned = action === "pin" ? identity : null;
+      await groupsCollection.updateOne({ _id: group._id }, { $set: { pinned } }, { session });
+      return { group: { ...group, pinned } };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    const current = await groupsCollection.findOne({ _id: req.chatGroup._id });
+    if (!current?.members.includes(username)) return res.status(404).json({ error: "Group not found" });
+    if (result.message) {
+      const message = groupMessageForClient(result.message);
+      for (const member of current.members) {
+        io.to(`peer:${member}`).emit("group:message", { message });
+      }
+      return res.json({ message });
+    }
+    publishLegacyGroup(current);
+    return res.json({ pinned: current.pinned });
+  } catch (error) {
+    if (error instanceof LegacyGroupAccessLost) return res.status(404).json({ error: "Group not found" });
+    return next(error);
+  }
+});
 
 app.post("/api/groups/:groupId/read", requireSession, async (req, res) => {
   const username = normalizeMessagingUsername(req.user.piUsername);

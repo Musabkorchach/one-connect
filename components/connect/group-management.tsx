@@ -1,15 +1,32 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, type GroupManagement } from "@/lib/api-client";
+import { QRCodeSVG } from "qrcode.react";
+import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, requestGroupJoin, uploadGroupMedia, type GroupManagement } from "@/lib/api-client";
 import { usePiAuth } from "@/contexts/pi-auth-context";
-import { Sheet } from "./feedback";
+import { ConfirmDialog, Sheet } from "./feedback";
+import { GroupAvatar } from "./group-avatar";
+import { GroupModerationPanel } from "./group-moderation-panel";
+import { GroupPlanning } from "./group-planning";
+import { GroupHistoryBrowser } from "./group-history-browser";
+import { useConnect } from "@/contexts/connect-context";
+import { getGroupCopy, groupFailureMessage } from "@/lib/connect/i18n";
+
+const actionButton = "min-h-11 rounded-lg px-2.5 text-sm font-medium underline-offset-4 hover:underline focus-visible:outline";
+
 
 export function GroupManagementSheet({ groupId, token, username, onClose, onLeave }: {
   groupId: string; token: string; username: string; onClose: () => void; onLeave: () => void;
 }) {
+  const { lang } = useConnect();
+  const copy = getGroupCopy(lang);
+  const [confirmation, setConfirmation] = useState<{ label: string; action: string; data?: Record<string, unknown> } | null>(null);
+  const [shared, setShared] = useState<{ url: string; generation: string } | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
   const [group, setGroup] = useState<GroupManagement | null>(null);
   const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [memberQuery, setMemberQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const lifetime = useRef<AbortController | null>(null);
   const refreshRef = useRef<() => void>(() => {});
@@ -22,7 +39,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     const refresh = () => {
       const request = ++revision;
       void getGroupManagement(token, groupId, scope.signal).then(({ group: result }) => {
-        if (!scope.signal.aborted && request === revision) { setGroup(result); setError(""); }
+        if (!scope.signal.aborted && request === revision) setGroup(result);
       }, (failure: Error) => {
         if (!scope.signal.aborted && request === revision) { setGroup(null); setError(failure.message); }
       });
@@ -34,49 +51,97 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     return () => { scope.abort(); unsub(); disconnectRefresh(); };
   }, [groupId, token]);
 
-  async function act(action: string, data = {}) {
+  async function act(action: string, data = {}, photo?: File) {
     const scope = lifetime.current;
     if (!scope || scope.signal.aborted || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     setError("");
+    setFeedback("");
     try {
-      const { group: result } = await manageGroup(token, groupId, action, data, scope.signal);
+      const payload = photo ? { photoId: (await uploadGroupMedia(token, groupId, "image", photo, scope.signal)).mediaId } : data;
       if (scope.signal.aborted) return;
+      const { group: result, invitationUrl: createdUrl } = await manageGroup(token, groupId, action, payload, scope.signal);
+      if (scope.signal.aborted) return;
+      setFeedback(copy.updated);
+      if (createdUrl && result?.inviteGeneration) setShared({ url: createdUrl, generation: result.inviteGeneration });
+      if (action === "revoke-link" || action === "sharing-permission") setShared(null);
       if (action === "leave" && !result) onLeave();
       else refreshRef.current();
     } catch (failure) {
-      if (!scope.signal.aborted) setError(failure instanceof Error ? failure.message : "Group update failed");
+      if (!scope.signal.aborted) setError(groupFailureMessage(failure, copy));
     } finally {
       busyRef.current = false;
       if (!scope.signal.aborted) setBusy(false);
     }
   }
 
+  if (showHistory) {
+    return <GroupHistoryBrowser groupId={groupId} token={token} onClose={() => setShowHistory(false)} />;
+  }
+
   return (
-    <Sheet open title="Group information" onClose={onClose}>
-      <div className="max-h-[72vh] space-y-4 overflow-y-auto p-4">
+    <Sheet open title={copy.title} onClose={onClose}>
+      <ConfirmDialog open={confirmation !== null} title={copy.confirm} message={confirmation?.label ?? ""}
+        confirmLabel={copy.confirm} cancelLabel={copy.cancel}
+        onCancel={() => setConfirmation(null)} onConfirm={() => {
+          if (!confirmation) return;
+          setConfirmation(null);
+          void act(confirmation.action, confirmation.data);
+        }} />
+      <div dir={lang === "ar" ? "rtl" : "ltr"} className="max-h-[60dvh] space-y-4 overflow-y-auto py-3">
         {error && <p role="alert">{error}</p>}
-        {!group && !error && <p role="status">Loading group information…</p>}
+        {feedback && <p role="status">{feedback}</p>}
+        {!group && !error && <p role="status">{copy.loading}</p>}
         {group && (
           <>
-            <h3 className="font-semibold">{group.name}</h3>
+            <div className="flex items-center gap-3">
+              <GroupAvatar groupId={groupId} name={group.name} photoId={group.photoId} size={52} />
+              <h3 className="font-semibold">{group.name}</h3>
+            </div>
+            {group.enhancedGroups && group.canManage && <div className="flex flex-wrap gap-2">
+              <label className={actionButton + " inline-flex items-center focus-within:outline"}>
+                {copy.changePhoto}
+                <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="sr-only"
+                  aria-label={copy.changePhoto} disabled={busy} onChange={event => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void act("photo", {}, file);
+                  }} />
+              </label>
+              {group.photoId && <button type="button" className={actionButton} disabled={busy}
+                onClick={() => setConfirmation({ label: copy.removePhoto, action: "photo", data: { photoId: null } })}>
+                {copy.removePhoto}
+              </button>}
+            </div>}
+            {group.enhancedGroups && <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>}
             {group.description && <p className="whitespace-pre-wrap">{group.description}</p>}
-            <p>Owner: @{group.owner}</p>
-            <ul aria-label="Group members" className="space-y-2">
-              {group.members.map(member => (
-                <li key={member.username} className="flex flex-wrap gap-x-3 gap-y-1">
+            <p>{copy.owner} ? @{group.owner}</p>
+            {group.moderation?.rules && <section>
+              <h4 className="font-medium">{copy.rules}</h4>
+              <p dir="auto" className="whitespace-pre-wrap break-words">{group.moderation.rules}</p>
+            </section>}
+            {group.canManage && <p role="status">{copy.pendingInvites} ? {group.invitations.length}</p>}
+            <label className="block">
+              {copy.memberSearch}
+              <input type="search" dir="auto" className="min-h-11 w-full rounded-lg border bg-background p-2"
+                value={memberQuery} onChange={event => setMemberQuery(event.target.value)} />
+            </label>
+            <ul aria-label={copy.members} className="space-y-2">
+              {group.members.filter(member => member.username.includes(memberQuery.trim().toLowerCase().replace(/^@+/, ""))).map(member => (
+                <li key={member.username} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border p-2">
                   <span>@{member.username} · {member.role}</span>
                   {group.canManage && member.role !== "owner" && (group.ownRole === "owner" || member.role === "member") &&
-                    <button type="button" className="underline" disabled={busy}
-                      onClick={() => void act("remove", { username: member.username })}>Remove</button>}
+                    <button type="button" className={actionButton} disabled={busy}
+                      onClick={() => setConfirmation({ label: copy.remove + " @" + member.username, action: "remove", data: { username: member.username } })}>{copy.remove}</button>}
                   {group.canManage && group.ownRole === "owner" && member.role !== "owner" && (
                     <>
-                      <button type="button" className="underline" disabled={busy} onClick={() => void act(
-                        member.role === "admin" ? "demote" : "promote", { username: member.username },
-                      )}>{member.role === "admin" ? "Remove admin role" : "Make admin"}</button>
-                      <button type="button" className="underline" disabled={busy}
-                        onClick={() => void act("offer", { username: member.username })}>Offer ownership</button>
+                      <button type="button" className={actionButton} disabled={busy} onClick={() => {
+                        const action = member.role === "admin" ? "demote" : "promote";
+                        setConfirmation({ label: copy[action] + " @" + member.username, action, data: { username: member.username } });
+                      }}>{copy[member.role === "admin" ? "demote" : "promote"]}</button>
+                      <button type="button" className={actionButton} disabled={busy}
+                        onClick={() => setConfirmation({ label: copy.offer + " @" + member.username, action: "offer", data: { username: member.username } })}>{copy.offer}</button>
                     </>
                   )}
                 </li>
@@ -84,14 +149,71 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
             </ul>
             {group.offer?.toAccountId === username && (
               <div className="flex flex-wrap gap-3">
-                <span>@{group.offer.fromAccountId} offered you ownership.</span>
-                <button type="button" className="underline" disabled={busy}
-                  onClick={() => void act("accept-ownership", { offerId: group.offer?.id })}>Accept ownership</button>
-                <button type="button" className="underline" disabled={busy}
-                  onClick={() => void act("decline-ownership", { offerId: group.offer?.id })}>Decline</button>
+                <span>@{group.offer.fromAccountId} {copy.receivedOffer}</span>
+                <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => setConfirmation({ label: copy.acceptOwnership, action: "accept-ownership", data: { offerId: group.offer?.id } })}>{copy.acceptOwnership}</button>
+                <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => void act("decline-ownership", { offerId: group.offer?.id })}>{copy.decline}</button>
               </div>
             )}
-            {group.ownRole === "owner" && group.offer && <p role="status">Ownership offered to @{group.offer.toAccountId}.</p>}
+            {group.ownRole === "owner" && group.offer && <p role="status">{copy.sentOffer} @{group.offer.toAccountId}.</p>}
+            {group.enhancedGroups && <details className="space-y-2 rounded-xl border p-3">
+              <summary className="cursor-pointer font-medium">{copy.advanced}</summary>
+            {(group.canManage || group.canLeave) && (
+              <label className="flex min-h-11 items-center gap-3">
+                <input type="checkbox" checked={group.muted === true} disabled={busy}
+                  onChange={event => void act("notification-preference", { muted: event.target.checked })} />
+                {copy.muteBadges}
+              </label>
+            )}
+            {!!group.moderation && (group.canManage || group.canLeave) && <label className="flex min-h-11 items-center gap-3">
+              <input type="checkbox" checked={group.mentionAlerts === true} disabled={busy}
+                onChange={event => void act("notification-preference", { mentionAlerts: event.target.checked })} />
+              {copy.mentionAlerts}
+            </label>}
+            {group.canManage && group.moderation && <GroupModerationPanel group={group} token={token}
+              busy={busy} act={act} confirm={(label, action, data) => setConfirmation({ label, action, data })} />}
+            {group.enhancedGroups && group.canManage && group.ownRole === "owner" && (
+              <label className="flex min-h-11 items-center gap-3">
+                <input type="checkbox" checked={group.adminsOnly === true} disabled={busy}
+                  onChange={event => setConfirmation({ label: copy.postingPolicy, action: "posting-policy", data: { adminsOnly: event.target.checked } })} />
+                {copy.postingPolicy}
+              </label>
+            )}
+            {group.enhancedGroups && group.canManage && <>
+              {group.ownRole === "owner" && <label className="flex min-h-11 items-center gap-3">
+                <input type="checkbox" checked={group.adminsCanShare === true} disabled={busy}
+                  onChange={event => setConfirmation({ label: copy.sharingPermission, action: "sharing-permission", data: { adminsCanShare: event.target.checked } })} />
+                {copy.sharingPermission}
+              </label>}
+              {group.canShare && <section className="space-y-2 rounded-xl border p-2">
+                <h4 className="font-medium">{copy.inviteLink}</h4>
+                <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => group.inviteExpiresAt
+                    ? setConfirmation({ label: copy.createLink, action: "create-link" })
+                    : void act("create-link")}>{copy.createLink}</button>
+                {group.inviteExpiresAt && <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => setConfirmation({ label: copy.revokeLink, action: "revoke-link" })}>{copy.revokeLink}</button>}
+                {group.inviteExpiresAt && shared && shared.generation === group.inviteGeneration && <div className="space-y-2">
+                  <input dir="ltr" readOnly aria-label={copy.inviteLink} value={shared.url}
+                    onFocus={event => event.currentTarget.select()} className="w-full rounded-lg border p-2" />
+                  <QRCodeSVG value={shared.url} title={copy.inviteLink} size={176} marginSize={4} />
+                </div>}
+              </section>}
+              {!!group.joinRequests?.length && <ul aria-label={copy.joinRequests} className="space-y-2">
+                {group.joinRequests.map(person => <li key={person} className="flex flex-wrap items-center gap-2">
+                  <bdi>@{person}</bdi>
+                  <button type="button" className={actionButton} disabled={busy}
+                    onClick={() => setConfirmation({ label: copy.approve + " @" + person, action: "approve-join", data: { username: person } })}>{copy.approve}</button>
+                  <button type="button" className={actionButton} disabled={busy}
+                    onClick={() => setConfirmation({ label: copy.decline + " @" + person, action: "decline-join", data: { username: person } })}>{copy.decline}</button>
+                </li>)}
+              </ul>}
+            </>}
+            {group.planning && <GroupPlanning planning={group.planning}
+              canManage={group.canManage} active={group.canManage || group.canLeave} busy={busy} act={act}
+              closeItem={(action, id) => setConfirmation({ label: copy.closeItem, action, data: { id } })} />}
+            </details>}
             {group.canManage && (
               <>
                 <form key={group.revision} className="space-y-2" onSubmit={event => {
@@ -99,28 +221,28 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
                   const data = new FormData(event.currentTarget);
                   void act("details", { name: data.get("name"), description: data.get("description"), revision: group.revision });
                 }}>
-                  <label className="block">Name <input name="name" className="w-full rounded border bg-background p-2"
+                  <label className="block">{copy.name}<input name="name" dir="auto" className="w-full rounded border bg-background p-2"
                     required maxLength={80} defaultValue={group.name} /></label>
-                  <label className="block">Description <textarea name="description" className="w-full rounded border bg-background p-2"
+                  <label className="block">{copy.description}<textarea name="description" dir="auto" className="w-full rounded border bg-background p-2"
                     maxLength={500} defaultValue={group.description} /></label>
-                  <button className="underline" disabled={busy}>Save details</button>
+                  <button className={actionButton} disabled={busy}>{copy.save}</button>
                 </form>
                 <form className="flex gap-2" onSubmit={event => {
                   event.preventDefault();
                   void act("invite", { username: new FormData(event.currentTarget).get("username") });
                 }}>
-                  <input name="username" aria-label="Pi username" placeholder="Pi username" required maxLength={33}
+                  <input name="username" aria-label={copy.username} placeholder={copy.username} dir="ltr" required maxLength={33}
                     className="min-w-0 flex-1 rounded border bg-background p-2" />
-                  <button className="underline" disabled={busy}>Invite</button>
+                  <button className={actionButton} disabled={busy}>{copy.invite}</button>
                 </form>
                 <ul className="space-y-2">{group.invitations.map(person => (
-                  <li key={person}>@{person} <button type="button" className="underline" disabled={busy}
-                    onClick={() => void act("revoke-invite", { username: person })}>Revoke invitation</button></li>
+                  <li key={person}>@{person} <button type="button" className={actionButton} disabled={busy}
+                    onClick={() => setConfirmation({ label: copy.revoke + " @" + person, action: "revoke-invite", data: { username: person } })}>{copy.revoke}</button></li>
                 ))}</ul>
               </>
             )}
-            {group.canLeave && <button type="button" className="text-destructive underline" disabled={busy}
-              onClick={() => void act("leave")}>Leave group</button>}
+            {group.canLeave && <button type="button" className={actionButton + " text-destructive"} disabled={busy}
+              onClick={() => setConfirmation({ label: copy.leave, action: "leave" })}>{copy.leave}</button>}
           </>
         )}
       </div>
@@ -130,8 +252,11 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
 
 export function GroupInvitations() {
   const { sessionToken } = usePiAuth();
+  const { lang } = useConnect();
+  const copy = getGroupCopy(lang);
   const [invitations, setInvitations] = useState<Awaited<ReturnType<typeof getGroupInvitations>>["invitations"]>([]);
   const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const refreshRef = useRef<() => void>(() => {});
   const lifetime = useRef<AbortController | null>(null);
@@ -158,11 +283,14 @@ export function GroupInvitations() {
     const scope = lifetime.current;
     if (!sessionToken || !scope || scope.signal.aborted || busy) return;
     setBusy(true);
+    setFeedback("");
+    setError("");
     try {
       await manageGroup(sessionToken, id, accept ? "accept-invite" : "decline-invite", {}, scope.signal);
+      if (!scope.signal.aborted) setFeedback(copy.inviteUpdated);
       refreshRef.current();
     } catch (failure) {
-      if (!scope.signal.aborted) setError(failure instanceof Error ? failure.message : "Invitation update failed");
+      if (!scope.signal.aborted) setError(groupFailureMessage(failure, copy));
     } finally {
       if (!scope.signal.aborted) setBusy(false);
     }
@@ -170,13 +298,68 @@ export function GroupInvitations() {
   return (
     <>
       {error && <p className="px-3 py-2 text-sm" role="alert">{error}</p>}
-      {invitations.length > 0 && <ul aria-label="Group invitations" className="space-y-2 px-3 py-2">
-        {invitations.map(invite => <li key={invite.id} className="space-x-2">
+      {feedback && <p className="px-3 py-2 text-sm" role="status">{feedback}</p>}
+      {invitations.length > 0 && <ul dir={lang === "ar" ? "rtl" : "ltr"} aria-label={copy.invitations} className="space-y-2 px-3 py-2">
+        {invitations.map(invite => <li key={invite.id} className="flex flex-wrap items-center gap-2">
           <span>{invite.name} · @{invite.owner}</span>
-          <button type="button" className="underline" disabled={busy} onClick={() => void respond(invite.id, true)}>Accept</button>
-          <button type="button" className="underline" disabled={busy} onClick={() => void respond(invite.id, false)}>Decline</button>
+          <button type="button" className={actionButton} disabled={busy} onClick={() => void respond(invite.id, true)}>{copy.accept}</button>
+          <button type="button" className={actionButton} disabled={busy} onClick={() => void respond(invite.id, false)}>{copy.decline}</button>
         </li>)}
       </ul>}
     </>
   );
+}
+
+export function GroupJoinLink() {
+  const { sessionToken } = usePiAuth();
+  const { lang } = useConnect();
+  const copy = getGroupCopy(lang);
+  const [invitation, setInvitation] = useState("");
+  const [notice, setNotice] = useState<"sent" | "unavailable" | "error" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const lifetime = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    const scope = new AbortController();
+    lifetime.current = scope;
+    const url = new URL(window.location.href);
+    const input = url.searchParams.get("groupInvite");
+    setInvitation(input ?? "");
+    return () => scope.abort();
+  }, [sessionToken]);
+
+  function close() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("groupInvite");
+    window.history.replaceState(window.history.state, "", url);
+    setInvitation("");
+  }
+
+  async function request() {
+    const scope = lifetime.current;
+    if (!sessionToken || !scope || scope.signal.aborted || busy) return;
+    setBusy(true);
+    try {
+      await requestGroupJoin(sessionToken, invitation, scope.signal);
+      if (scope.signal.aborted) return;
+      setNotice("sent");
+      close();
+    } catch (error) {
+      if (scope.signal.aborted) return;
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      setNotice(code === "GROUP_LINK_UNAVAILABLE" ? "unavailable" : "error");
+    } finally {
+      if (!scope.signal.aborted) setBusy(false);
+    }
+  }
+
+  const result = notice === "sent" ? copy.requestSent : notice === "unavailable" ? copy.linkUnavailable : copy.failure;
+  return <>
+    {notice === "sent" && <p role="status" className="px-3">{result}</p>}
+    {invitation && <Sheet open title={copy.requestJoin} onClose={close}>
+      {notice && notice !== "sent" && <p role="alert">{result}</p>}
+      <button type="button" disabled={busy} className={actionButton} onClick={() => void request()}>{copy.requestJoin}</button>
+    </Sheet>}
+  </>;
 }

@@ -3,11 +3,10 @@
 import { useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { useGroups } from "@/contexts/group-context";
-import { Avatar } from "./ui";
+import { GroupAvatar } from "./group-avatar";
 import { CreateGroupSheet } from "./create-group-sheet";
 import { GroupConversationView } from "./group-conversation-view";
-import { GroupInvitations } from "./group-management";
-import { hueFromString } from "@/lib/connect/data";
+import { GroupInvitations, GroupJoinLink } from "./group-management";
 
 export function GroupsPanel({ query = "" }: { query?: string }) {
   const { lang } = useConnect();
@@ -54,6 +53,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
         </p>
       )}
 
+      <GroupJoinLink />
       <GroupInvitations />
       <ul>
         {filtered.map((group) => (
@@ -63,11 +63,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
               onClick={() => setOpenGroupId(group.id)}
               className="pc-press flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-start hover:bg-card/50"
             >
-              <Avatar
-                name={group.name}
-                color={hueFromString(group.id)}
-                size={52}
-              />
+              <GroupAvatar name={group.name} groupId={group.id} photoId={group.photoId} size={52} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold">
                   {group.name}
@@ -76,7 +72,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
                   {group.members.length} {arabic ? "أعضاء" : "members"}
                 </span>
               </span>
-             {group.unreadCount > 0 && (
+             {!group.muted && group.unreadCount > 0 && (
                 <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-bold text-primary-foreground">
                   {group.unreadCount}
                 </span>

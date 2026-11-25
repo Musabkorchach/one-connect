@@ -25,7 +25,7 @@ export function BottomNav({
   const { groups } = useGroups();
 
   const groupUnread = groups.reduce(
-    (sum, group) => sum + (group.unreadCount || 0),
+    (sum, group) => sum + (group.muted ? 0 : group.unreadCount || 0),
     0,
   );
 

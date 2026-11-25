@@ -8,6 +8,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useConnect } from "@/contexts/connect-context";
+import { getGroupCopy } from "@/lib/connect/i18n";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import {
   createGroup as createGroupRequest,
@@ -73,6 +75,9 @@ function mergeGroups(
 
 export function GroupProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated, sessionToken, piUsername } = usePiAuth();
+  const { lang, pushToast } = useConnect();
+  const alertRef = useRef({ text: "", pushToast });
+  alertRef.current = { text: getGroupCopy(lang).mentionNotice, pushToast };
   const token = isAuthenticated ? sessionToken : null;
   const me = (piUsername || "").replace(/^@+/, "").toLowerCase();
 
@@ -202,6 +207,12 @@ export function GroupProvider({ children }: { children: ReactNode }) {
       void refresh();
     });
 
+    const unsubscribeMention = onGroupEvent("group:mention", event => {
+      if (active() && /^[a-f0-9]{24}$/.test(event?.groupId) && document.visibilityState === "visible") {
+        alertRef.current.pushToast(alertRef.current.text);
+      }
+    });
+
     const unsubscribeConnect = onGroupEvent("connect", () => {
       void refresh();
     });
@@ -222,6 +233,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
       unsubscribeMessage();
       unsubscribeRead();
       unsubscribeConnect();
+      unsubscribeMention();
       window.removeEventListener("online", refresh);
       document.removeEventListener("visibilitychange", onVisible);
     };

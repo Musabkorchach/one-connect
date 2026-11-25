@@ -1511,6 +1511,17 @@ test("production group management retains legacy history, roles, and live access
   const groupId = created.body.group.id;
   assert.equal((await event).id, groupId);
   assert.deepEqual(created.body.group.members, ["group-owner", "group-reader", "group-outsider"]);
+  const preferenceUrl = `/api/groups/${groupId}/management`;
+  const mutedA = expectSocketEvent(socket, "group:updated");
+  const mutedB = expectSocketEvent(secondDevice, "group:updated");
+  assert.equal((await request(preferenceUrl, { token: reader, method: "POST",
+    body: { action: "notification-preference", muted: true } })).status, 200);
+  assert.equal((await mutedA).muted, true);
+  assert.equal((await mutedB).muted, true);
+  assert.equal((await request(preferenceUrl, { token: owner })).body.group.muted, false);
+  const mutedGroups = await request("/api/groups", { token: reader });
+  assert.equal(mutedGroups.body.groups.find(group => group.id === groupId).muted, true);
+
   const callId = "legacy-group-call-test";
   const startedCall = expectSocketEvent(socket, "group-call:started");
   socket.emit("group-call:start", { groupId, callId, kind: "voice" });
@@ -1544,7 +1555,7 @@ test("production group management retains legacy history, roles, and live access
   const details = token => request(root + "/management", { token });
   assert.equal((await details(invitee)).status, 404);
   assert.deepEqual((await details(reader)).body.group.members.map(member => member.role), ["owner", "member", "member"]);
-  assert.equal((await action(reader, "details", { name: "Denied", description: "", revision: 0 })).status, 403);
+  assert.equal((await action(reader, "details", { name: "Denied", description: "", revision: 1 })).status, 403);
 
   const updateA = expectSocketEvent(socket, "group:updated");
   const updateB = expectSocketEvent(secondDevice, "group:updated");
@@ -1552,8 +1563,59 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await updateA).id, groupId);
   assert.equal((await updateB).id, groupId);
   assert.equal((await details(reader)).body.group.ownRole, "admin");
+  const icon = new FormData();
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM14AAAAASUVORK5CYII=", "base64");
+  icon.set("kind", "image");
+  icon.set("file", new Blob([image], { type: "image/png" }), "group.png");
+  const invalidPhoto = (bytes, name) => {
+    const form = new FormData();
+    form.set("kind", "image");
+    form.set("file", new Blob([bytes], { type: "image/png" }), name);
+    return request(root + "/media", { token: reader, method: "POST", body: form });
+  };
+  assert.equal((await invalidPhoto(Buffer.from("not an image"), "forged.png")).status, 415);
+  const oversize = Buffer.alloc(5 * 1024 * 1024 + 1);
+  image.copy(oversize);
+  assert.equal((await invalidPhoto(oversize, "too-large.png")).status, 413);
+  const photo = await request(root + "/media", { token: reader, method: "POST", body: icon });
+  assert.equal(photo.status, 201);
+  const photoId = photo.body.mediaId;
+  const displayPhoto = token => fetch(origin + root + "/media/" + photoId, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal((await displayPhoto(owner)).status, 404);
+  assert.equal((await action(third, "photo", { photoId })).status, 403);
+  assert.equal((await action(owner, "photo", { photoId })).status, 400);
+  assert.equal((await action(reader, "photo", { photoId })).status, 200);
+  assert.equal((await details(owner)).body.group.photoId, photoId);
+  const download = await displayPhoto(owner);
+  assert.equal(download.status, 200);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), image);
+  assert.equal((await displayPhoto(invitee)).status, 404);
+  assert.equal((await action(owner, "photo", { photoId: null })).status, 200);
+  assert.equal((await displayPhoto(owner)).status, 404);
+
+  const alreadyMember = await action(reader, "invite", { username: "group-outsider" });
+  assert.equal(alreadyMember.status, 409);
+  assert.equal(alreadyMember.body.code, "GROUP_ALREADY_MEMBER");
   assert.equal((await action(reader, "promote", { username: "group-outsider" })).status, 403);
   assert.equal((await action(reader, "remove", { username: "group-owner" })).status, 403);
+
+  assert.equal((await action(reader, "posting-policy", { adminsOnly: true })).status, 403);
+  const policyA = expectSocketEvent(socket, "group:updated");
+  const policyB = expectSocketEvent(secondDevice, "group:updated");
+  assert.equal((await action(owner, "posting-policy", { adminsOnly: true })).status, 200);
+  assert.equal((await policyA).adminsOnly, true);
+  assert.equal((await policyB).adminsOnly, true);
+  const deniedPost = await request(root + "/messages", { token: third, method: "POST",
+    body: { id: "blocked-by-posting-policy", kind: "text", text: "blocked" } });
+  assert.equal(deniedPost.status, 403);
+  assert.equal(deniedPost.body.code, "GROUP_ADMINS_ONLY");
+  const deniedUpload = await request(root + "/media", { token: third, method: "POST", body: voice });
+  assert.equal(deniedUpload.status, 403);
+  const managerPost = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "manager-post", kind: "text", text: "allowed" } });
+  assert.equal(managerPost.status, 201);
+  assert.equal((await action(owner, "posting-policy", { adminsOnly: false })).status, 200);
+
 
   const revision = (await details(reader)).body.group.revision;
   const edits = await Promise.all(["Updated one", "Updated two"].map(name =>
@@ -1564,6 +1626,9 @@ test("production group management retains legacy history, roles, and live access
   const inviteAdded = expectSocketEvent(inviteSocket, "group:invited");
   assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
   await inviteAdded;
+  const alreadyInvited = await action(reader, "invite", { username: "group-audit-owner" });
+  assert.equal(alreadyInvited.status, 409);
+  assert.equal(alreadyInvited.body.code, "GROUP_ALREADY_INVITED");
   assert.equal((await request("/api/group-management/invitations", { token: invitee })).body.invitations[0].id, groupId);
   const inviteRemoved = expectSocketEvent(inviteSocket, "group:invited");
   assert.equal((await action(owner, "revoke-invite", { username: "group-audit-owner" })).status, 200);
@@ -1571,6 +1636,16 @@ test("production group management retains legacy history, roles, and live access
   assert.deepEqual((await request("/api/group-management/invitations", { token: invitee })).body.invitations, []);
   assert.equal((await action(invitee, "accept-invite")).status, 404);
   assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await action(invitee, "accept-invite")).status, 200);
+  assert.equal((await action(invitee, "leave")).status, 200);
+  inviteSocket.disconnect();
+  assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
+  const storedInvite = await client.db("oneconnect").collection("chat_groups").findOne({
+    _id: new ObjectId(groupId), invitations: "group-audit-owner",
+  }, { projection: { _id: 1 } });
+  assert.ok(storedInvite);
+  await openMailSocket(t, origin, invitee, "/");
+  assert.equal((await request("/api/group-management/invitations", { token: invitee })).body.invitations[0].id, groupId);
   assert.equal((await action(invitee, "accept-invite")).status, 200);
   assert.equal((await action(owner, "demote", { username: "group-reader" })).status, 200);
   assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 403);
@@ -1591,8 +1666,235 @@ test("production group management retains legacy history, roles, and live access
   assert.equal(history.body.group.id, groupId);
   assert.equal(history.body.messages[0].id, "legacy-group-msg");
   assert.equal(history.body.messages[1].mediaId, uploaded.body.mediaId);
+  const activity = history.body.messages.filter(message => message.activity);
+  assert.ok(activity.some(message => message.activity.action === "promote" && message.activity.target === "group-reader"));
+  assert.ok(activity.some(message => message.activity.action === "accept-ownership" && message.senderUsername === "group-reader"));
+  assert.ok(activity.some(message => message.activity.action === "leave" && message.senderUsername === "group-owner"));
+  assert.equal(activity.filter(message => message.activity.action === "details").length, 1);
+
+
+
+  const replyTo = { id: "legacy-group-msg", senderUsername: "group-outsider" };
+  const reply = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "group-reply", kind: "text", text: "reply @group-reader @nonmember", replyTo } });
+  assert.equal(reply.status, 201);
+  assert.deepEqual(reply.body.message.replyTo, replyTo);
+  assert.deepEqual(reply.body.message.mentions, ["group-reader"]);
+  const badReply = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "bad-group-reply", kind: "text", text: "reply", replyTo: { ...replyTo, id: "not-in-group" } } });
+  assert.equal(badReply.status, 404);
+  assert.equal(badReply.body.code, "GROUP_REPLY_UNAVAILABLE");
+  const interact = (token, action, reaction) => request(root + "/interactions", { token, method: "POST",
+    body: { action, target: replyTo, reaction } });
+  assert.equal((await interact(invitee, "react", "heart")).status, 404);
+  assert.equal((await interact(third, "pin")).status, 403);
+  const reactionRace = await Promise.all([interact(reader, "react", "like"), interact(third, "react", "heart")]);
+  assert.deepEqual(reactionRace.map(result => result.status), [200, 200]);
+  let refreshed = await request(root + "/messages", { token: reader });
+  assert.deepEqual(refreshed.body.messages.find(message => message.id === replyTo.id).reactions,
+    { like: ["group-reader"], heart: ["group-outsider"] });
+  assert.equal((await interact(reader, "pin")).status, 200);
+  refreshed = await request(root + "/messages", { token: third });
+  assert.deepEqual(refreshed.body.group.pinned, replyTo);
+  assert.equal((await interact(reader, "unpin")).status, 200);
+
+  const literalText = "Literal .* https://example.test/shared";
+  assert.equal((await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "filtered-history", kind: "text", text: literalText } })).status, 201);
+  const search = await request(root + "/messages?filter=search&q=" + encodeURIComponent(".*"), { token: reader });
+  assert.deepEqual(search.body.messages.map(message => message.id), ["filtered-history"]);
+  const media = await request(root + "/messages?filter=media", { token: reader });
+  assert.deepEqual(media.body.messages.map(message => message.mediaId), [uploaded.body.mediaId]);
+  const links = await request(root + "/messages?filter=links", { token: reader });
+  assert.deepEqual(links.body.messages.map(message => message.text), [literalText]);
+  assert.equal((await request(root + "/messages?filter=links", { token: owner })).status, 404);
+
   assert.equal((await request(root + "/messages", { token: invitee, method: "POST",
     body: { id: "rejected", kind: "text", text: "rejected" } })).status, 404);
+
+  assert.equal((await action(third, "create-link")).status, 403);
+  const generated = await action(reader, "create-link");
+  assert.equal(generated.status, 200);
+  const accessLink = new URL(generated.body.invitationUrl);
+  assert.equal(accessLink.hostname, "apppiconnectuvr9006.pinet.com");
+  const invitation = accessLink.searchParams.get("groupInvite");
+  const join = token => request("/api/group-management/join-request", { token, method: "POST", body: { invitation } });
+  assert.equal((await join()).status, 401);
+  const beforeApproval = { status: 200, body: { pending: true } };
+  assert.deepEqual(await join(invitee), beforeApproval);
+  assert.deepEqual(await join(invitee), beforeApproval);
+  assert.deepEqual((await details(reader)).body.group.joinRequests, ["group-audit-owner"]);
+  assert.equal((await details(invitee)).status, 404);
+  assert.equal((await request(root + "/messages?filter=search&q=legacy", { token: invitee })).status, 404);
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${invitee}` },
+  })).status, 404);
+  assert.equal((await action(third, "approve-join", { username: "group-audit-owner" })).status, 403);
+  assert.equal((await action(reader, "approve-join", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await details(invitee)).status, 200);
+  assert.equal((await action(reader, "revoke-link")).status, 200);
+  assert.equal((await join(owner)).body.code, "GROUP_LINK_UNAVAILABLE");
+  const another = await action(reader, "create-link");
+  const expired = new URL(another.body.invitationUrl).searchParams.get("groupInvite");
+  assert.equal((await join(owner)).body.code, "GROUP_LINK_UNAVAILABLE");
+  const requestJoin = invitation => request("/api/group-management/join-request", {
+    token: owner, method: "POST", body: { invitation },
+  });
+  assert.deepEqual(await requestJoin(expired), beforeApproval);
+  await client.db("oneconnect").collection("chat_groups").updateOne({ _id: new ObjectId(groupId) },
+    { $set: { "inviteLink.expiresAt": Date.now() - 1000 } });
+  assert.equal((await requestJoin(expired)).body.code, "GROUP_LINK_UNAVAILABLE");
+  assert.equal((await action(reader, "approve-join", { username: "group-owner" })).status, 404);
+  const temporary = new URL((await action(reader, "create-link")).body.invitationUrl).searchParams.get("groupInvite");
+  assert.deepEqual(await requestJoin(temporary), beforeApproval);
+  assert.equal((await action(reader, "revoke-link")).status, 200);
+  assert.equal((await requestJoin(temporary)).body.code, "GROUP_LINK_UNAVAILABLE");
+  assert.equal((await action(reader, "approve-join", { username: "group-owner" })).status, 404);
+  assert.equal((await details(owner)).status, 404);
+
+  assert.equal((await action(third, "topic:create", { title: "Unauthorized" })).status, 403);
+  const topicResult = await action(reader, "topic:create", { title: "Logistics" });
+  assert.equal(topicResult.status, 200);
+  const topicId = topicResult.body.group.planning.topics[0].id;
+  const postTopic = (id, topicId) => request(root + "/messages", { token: third, method: "POST",
+    body: { id, kind: "text", text: "topic message", topicId } });
+  assert.equal((await postTopic("topic-message", topicId)).status, 201);
+  const general = await request(root + "/messages", { token: third });
+  assert.ok(!general.body.messages.some(message => message.id === "topic-message"));
+  const topicHistory = await request(root + "/messages?topic=" + topicId, { token: third });
+  assert.deepEqual(topicHistory.body.messages.map(message => message.id), ["topic-message"]);
+  assert.equal((await request(root + "/messages?topic=" + topicId, { token: owner })).status, 404);
+  assert.equal((await action(reader, "topic:close", { id: topicId })).status, 200);
+  assert.equal((await postTopic("blocked-topic-message", topicId)).body.code, "GROUP_TOPIC_UNAVAILABLE");
+
+  assert.equal((await action(reader, "poll:create", { title: "Duplicates", options: ["A", "A"] })).status, 400);
+  const pollResult = await action(reader, "poll:create", { title: "When?", options: ["A", "B"] });
+  assert.equal(pollResult.status, 200);
+  const pollId = pollResult.body.group.planning.polls[0].id;
+  assert.equal((await action(third, "poll:vote", { id: pollId, choice: 1 })).status, 200);
+  assert.equal((await action(reader, "poll:vote", { id: pollId, choice: 0 })).status, 200);
+  const poll = (await details(third)).body.group.planning.polls[0];
+  assert.deepEqual(poll.totals, [1, 1]);
+  assert.equal(poll.choice, 1);
+  assert.equal((await action(third, "poll:close", { id: pollId })).status, 403);
+  assert.equal((await action(reader, "poll:close", { id: pollId })).status, 200);
+  assert.equal((await action(third, "poll:vote", { id: pollId, choice: 0 })).status, 409);
+
+  const eventResult = await action(reader, "event:create", { title: "Meet", startsAt: Date.now() + 3600000 });
+  assert.equal(eventResult.status, 200);
+  const eventId = eventResult.body.group.planning.events[0].id;
+  assert.equal((await action(third, "event:rsvp", { id: eventId, attending: true })).status, 200);
+  assert.equal((await details(reader)).body.group.planning.events[0].attendees, 1);
+  assert.equal((await details(third)).body.group.planning.events[0].attending, true);
+  assert.equal((await action(reader, "event:close", { id: eventId })).status, 200);
+  assert.equal((await action(third, "event:rsvp", { id: eventId, attending: false })).status, 409);
+
+  assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await details(invitee)).status, 404);
+  for (const query of ["filter=search&q=legacy", "filter=media", "filter=files", "filter=links", "topic=" + topicId]) {
+    assert.equal((await request(root + "/messages?" + query, { token: invitee })).status, 404);
+  }
+  assert.equal((await fetch(origin + root + "/media/" + uploaded.body.mediaId, {
+    headers: { Authorization: `Bearer ${invitee}` },
+  })).status, 404);
+  assert.equal((await action(invitee, "poll:vote", { id: pollId, choice: 0 })).status, 404);
+  assert.equal((await action(invitee, "event:rsvp", { id: eventId, attending: true })).status, 404);
+
+
+
+});
+
+test("group moderation protects reports and enforces posting under concurrency", { timeout: 60000 }, async t => {
+  const { request, login, origin } = await startEmailTestServer(t, false, { NODE_ENV: "production" });
+  const names = ["group-owner", "group-reader", "group-outsider", "group-audit-owner"];
+  const [owner, admin, member, newcomer] = await Promise.all(names.map(async name => (await login(name)).body.sessionToken));
+  const created = await request("/api/groups", { token: owner, method: "POST",
+    body: { name: "Moderation fixture", members: names.slice(1) } });
+  assert.equal(created.status, 201);
+  const groupId = created.body.group.id;
+  const root = "/api/groups/" + groupId;
+  const action = (token, action, fields = {}) => request(root + "/management", {
+    token, method: "POST", body: { action, ...fields },
+  });
+  const details = token => request(root + "/management", { token });
+  const send = (token, id, text) => request(root + "/messages", {
+    token, method: "POST", body: { id, kind: "text", text },
+  });
+  assert.equal((await action(owner, "promote", { username: names[1] })).status, 200);
+  assert.equal((await action(member, "rules", { rules: "Forbidden" })).status, 403);
+  assert.equal((await action(admin, "rules", { rules: "Keep discussion on topic" })).status, 200);
+  assert.equal((await details(member)).body.group.moderation.rules, "Keep discussion on topic");
+  assert.equal((await details(member)).body.group.moderation.audit, undefined);
+  assert.equal((await details(member)).body.group.moderation.reports, undefined);
+
+  assert.equal((await send(admin, "report-fixture", "Text visible only through the authorized message view")).status, 201);
+  const message = { id: "report-fixture", senderUsername: names[1] };
+  const report = () => action(member, "report", { message, reason: "spam" });
+  assert.equal((await report()).status, 200);
+  assert.equal((await report()).body.code, "GROUP_REPORT_EXISTS");
+  assert.equal((await action(member, "report", { message: { ...message, id: "missing" }, reason: "spam" })).status, 404);
+  const { reports, audit } = (await details(admin)).body.group.moderation;
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].message.text, undefined);
+  assert.ok(audit.some(entry => entry.action === "rules"));
+  assert.ok(audit.every(entry => !("rules" in entry)));
+  const preview = token => request(root + "/reports/" + reports[0].id, { token });
+  assert.equal((await preview(member)).status, 404);
+  assert.equal((await preview(admin)).body.message.text, "Text visible only through the authorized message view");
+  assert.equal((await action(member, "resolve-report", { id: reports[0].id })).status, 403);
+  assert.equal((await action(admin, "resolve-report", { id: reports[0].id })).status, 200);
+  assert.equal((await preview(admin)).status, 404);
+
+  assert.equal((await action(admin, "restrict", { username: names[0], seconds: 300 })).status, 403);
+  assert.equal((await action(admin, "restrict", { username: names[2], seconds: 300 })).status, 200);
+  const restricted = await send(member, "blocked", "blocked");
+  assert.equal(restricted.status, 403);
+  assert.equal(restricted.body.code, "GROUP_POSTING_RESTRICTED");
+  assert.ok((await details(member)).body.group.moderation.restrictedUntil > Date.now());
+  assert.equal((await details(member)).body.group.moderation.restrictions, undefined);
+  const voice = new FormData();
+  voice.set("kind", "voice");
+  voice.set("file", new Blob([Buffer.from("RIFF0000WAVE")], { type: "audio/wav" }), "restricted.wav");
+  assert.equal((await request(root + "/media", { token: member, method: "POST", body: voice })).body.code, "GROUP_POSTING_RESTRICTED");
+  await client.db("oneconnect").collection("chat_groups").updateOne({ _id: new ObjectId(groupId) },
+    { $set: { "restrictions.0.until": Date.now() - 1000 } });
+  assert.equal((await send(member, "after-expiry", "allowed")).status, 201);
+  assert.equal((await action(admin, "restrict", { username: names[2], seconds: 300 })).status, 200);
+  assert.equal((await action(admin, "unrestrict", { username: names[2] })).status, 200);
+
+  assert.equal((await action(admin, "slow-mode", { seconds: 15 })).status, 200);
+  const concurrent = await Promise.all([send(newcomer, "slow-a", "first"), send(newcomer, "slow-b", "second")]);
+  assert.deepEqual(concurrent.map(response => response.status).sort(), [201, 429]);
+  const rejected = concurrent.find(response => response.status === 429);
+  assert.equal(rejected.body.code, "GROUP_SLOW_MODE");
+  assert.ok(rejected.body.retryAfterSeconds > 0);
+  assert.equal((await send(newcomer, concurrent.find(response => response.status === 201).body.message.id, "retry")).status, 200);
+
+  const { socket } = await openMailSocket(t, origin, member, "/");
+  assert.equal((await action(member, "notification-preference", { mentionAlerts: true })).status, 200);
+  assert.equal((await details(newcomer)).body.group.mentionAlerts, false);
+  const alerted = expectSocketEvent(socket, "group:mention");
+  assert.equal((await send(admin, "mention-alert", "Hello @group-outsider")).status, 201);
+  assert.deepEqual(await alerted, { groupId });
+  assert.equal((await action(member, "notification-preference", { muted: true })).status, 200);
+  let alerts = 0;
+  socket.on("group:mention", () => alerts++);
+  const mutedMessage = expectSocketEvent(socket, "group:message");
+  assert.equal((await send(admin, "muted-alert", "Hello @group-outsider")).status, 201);
+  assert.equal((await mutedMessage).message.id, "muted-alert");
+  await wait(100);
+  assert.equal(alerts, 0);
+  const collection = client.db("oneconnect").collection("chat_groups");
+  const key = { _id: new ObjectId(groupId) };
+  const stored = await collection.findOne(key);
+  assert.ok(stored.audit.every(entry => !("text" in entry)));
+  const priorAudit = Array.from({ length: 100 }, (_, at) => ({ action: "rules", actor: names[0], at }));
+  await collection.updateOne(key, { $set: { audit: priorAudit } });
+  assert.equal((await action(admin, "slow-mode", { seconds: 0 })).status, 200);
+  const retained = (await details(owner)).body.group.moderation.audit;
+  assert.equal(retained.length, 100);
+  assert.equal(retained[0].action, "slow-mode");
+  assert.equal(retained.at(-1).at, 1);
 });
 
 test("legacy group deletion uses verified identity and resumes without losing history", async () => {
