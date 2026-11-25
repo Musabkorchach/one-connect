@@ -6,23 +6,11 @@ import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, req
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { ConfirmDialog, Sheet } from "./feedback";
 import { GroupAvatar } from "./group-avatar";
+import { GroupModerationPanel } from "./group-moderation-panel";
 import { GroupPlanning } from "./group-planning";
 import { GroupHistoryBrowser } from "./group-history-browser";
 import { useConnect } from "@/contexts/connect-context";
-import { getGroupCopy } from "@/lib/connect/i18n";
-
-const inviteErrorCopy = new Map<string, "alreadyMember" | "alreadyInvited" | "groupFull" | "notVerified">([
-  ["GROUP_ALREADY_MEMBER", "alreadyMember"],
-  ["GROUP_ALREADY_INVITED", "alreadyInvited"],
-  ["GROUP_FULL", "groupFull"],
-  ["GROUP_INVITEE_NOT_VERIFIED", "notVerified"],
-] as const);
-
-function groupError(failure: unknown, copy: ReturnType<typeof getGroupCopy>) {
-  const code = failure instanceof Error && "code" in failure ? failure.code : undefined;
-  const key = typeof code === "string" ? inviteErrorCopy.get(code) : undefined;
-  return key ? copy[key] : copy.failure;
-}
+import { getGroupCopy, groupFailureMessage } from "@/lib/connect/i18n";
 
 const actionButton = "min-h-11 rounded-lg px-2.5 text-sm font-medium underline-offset-4 hover:underline focus-visible:outline";
 
@@ -37,6 +25,8 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
   const [showHistory, setShowHistory] = useState(false);
   const [group, setGroup] = useState<GroupManagement | null>(null);
   const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [memberQuery, setMemberQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const lifetime = useRef<AbortController | null>(null);
   const refreshRef = useRef<() => void>(() => {});
@@ -49,7 +39,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     const refresh = () => {
       const request = ++revision;
       void getGroupManagement(token, groupId, scope.signal).then(({ group: result }) => {
-        if (!scope.signal.aborted && request === revision) { setGroup(result); setError(""); }
+        if (!scope.signal.aborted && request === revision) setGroup(result);
       }, (failure: Error) => {
         if (!scope.signal.aborted && request === revision) { setGroup(null); setError(failure.message); }
       });
@@ -67,17 +57,19 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     busyRef.current = true;
     setBusy(true);
     setError("");
+    setFeedback("");
     try {
       const payload = photo ? { photoId: (await uploadGroupMedia(token, groupId, "image", photo, scope.signal)).mediaId } : data;
       if (scope.signal.aborted) return;
       const { group: result, invitationUrl: createdUrl } = await manageGroup(token, groupId, action, payload, scope.signal);
       if (scope.signal.aborted) return;
+      setFeedback(copy.updated);
       if (createdUrl && result?.inviteGeneration) setShared({ url: createdUrl, generation: result.inviteGeneration });
       if (action === "revoke-link" || action === "sharing-permission") setShared(null);
       if (action === "leave" && !result) onLeave();
       else refreshRef.current();
     } catch (failure) {
-      if (!scope.signal.aborted) setError(groupError(failure, copy));
+      if (!scope.signal.aborted) setError(groupFailureMessage(failure, copy));
     } finally {
       busyRef.current = false;
       if (!scope.signal.aborted) setBusy(false);
@@ -99,7 +91,8 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
         }} />
       <div dir={lang === "ar" ? "rtl" : "ltr"} className="max-h-[60dvh] space-y-4 overflow-y-auto py-3">
         {error && <p role="alert">{error}</p>}
-        {!group && !error && <p role="status">Loading group information…</p>}
+        {feedback && <p role="status">{feedback}</p>}
+        {!group && !error && <p role="status">{copy.loading}</p>}
         {group && (
           <>
             <div className="flex items-center gap-3">
@@ -124,8 +117,18 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
             {group.enhancedGroups && <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>}
             {group.description && <p className="whitespace-pre-wrap">{group.description}</p>}
             <p>{copy.owner} ? @{group.owner}</p>
+            {group.moderation?.rules && <section>
+              <h4 className="font-medium">{copy.rules}</h4>
+              <p dir="auto" className="whitespace-pre-wrap break-words">{group.moderation.rules}</p>
+            </section>}
+            {group.canManage && <p role="status">{copy.pendingInvites} ? {group.invitations.length}</p>}
+            <label className="block">
+              {copy.memberSearch}
+              <input type="search" dir="auto" className="min-h-11 w-full rounded-lg border bg-background p-2"
+                value={memberQuery} onChange={event => setMemberQuery(event.target.value)} />
+            </label>
             <ul aria-label={copy.members} className="space-y-2">
-              {group.members.map(member => (
+              {group.members.filter(member => member.username.includes(memberQuery.trim().toLowerCase().replace(/^@+/, ""))).map(member => (
                 <li key={member.username} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border p-2">
                   <span>@{member.username} · {member.role}</span>
                   {group.canManage && member.role !== "owner" && (group.ownRole === "owner" || member.role === "member") &&
@@ -154,13 +157,22 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
               </div>
             )}
             {group.ownRole === "owner" && group.offer && <p role="status">{copy.sentOffer} @{group.offer.toAccountId}.</p>}
-            {group.enhancedGroups && (group.canManage || group.canLeave) && (
+            {group.enhancedGroups && <details className="space-y-2 rounded-xl border p-3">
+              <summary className="cursor-pointer font-medium">{copy.advanced}</summary>
+            {(group.canManage || group.canLeave) && (
               <label className="flex min-h-11 items-center gap-3">
                 <input type="checkbox" checked={group.muted === true} disabled={busy}
                   onChange={event => void act("notification-preference", { muted: event.target.checked })} />
                 {copy.muteBadges}
               </label>
             )}
+            {!!group.moderation && (group.canManage || group.canLeave) && <label className="flex min-h-11 items-center gap-3">
+              <input type="checkbox" checked={group.mentionAlerts === true} disabled={busy}
+                onChange={event => void act("notification-preference", { mentionAlerts: event.target.checked })} />
+              {copy.mentionAlerts}
+            </label>}
+            {group.canManage && group.moderation && <GroupModerationPanel group={group} token={token}
+              busy={busy} act={act} confirm={(label, action, data) => setConfirmation({ label, action, data })} />}
             {group.enhancedGroups && group.canManage && group.ownRole === "owner" && (
               <label className="flex min-h-11 items-center gap-3">
                 <input type="checkbox" checked={group.adminsOnly === true} disabled={busy}
@@ -198,6 +210,10 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
                 </li>)}
               </ul>}
             </>}
+            {group.planning && <GroupPlanning planning={group.planning}
+              canManage={group.canManage} active={group.canManage || group.canLeave} busy={busy} act={act}
+              closeItem={(action, id) => setConfirmation({ label: copy.closeItem, action, data: { id } })} />}
+            </details>}
             {group.canManage && (
               <>
                 <form key={group.revision} className="space-y-2" onSubmit={event => {
@@ -225,9 +241,6 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
                 ))}</ul>
               </>
             )}
-            {group.enhancedGroups && group.planning && <GroupPlanning planning={group.planning}
-              canManage={group.canManage} active={group.canManage || group.canLeave} busy={busy} act={act}
-              closeItem={(action, id) => setConfirmation({ label: copy.closeItem, action, data: { id } })} />}
             {group.canLeave && <button type="button" className={actionButton + " text-destructive"} disabled={busy}
               onClick={() => setConfirmation({ label: copy.leave, action: "leave" })}>{copy.leave}</button>}
           </>
@@ -243,6 +256,7 @@ export function GroupInvitations() {
   const copy = getGroupCopy(lang);
   const [invitations, setInvitations] = useState<Awaited<ReturnType<typeof getGroupInvitations>>["invitations"]>([]);
   const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const refreshRef = useRef<() => void>(() => {});
   const lifetime = useRef<AbortController | null>(null);
@@ -269,11 +283,14 @@ export function GroupInvitations() {
     const scope = lifetime.current;
     if (!sessionToken || !scope || scope.signal.aborted || busy) return;
     setBusy(true);
+    setFeedback("");
+    setError("");
     try {
       await manageGroup(sessionToken, id, accept ? "accept-invite" : "decline-invite", {}, scope.signal);
+      if (!scope.signal.aborted) setFeedback(copy.inviteUpdated);
       refreshRef.current();
     } catch (failure) {
-      if (!scope.signal.aborted) setError(groupError(failure, copy));
+      if (!scope.signal.aborted) setError(groupFailureMessage(failure, copy));
     } finally {
       if (!scope.signal.aborted) setBusy(false);
     }
@@ -281,6 +298,7 @@ export function GroupInvitations() {
   return (
     <>
       {error && <p className="px-3 py-2 text-sm" role="alert">{error}</p>}
+      {feedback && <p className="px-3 py-2 text-sm" role="status">{feedback}</p>}
       {invitations.length > 0 && <ul dir={lang === "ar" ? "rtl" : "ltr"} aria-label={copy.invitations} className="space-y-2 px-3 py-2">
         {invitations.map(invite => <li key={invite.id} className="flex flex-wrap items-center gap-2">
           <span>{invite.name} · @{invite.owner}</span>

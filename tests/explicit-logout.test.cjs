@@ -1327,3 +1327,63 @@ test("Pi Testnet confirms the session between simulation and a one-period submis
   await assert.rejects(submit(sdk, "subscribe", wallet, "7", () => true), /Invalid Testnet/);
   assert.deepEqual(calls, []);
 });
+
+test("production group sheet keeps basic controls and gates new moderation for older servers", async () => {
+  const jsx = (type, props, key) => ({ type, props, key });
+  const locale = {};
+  compile("lib/connect/i18n.ts")(() => ({}), locale);
+  const configuration = {
+    id: "1".repeat(24), name: "Fixture", description: "", owner: "owner",
+    members: [{ username: "owner", role: "owner" }, { username: "member", role: "member" }],
+    ownRole: "owner", canManage: true, canLeave: false, enhancedGroups: true,
+    invitations: ["guest"], offer: null, revision: 0,
+  };
+
+  async function render(record) {
+    const ui = {};
+    const states = [];
+    let cursor = 0;
+    let mount;
+    const modules = {
+      "react/jsx-runtime": { jsx, jsxs: jsx },
+      react: {
+        useRef: current => ({ current }),
+        useEffect: effect => { mount ??= effect; },
+        useState(initial) {
+          const index = cursor++;
+          if (!(index in states)) states[index] = initial;
+          return [states[index], value => { states[index] = value; }];
+        },
+      },
+      "qrcode.react": {},
+      "@/lib/api-client": { getGroupManagement: async () => ({ group: record }), onGroupEvent: () => () => {} },
+      "@/contexts/pi-auth-context": {},
+      "@/contexts/connect-context": { useConnect: () => ({ lang: "en" }) },
+      "@/lib/connect/i18n": locale,
+      "./feedback": { Sheet: "sheet", ConfirmDialog: "confirm" },
+      "./group-avatar": { GroupAvatar: "avatar" },
+      "./group-planning": {},
+      "./group-history-browser": {},
+      "./group-moderation-panel": { GroupModerationPanel: "moderation-panel" },
+    };
+    compile("components/connect/group-management.tsx")(name => modules[name], ui);
+    const props = { groupId: record.id, token: "fixture", username: "owner", onClose() {}, onLeave() {} };
+    ui.GroupManagementSheet(props);
+    const cleanup = mount();
+    await Promise.resolve();
+    cursor = 0;
+    const tree = ui.GroupManagementSheet(props);
+    cleanup();
+    const flatten = node => Array.isArray(node) ? node.flatMap(flatten) :
+      node && typeof node === "object" ? [node, ...flatten(node.props?.children)] : [node];
+    return flatten(tree);
+  }
+
+  const old = await render(configuration);
+  assert.ok(old.includes("Invite"));
+  assert.ok(old.includes("Pending invitations"));
+  assert.ok(!old.some(node => node?.type === "moderation-panel"));
+  const current = await render({ ...configuration, moderation: { rules: "Keep it civil", slowModeSeconds: 0 } });
+  assert.ok(current.includes("Keep it civil"));
+  assert.ok(current.some(node => node?.type === "moderation-panel"));
+});

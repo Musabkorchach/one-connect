@@ -1,18 +1,21 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Sheet } from "./feedback";
 import { GroupManagementSheet } from "./group-management";
-import { getGroupActivityLabel, getGroupCopy } from "@/lib/connect/i18n";
+import { getGroupActivityLabel, getGroupCopy, groupFailureMessage } from "@/lib/connect/i18n";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useConnect } from "@/contexts/connect-context";
 import {
   changeGroupMessageInteraction,
   getGroupMessages,
   markGroupMessagesRead,
+  manageGroup,
   onGroupEvent,
   sendGroupMessage,
   type GroupMessageRecord,
   type GroupReaction,
+  type GroupReportReason,
   type GroupTopic,
   type GroupMessageReference,
   type GroupRecord,
@@ -118,6 +121,10 @@ function GroupConversation({
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showManagement, setShowManagement] = useState(false);
+  const [reportedMessage, setReportedMessage] = useState<GroupMessageReference | null>(null);
+  const [reporting, setReporting] = useState(false);
+  const [reportError, setReportError] = useState("");
+  const { pushToast } = useConnect();
 
   const aliveRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -412,13 +419,7 @@ function GroupConversation({
       return true;
     } catch (error) {
       if (aliveRef.current) {
-        setError(
-          error instanceof Error
-            ? error.message
-            : arabic
-              ? "تعذر إرسال الوسائط"
-              : "Media could not be sent",
-        );
+        setError(groupFailureMessage(error, copy));
       }
 
       return false;
@@ -460,13 +461,29 @@ function GroupConversation({
       retryRef.current = null;
     } catch (error) {
       if (aliveRef.current) {
-        setError(error instanceof Error ? error.message : "Message could not be sent");
+        setError(groupFailureMessage(error, copy));
       }
     } finally {
       sendingRef.current = false;
       if (aliveRef.current) setSending(false);
     }
   };
+
+  async function submitReport(reason: GroupReportReason) {
+    if (!reportedMessage || reporting) return;
+    setReporting(true);
+    setReportError("");
+    try {
+      await manageGroup(token, group.id, "report", { message: reportedMessage, reason });
+      if (!aliveRef.current) return;
+      setReportedMessage(null);
+      pushToast(copy.reportSent, "success");
+    } catch (failure) {
+      if (aliveRef.current) setReportError(groupFailureMessage(failure, copy));
+    } finally {
+      if (aliveRef.current) setReporting(false);
+    }
+  }
 
   const canPin = group.state !== "archived" && (group.ownerUsername === me || group.admins?.includes(me));
   const pinned = group.pinned;
@@ -616,6 +633,11 @@ function GroupConversation({
                       {groupReactions[reaction]}{people.length ? " " + people.length : ""}
                     </button>;
                   })}
+                  {group.moderationEnabled && !own && <button type="button" className="min-h-9 text-xs underline"
+                    onClick={() => {
+                      setReportError("");
+                      setReportedMessage({ id: message.id, senderUsername: message.senderUsername });
+                    }}>{copy.report}</button>}
                   {canPin && <button type="button" className="min-h-9 text-xs underline" onClick={() => {
                     const pinned = group.pinned && messageKey(group.pinned) === messageKey(message);
                     void interact(pinned ? "unpin" : "pin", message);
@@ -684,6 +706,27 @@ function GroupConversation({
         </form>
       </div>
       )}
+      {reportedMessage && <Sheet open title={copy.reportToModerators} onClose={() => {
+        if (!reporting) setReportedMessage(null);
+      }}>
+        <form dir={arabic ? "rtl" : "ltr"} className="space-y-3" onSubmit={event => {
+          event.preventDefault();
+          void submitReport(new FormData(event.currentTarget).get("reason") as GroupReportReason);
+        }}>
+          <select aria-label={copy.reportToModerators} name="reason" disabled={reporting}
+            className="min-h-11 w-full rounded-lg border bg-background p-2">
+            <option value="spam">{copy.spam}</option>
+            <option value="abuse">{copy.abuse}</option>
+            <option value="other">{copy.other}</option>
+          </select>
+          {reportError && <p role="alert">{reportError}</p>}
+          <div className="flex gap-2">
+            <button className="min-h-11 rounded-lg bg-primary px-3 text-primary-foreground" disabled={reporting}>{copy.report}</button>
+            <button type="button" className="min-h-11 px-3" disabled={reporting}
+              onClick={() => setReportedMessage(null)}>{copy.cancel}</button>
+          </div>
+        </form>
+      </Sheet>}
       {showManagement && <GroupManagementSheet groupId={group.id} token={token} username={me}
         onClose={() => setShowManagement(false)} onLeave={onBack} />}
     </div>

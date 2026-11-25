@@ -1419,6 +1419,8 @@ export interface GroupRecord {
   ownerUsername: string;
   members: string[];
   enhancedGroups?: boolean;
+  moderationEnabled?: boolean;
+  mentionAlerts?: boolean;
   topics?: GroupTopic[];
   adminsOnly?: boolean;
   photoId?: string | null;
@@ -1435,6 +1437,16 @@ export type GroupTopic = { id: string; title: string; closed: boolean };
 type GroupPoll = GroupTopic & { options: string[]; choice: number | null; totals: number[] };
 type GroupEvent = GroupTopic & { startsAt: number; attending: boolean; attendees: number };
 
+export type GroupReportReason = "spam" | "abuse" | "other";
+export type GroupModeration = {
+  rules: string;
+  slowModeSeconds: number;
+  restrictedUntil: number | null;
+  restrictions?: { username: string; until: number }[];
+  reports?: { id: string; reporter: string; reason: GroupReportReason; at: number; message: GroupMessageReference }[];
+  audit?: { action: string; actor: string; at: number; target?: string }[];
+};
+
 export interface GroupManagement {
   id: string;
   name: string;
@@ -1445,6 +1457,8 @@ export interface GroupManagement {
   canManage: boolean;
   canLeave: boolean;
   enhancedGroups?: boolean;
+  moderation?: GroupModeration;
+  mentionAlerts?: boolean;
   canShare?: boolean;
   adminsCanShare?: boolean;
   inviteExpiresAt?: number | null;
@@ -1457,6 +1471,13 @@ export interface GroupManagement {
   invitations: string[];
   offer: { id: string; fromAccountId: string; toAccountId: string } | null;
   revision: number;
+}
+
+export type GroupReportedContent = Pick<GroupMessageRecord, "groupId" | "text" | "kind" | "mediaId" | "fileName">;
+
+export function getGroupReportedContent(token: string, groupId: string, reportId: string, signal: AbortSignal) {
+  return groupRequest<{ message: GroupReportedContent }>(
+    `/api/groups/${groupId}/reports/${reportId}`, token, "GET", undefined, signal);
 }
 
 export function getGroupManagement(token: string, groupId: string, signal: AbortSignal) {
@@ -1650,6 +1671,7 @@ export interface GroupEventMap {
   "group:access-revoked": { groupId: string };
   "group:invited": undefined;
   "group:message": { message: GroupMessageRecord };
+  "group:mention": { groupId: string };
   "group:read": GroupReadReceipt;
   connect: undefined;
 }
@@ -1750,11 +1772,11 @@ export async function uploadGroupMedia(
   const result = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error(
+    throw Object.assign(new Error(
       typeof result?.error === "string"
         ? result.error
         : `Media upload failed (${response.status})`,
-    );
+    ), { code: result?.code });
   }
 
   if (
