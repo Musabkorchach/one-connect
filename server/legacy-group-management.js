@@ -29,7 +29,7 @@ export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
 export function registerLegacyGroupManagement({ app, groups, users, requireSession, normalize, publish, revoke, inviteChanged }) {
   const base = "/api/groups/:groupId/management";
   const invitationPath = "/api/group-management/invitations";
-  const error = (res, code, message) => res.status(code).json({ error: message });
+  const error = (res, status, message, code) => res.status(status).json({ error: message, ...(code && { code }) });
   const authenticated = (handler) => async (req, res, next) => {
     const username = normalize(req.user.piUsername);
     if (!username || !req.user.verifiedPiUid) return error(res, 403, "A verified Pi session is required");
@@ -107,11 +107,11 @@ export function registerLegacyGroupManagement({ app, groups, users, requireSessi
         if (!manage) return error(res, 403, "Group management permission required");
         if (!target) return error(res, 400, "Invalid Pi username");
         if (action === "invite") {
-          if (member || invitations.includes(target) || group.members.length + invitations.length >= 50) {
-            return error(res, 409, "Invitation cannot be added");
-          }
+          if (member) return error(res, 409, "This person is already a member", "GROUP_ALREADY_MEMBER");
+          if (invitations.includes(target)) return error(res, 409, "This invitation is already pending", "GROUP_ALREADY_INVITED");
+          if (group.members.length + invitations.length >= 50) return error(res, 409, "Group is full", "GROUP_FULL");
           if (!await users.findOne({ _id: target, groupPiUid: { $type: "string" } }, { projection: { _id: 1 } })) {
-            return error(res, 404, "Invitee must sign in with a verified Pi identity");
+            return error(res, 404, "Invitee must sign in with a verified Pi identity", "GROUP_INVITEE_NOT_VERIFIED");
           }
           changes.invitations = [...invitations, target];
         } else {

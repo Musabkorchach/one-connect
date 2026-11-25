@@ -1511,7 +1511,8 @@ async function groupRequest<T>(
         ? result.error
         : `Group request failed (${response.status})`;
 
-    throw new Error(error);
+    const code = result && typeof result === "object" && "code" in result ? result.code : undefined;
+    throw Object.assign(new Error(error), { code });
   }
 
   if (!result || typeof result !== "object") {

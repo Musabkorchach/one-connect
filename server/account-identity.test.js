@@ -1552,6 +1552,9 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await updateA).id, groupId);
   assert.equal((await updateB).id, groupId);
   assert.equal((await details(reader)).body.group.ownRole, "admin");
+  const alreadyMember = await action(reader, "invite", { username: "group-outsider" });
+  assert.equal(alreadyMember.status, 409);
+  assert.equal(alreadyMember.body.code, "GROUP_ALREADY_MEMBER");
   assert.equal((await action(reader, "promote", { username: "group-outsider" })).status, 403);
   assert.equal((await action(reader, "remove", { username: "group-owner" })).status, 403);
 
@@ -1564,6 +1567,9 @@ test("production group management retains legacy history, roles, and live access
   const inviteAdded = expectSocketEvent(inviteSocket, "group:invited");
   assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
   await inviteAdded;
+  const alreadyInvited = await action(reader, "invite", { username: "group-audit-owner" });
+  assert.equal(alreadyInvited.status, 409);
+  assert.equal(alreadyInvited.body.code, "GROUP_ALREADY_INVITED");
   assert.equal((await request("/api/group-management/invitations", { token: invitee })).body.invitations[0].id, groupId);
   const inviteRemoved = expectSocketEvent(inviteSocket, "group:invited");
   assert.equal((await action(owner, "revoke-invite", { username: "group-audit-owner" })).status, 200);
