@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, uploadGroupMedia, type GroupManagement } from "@/lib/api-client";
+import { QRCodeSVG } from "qrcode.react";
+import { getGroupInvitations, getGroupManagement, manageGroup, onGroupEvent, requestGroupJoin, uploadGroupMedia, type GroupManagement } from "@/lib/api-client";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { ConfirmDialog, Sheet } from "./feedback";
 import { GroupAvatar } from "./group-avatar";
+import { GroupPlanning } from "./group-planning";
 import { GroupHistoryBrowser } from "./group-history-browser";
 import { useConnect } from "@/contexts/connect-context";
 import { getGroupCopy } from "@/lib/connect/i18n";
@@ -31,6 +33,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
   const { lang } = useConnect();
   const copy = getGroupCopy(lang);
   const [confirmation, setConfirmation] = useState<{ label: string; action: string; data?: Record<string, unknown> } | null>(null);
+  const [shared, setShared] = useState<{ url: string; generation: string } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [group, setGroup] = useState<GroupManagement | null>(null);
   const [error, setError] = useState("");
@@ -67,8 +70,10 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
     try {
       const payload = photo ? { photoId: (await uploadGroupMedia(token, groupId, "image", photo, scope.signal)).mediaId } : data;
       if (scope.signal.aborted) return;
-      const { group: result } = await manageGroup(token, groupId, action, payload, scope.signal);
+      const { group: result, invitationUrl: createdUrl } = await manageGroup(token, groupId, action, payload, scope.signal);
       if (scope.signal.aborted) return;
+      if (createdUrl && result?.inviteGeneration) setShared({ url: createdUrl, generation: result.inviteGeneration });
+      if (action === "revoke-link" || action === "sharing-permission") setShared(null);
       if (action === "leave" && !result) onLeave();
       else refreshRef.current();
     } catch (failure) {
@@ -101,7 +106,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
               <GroupAvatar groupId={groupId} name={group.name} photoId={group.photoId} size={52} />
               <h3 className="font-semibold">{group.name}</h3>
             </div>
-            {group.canManage && <div className="flex flex-wrap gap-2">
+            {group.enhancedGroups && group.canManage && <div className="flex flex-wrap gap-2">
               <label className={actionButton + " inline-flex items-center focus-within:outline"}>
                 {copy.changePhoto}
                 <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="sr-only"
@@ -116,7 +121,7 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
                 {copy.removePhoto}
               </button>}
             </div>}
-            <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>
+            {group.enhancedGroups && <button type="button" className={actionButton} onClick={() => setShowHistory(true)}>{copy.history}</button>}
             {group.description && <p className="whitespace-pre-wrap">{group.description}</p>}
             <p>{copy.owner} ? @{group.owner}</p>
             <ul aria-label={copy.members} className="space-y-2">
@@ -149,20 +154,50 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
               </div>
             )}
             {group.ownRole === "owner" && group.offer && <p role="status">{copy.sentOffer} @{group.offer.toAccountId}.</p>}
-            {(group.canManage || group.canLeave) && (
+            {group.enhancedGroups && (group.canManage || group.canLeave) && (
               <label className="flex min-h-11 items-center gap-3">
                 <input type="checkbox" checked={group.muted === true} disabled={busy}
                   onChange={event => void act("notification-preference", { muted: event.target.checked })} />
                 {copy.muteBadges}
               </label>
             )}
-            {group.canManage && group.ownRole === "owner" && (
+            {group.enhancedGroups && group.canManage && group.ownRole === "owner" && (
               <label className="flex min-h-11 items-center gap-3">
                 <input type="checkbox" checked={group.adminsOnly === true} disabled={busy}
                   onChange={event => setConfirmation({ label: copy.postingPolicy, action: "posting-policy", data: { adminsOnly: event.target.checked } })} />
                 {copy.postingPolicy}
               </label>
             )}
+            {group.enhancedGroups && group.canManage && <>
+              {group.ownRole === "owner" && <label className="flex min-h-11 items-center gap-3">
+                <input type="checkbox" checked={group.adminsCanShare === true} disabled={busy}
+                  onChange={event => setConfirmation({ label: copy.sharingPermission, action: "sharing-permission", data: { adminsCanShare: event.target.checked } })} />
+                {copy.sharingPermission}
+              </label>}
+              {group.canShare && <section className="space-y-2 rounded-xl border p-2">
+                <h4 className="font-medium">{copy.inviteLink}</h4>
+                <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => group.inviteExpiresAt
+                    ? setConfirmation({ label: copy.createLink, action: "create-link" })
+                    : void act("create-link")}>{copy.createLink}</button>
+                {group.inviteExpiresAt && <button type="button" className={actionButton} disabled={busy}
+                  onClick={() => setConfirmation({ label: copy.revokeLink, action: "revoke-link" })}>{copy.revokeLink}</button>}
+                {group.inviteExpiresAt && shared && shared.generation === group.inviteGeneration && <div className="space-y-2">
+                  <input dir="ltr" readOnly aria-label={copy.inviteLink} value={shared.url}
+                    onFocus={event => event.currentTarget.select()} className="w-full rounded-lg border p-2" />
+                  <QRCodeSVG value={shared.url} title={copy.inviteLink} size={176} marginSize={4} />
+                </div>}
+              </section>}
+              {!!group.joinRequests?.length && <ul aria-label={copy.joinRequests} className="space-y-2">
+                {group.joinRequests.map(person => <li key={person} className="flex flex-wrap items-center gap-2">
+                  <bdi>@{person}</bdi>
+                  <button type="button" className={actionButton} disabled={busy}
+                    onClick={() => setConfirmation({ label: copy.approve + " @" + person, action: "approve-join", data: { username: person } })}>{copy.approve}</button>
+                  <button type="button" className={actionButton} disabled={busy}
+                    onClick={() => setConfirmation({ label: copy.decline + " @" + person, action: "decline-join", data: { username: person } })}>{copy.decline}</button>
+                </li>)}
+              </ul>}
+            </>}
             {group.canManage && (
               <>
                 <form key={group.revision} className="space-y-2" onSubmit={event => {
@@ -190,6 +225,9 @@ export function GroupManagementSheet({ groupId, token, username, onClose, onLeav
                 ))}</ul>
               </>
             )}
+            {group.enhancedGroups && group.planning && <GroupPlanning planning={group.planning}
+              canManage={group.canManage} active={group.canManage || group.canLeave} busy={busy} act={act}
+              closeItem={(action, id) => setConfirmation({ label: copy.closeItem, action, data: { id } })} />}
             {group.canLeave && <button type="button" className={actionButton + " text-destructive"} disabled={busy}
               onClick={() => setConfirmation({ label: copy.leave, action: "leave" })}>{copy.leave}</button>}
           </>
@@ -252,4 +290,58 @@ export function GroupInvitations() {
       </ul>}
     </>
   );
+}
+
+export function GroupJoinLink() {
+  const { sessionToken } = usePiAuth();
+  const { lang } = useConnect();
+  const copy = getGroupCopy(lang);
+  const [invitation, setInvitation] = useState("");
+  const [notice, setNotice] = useState<"sent" | "unavailable" | "error" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const lifetime = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    const scope = new AbortController();
+    lifetime.current = scope;
+    const url = new URL(window.location.href);
+    const input = url.searchParams.get("groupInvite");
+    setInvitation(input ?? "");
+    return () => scope.abort();
+  }, [sessionToken]);
+
+  function close() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("groupInvite");
+    window.history.replaceState(window.history.state, "", url);
+    setInvitation("");
+  }
+
+  async function request() {
+    const scope = lifetime.current;
+    if (!sessionToken || !scope || scope.signal.aborted || busy) return;
+    setBusy(true);
+    try {
+      await requestGroupJoin(sessionToken, invitation, scope.signal);
+      if (scope.signal.aborted) return;
+      setNotice("sent");
+      close();
+    } catch (error) {
+      if (scope.signal.aborted) return;
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      setNotice(code === "GROUP_LINK_UNAVAILABLE" ? "unavailable" : "error");
+    } finally {
+      if (!scope.signal.aborted) setBusy(false);
+    }
+  }
+
+  const result = notice === "sent" ? copy.requestSent : notice === "unavailable" ? copy.linkUnavailable : copy.failure;
+  return <>
+    {notice === "sent" && <p role="status" className="px-3">{result}</p>}
+    {invitation && <Sheet open title={copy.requestJoin} onClose={close}>
+      {notice && notice !== "sent" && <p role="alert">{result}</p>}
+      <button type="button" disabled={busy} className={actionButton} onClick={() => void request()}>{copy.requestJoin}</button>
+    </Sheet>}
+  </>;
 }

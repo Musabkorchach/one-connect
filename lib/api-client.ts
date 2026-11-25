@@ -1418,15 +1418,22 @@ export interface GroupRecord {
   name: string;
   ownerUsername: string;
   members: string[];
+  enhancedGroups?: boolean;
+  topics?: GroupTopic[];
   adminsOnly?: boolean;
   photoId?: string | null;
   muted?: boolean;
+  pinned?: GroupMessageReference | null;
   admins?: string[];
   createdAt: number;
   updatedAt: number;
   unreadCount: number;
   state?: "active" | "archived";
 }
+
+export type GroupTopic = { id: string; title: string; closed: boolean };
+type GroupPoll = GroupTopic & { options: string[]; choice: number | null; totals: number[] };
+type GroupEvent = GroupTopic & { startsAt: number; attending: boolean; attendees: number };
 
 export interface GroupManagement {
   id: string;
@@ -1437,6 +1444,13 @@ export interface GroupManagement {
   ownRole: "owner" | "admin" | "member";
   canManage: boolean;
   canLeave: boolean;
+  enhancedGroups?: boolean;
+  canShare?: boolean;
+  adminsCanShare?: boolean;
+  inviteExpiresAt?: number | null;
+  inviteGeneration?: string | null;
+  joinRequests?: string[];
+  planning?: { topics: GroupTopic[]; polls: GroupPoll[]; events: GroupEvent[] };
   adminsOnly?: boolean;
   photoId?: string | null;
   muted?: boolean;
@@ -1450,12 +1464,18 @@ export function getGroupManagement(token: string, groupId: string, signal: Abort
 }
 
 export function manageGroup(token: string, groupId: string, action: string, data = {}, signal?: AbortSignal) {
-  return groupRequest<{ group: GroupManagement | null }>(`/api/groups/${groupId}/management`, token, "POST", { ...data, action }, signal);
+  return groupRequest<{ group: GroupManagement | null; invitationUrl?: string }>(`/api/groups/${groupId}/management`, token, "POST", { ...data, action }, signal);
 }
 
 export function getGroupInvitations(token: string, signal: AbortSignal) {
   return groupRequest<{ invitations: { id: string; name: string; owner: string }[] }>(
     "/api/group-management/invitations", token, "GET", undefined, signal);
+}
+
+
+export function requestGroupJoin(token: string, invitation: string, signal: AbortSignal) {
+  return groupRequest<{ pending: boolean; groupName: string }>(
+    "/api/group-management/join-request", token, "POST", { invitation }, signal);
 }
 
 export type GroupHistoryFilter = "search" | "media" | "files" | "links";
@@ -1471,7 +1491,10 @@ export function getFilteredGroupHistory(token: string, groupId: string, filter: 
 
 export type GroupMediaKind = "image" | "file" | "video" | "voice";
 
-export type GroupActivityAction = "details" | "accept-invite" | "leave" | "remove" | "promote" | "demote" | "accept-ownership";
+export type GroupActivityAction = "details" | "accept-invite" | "leave" | "remove" | "promote" | "demote" | "accept-ownership" | "approve-join";
+
+export type GroupReaction = "like" | "heart" | "laugh";
+export type GroupMessageReference = { id: string; senderUsername: string };
 
 export interface GroupMessageRecord {
   id: string;
@@ -1479,6 +1502,11 @@ export interface GroupMessageRecord {
   senderUsername: string;
   kind: "text" | GroupMediaKind;
   activity?: { action: GroupActivityAction; target?: string };
+  replyTo?: GroupMessageReference;
+  mentions?: string[];
+  reactions?: Partial<Record<GroupReaction, string[]>>;
+  reactionRevision?: number;
+  topicId?: string;
   text: string;
   at: number;
   readBy: string[];
@@ -1566,8 +1594,12 @@ export function getGroupMessages(
   groupId: string,
   before?: string,
   signal?: AbortSignal,
+  topicId?: string,
 ): Promise<GroupHistoryPage> {
-  const query = before ? `?before=${encodeURIComponent(before)}` : "";
+  const params = new URLSearchParams();
+  if (before) params.set("before", before);
+  if (topicId) params.set("topic", topicId);
+  const query = params.size ? "?" + params : "";
 
   return groupRequest(
     `/api/groups/${encodeURIComponent(groupId)}/messages${query}`,
@@ -1583,13 +1615,21 @@ export function sendGroupMessage(
   groupId: string,
   id: string,
   text: string,
+  replyTo?: GroupMessageReference,
+  topicId?: string,
 ): Promise<{ message: GroupMessageRecord }> {
   return groupRequest(
     `/api/groups/${encodeURIComponent(groupId)}/messages`,
     sessionToken,
     "POST",
-    { id, kind: "text", text },
+    { id, kind: "text", text, replyTo, topicId },
   );
+}
+
+export function changeGroupMessageInteraction(token: string, groupId: string, action: "react" | "pin" | "unpin",
+  target: GroupMessageReference, reaction?: GroupReaction | null) {
+  return groupRequest<{ message?: GroupMessageRecord; pinned?: GroupMessageReference | null }>(
+    `/api/groups/${groupId}/interactions`, token, "POST", { action, target, reaction });
 }
 
 export function markGroupMessagesRead(
@@ -1784,6 +1824,8 @@ export function sendGroupMediaMessage(
   id: string,
   media: GroupMediaRecord,
   text = "",
+  replyTo?: GroupMessageReference,
+  topicId?: string,
 ): Promise<{ message: GroupMessageRecord }> {
   if (media.groupId !== groupId) {
     throw new Error("Media belongs to a different group");
@@ -1798,6 +1840,8 @@ export function sendGroupMediaMessage(
       kind: media.kind,
       text,
       mediaId: media.mediaId,
+      replyTo,
+      topicId,
     },
   );
 }

@@ -137,7 +137,7 @@ export async function verifyDataCleanup(db, accountId, session) {
   if (binding.username && await db.collection("email_users").findOne({
     _id: binding.username, groupPiUid: binding._id,
   }, { session }) && await db.collection("chat_groups").findOne({
-    $or: [{ members: binding.username }, { admins: binding.username }, { invitations: binding.username },
+    $or: [{ members: binding.username }, { admins: binding.username }, { invitations: binding.username }, { "joinRequests.username": binding.username },
       { "ownershipOffer.toAccountId": binding.username }, { ownerUsername: binding.username, state: { $ne: "archived" } }],
   }, { session, projection: { _id: 1 } })) throw new Error("Legacy group access cleanup verification failed");
   await db.collection(identityBindingsCollection).updateOne({ accountId, state: "deleting" },

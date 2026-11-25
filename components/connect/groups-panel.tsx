@@ -6,7 +6,7 @@ import { useGroups } from "@/contexts/group-context";
 import { GroupAvatar } from "./group-avatar";
 import { CreateGroupSheet } from "./create-group-sheet";
 import { GroupConversationView } from "./group-conversation-view";
-import { GroupInvitations } from "./group-management";
+import { GroupInvitations, GroupJoinLink } from "./group-management";
 
 export function GroupsPanel({ query = "" }: { query?: string }) {
   const { lang } = useConnect();
@@ -53,6 +53,7 @@ export function GroupsPanel({ query = "" }: { query?: string }) {
         </p>
       )}
 
+      <GroupJoinLink />
       <GroupInvitations />
       <ul>
         {filtered.map((group) => (

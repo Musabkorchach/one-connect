@@ -6,11 +6,15 @@ import { getGroupActivityLabel, getGroupCopy } from "@/lib/connect/i18n";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { useConnect } from "@/contexts/connect-context";
 import {
+  changeGroupMessageInteraction,
   getGroupMessages,
   markGroupMessagesRead,
   onGroupEvent,
   sendGroupMessage,
   type GroupMessageRecord,
+  type GroupReaction,
+  type GroupTopic,
+  type GroupMessageReference,
   type GroupRecord,
   uploadGroupMedia,
   sendGroupMediaMessage,
@@ -23,7 +27,9 @@ import { GroupAttachments } from "./group-attachments";
 import { useGroupCallActions } from "@/contexts/group-call-actions-context";
 import { IconPhone, IconVideo } from "./icons";
 
-function messageKey(message: GroupMessageRecord) {
+const groupReactions = { like: "👍", heart: "❤️", laugh: "😂" } as const;
+
+function messageKey(message: GroupMessageReference) {
   return `${message.senderUsername}:${message.id}`;
 }
 
@@ -41,6 +47,10 @@ function mergeMessages(
 
     merged.set(key, {
       ...message,
+      ...((previous?.reactionRevision ?? 0) > (message.reactionRevision ?? 0) && {
+        reactionRevision: previous?.reactionRevision,
+        reactions: previous?.reactions,
+      }),
       readBy: [...new Set([
         ...(previous?.readBy || []),
         ...message.readBy,
@@ -61,13 +71,17 @@ export function GroupConversationView({
   onBack: () => void;
 }) {
   const { sessionToken, piUsername, isAuthenticated } = usePiAuth();
+  const [selected, setSelected] = useState("");
+  const topic = group.topics?.find(entry => entry.id === selected);
 
   if (!isAuthenticated || !sessionToken || !piUsername) return null;
 
   return (
     <GroupConversation
-      key={`${sessionToken}:${group.id}`}
+      key={`${sessionToken}:${group.id}:${topic?.id ?? ""}`}
       group={group}
+      topic={topic}
+      onTopic={setSelected}
       token={sessionToken}
       me={piUsername.replace(/^@+/, "").toLowerCase()}
       onBack={onBack}
@@ -77,11 +91,15 @@ export function GroupConversationView({
 
 function GroupConversation({
   group,
+  topic,
+  onTopic,
   token,
   me,
   onBack,
 }: {
   group: GroupRecord;
+  topic?: GroupTopic;
+  onTopic: (id: string) => void;
   token: string;
   me: string;
   onBack: () => void;
@@ -92,6 +110,9 @@ function GroupConversation({
 
   const [messages, setMessages] = useState<GroupMessageRecord[]>([]);
   const [text, setText] = useState("");
+  const [reply, setReply] = useState<GroupMessageReference>();
+  const copy = getGroupCopy(lang);
+  const canSend = group.state !== "archived" && !topic?.closed && (!group.adminsOnly || group.ownerUsername === me || group.admins?.includes(me));
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -106,9 +127,10 @@ function GroupConversation({
     file: File;
     kind: GroupMediaKind;
     text: string;
+    replyTo?: GroupMessageReference;
     media: GroupMediaRecord | null;
   } | null>(null);
-  const retryRef = useRef<{ id: string; text: string } | null>(null);
+  const retryRef = useRef<{ id: string; text: string; replyTo?: GroupMessageReference } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
@@ -126,7 +148,7 @@ function GroupConversation({
       message.groupId === group.id &&
       typeof message.id === "string" &&
       typeof message.senderUsername === "string" &&
-      members.includes(message.senderUsername) &&
+      message.topicId === topic?.id &&
       ["text", "image", "file", "video", "voice"].includes(message.kind) &&
       (
         message.kind === "text" ||
@@ -155,6 +177,7 @@ function GroupConversation({
           group.id,
           undefined,
           controller.signal,
+          topic?.id,
         );
         if (disposed) return;
 
@@ -222,7 +245,7 @@ function GroupConversation({
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", refresh);
     };
-    }, [token, group.id, membersKey]);
+    }, [token, group.id, membersKey, topic?.id]);
 
   useEffect(() => {
     if (followLatestRef.current) {
@@ -309,7 +332,7 @@ function GroupConversation({
     followLatestRef.current = false;
 
     try {
-      const page = await getGroupMessages(token, group.id, cursor);
+      const page = await getGroupMessages(token, group.id, cursor, undefined, topic?.id);
       if (!aliveRef.current) return;
 
       setMessages((current) => mergeMessages(current, page.messages));
@@ -343,12 +366,13 @@ function GroupConversation({
     try {
       let pending = mediaRetryRef.current;
 
-      if (!pending || pending.file !== file || pending.kind !== kind) {
+      if (!pending || pending.file !== file || pending.kind !== kind || pending.replyTo !== reply) {
         pending = {
           id: crypto.randomUUID(),
           file,
           kind,
           text: text.trim(),
+          replyTo: reply,
           media: null,
         };
         mediaRetryRef.current = pending;
@@ -371,6 +395,8 @@ function GroupConversation({
         pending.id,
         pending.media,
         pending.text,
+        pending.replyTo,
+        topic?.id,
       );
 
       if (!aliveRef.current) return false;
@@ -378,9 +404,10 @@ function GroupConversation({
       followLatestRef.current = true;
       setMessages((current) => mergeMessages(current, [result.message]));
 
-      const caption = pending.text;
+      const { text: caption, replyTo } = pending;
       setText((current) => current.trim() === caption ? "" : current);
       mediaRetryRef.current = null;
+      setReply(current => current === replyTo ? undefined : current);
 
       return true;
     } catch (error) {
@@ -406,9 +433,9 @@ function GroupConversation({
     if (!body || sendingRef.current) return;
 
     const pending =
-      retryRef.current?.text === body
+      retryRef.current?.text === body && retryRef.current.replyTo === reply
         ? retryRef.current
-        : { id: crypto.randomUUID(), text: body };
+        : { id: crypto.randomUUID(), text: body, replyTo: reply };
 
     retryRef.current = pending;
     sendingRef.current = true;
@@ -421,12 +448,15 @@ function GroupConversation({
         group.id,
         pending.id,
         pending.text,
+        pending.replyTo,
+        topic?.id,
       );
       if (!aliveRef.current) return;
 
       followLatestRef.current = true;
       setMessages((current) => mergeMessages(current, [result.message]));
       setText("");
+      setReply(current => current === pending.replyTo ? undefined : current);
       retryRef.current = null;
     } catch (error) {
       if (aliveRef.current) {
@@ -437,6 +467,22 @@ function GroupConversation({
       if (aliveRef.current) setSending(false);
     }
   };
+
+  const canPin = group.state !== "archived" && (group.ownerUsername === me || group.admins?.includes(me));
+  const pinned = group.pinned;
+  const pinnedMessage = pinned && messages.find(message => messageKey(message) === messageKey(pinned));
+
+  async function interact(action: "react" | "pin" | "unpin", target: GroupMessageRecord, reaction?: GroupReaction | null) {
+    try {
+      const result = await changeGroupMessageInteraction(token, group.id, action, {
+        id: target.id, senderUsername: target.senderUsername,
+      }, reaction);
+      const updated = result.message;
+      if (aliveRef.current && updated) setMessages(previous => mergeMessages(previous, [updated]));
+    } catch {
+      if (aliveRef.current) setError(copy.failure);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-40 mx-auto flex max-w-md flex-col bg-background">
@@ -475,6 +521,18 @@ function GroupConversation({
           <IconVideo className="h-5 w-5" />
         </button>
       </header>
+      {group.enhancedGroups && !!group.topics?.length && <label className="flex items-center gap-2 border-b px-4 py-2 text-sm">
+        {copy.topics}
+        <select aria-label={copy.topics} className="min-h-11 flex-1 rounded-lg border bg-background px-2"
+          value={topic?.id ?? ""} onChange={event => onTopic(event.target.value)}>
+          <option value="">{copy.general}</option>
+          {group.topics.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}
+        </select>
+      </label>}
+      {group.pinned && <p className="truncate border-b px-4 py-2 text-sm">
+        <span className="font-semibold">{copy.pinned}</span>{" "}
+        <bdi>{pinnedMessage?.text || "@" + group.pinned.senderUsername}</bdi>
+      </p>}
 
       <div
         ref={scrollRef}
@@ -529,15 +587,40 @@ function GroupConversation({
                 <p className="mb-1 text-xs font-semibold" dir="ltr">
                   @{message.senderUsername}
                 </p>
+                {message.replyTo && <p className="border-s-2 ps-2 text-xs" dir="auto">
+                  {copy.reply} <bdi>@{message.replyTo.senderUsername}</bdi>
+                </p>}
                 {message.kind !== "text" && (
                   <GroupMedia message={message} />
                 )}
 
                 {message.text && (
                   <p className="whitespace-pre-wrap break-words text-sm">
-                    {message.text}
+                    {message.mentions?.length
+                      ? message.text.split(/((?<![a-z0-9_.@-])@[a-z0-9_.-]{1,33}(?![a-z0-9_.-]))/gi).map((part, index) =>
+                        index % 2 === 1 && message.mentions?.includes(part.slice(1).toLowerCase())
+                          ? <bdi key={index} className="font-semibold underline">{part}</bdi>
+                          : part)
+                      : message.text}
                   </p>
                 )}
+                {group.enhancedGroups && canSend && <button type="button" className="min-h-9 text-xs underline" disabled={sending}
+                  onClick={() => setReply({ id: message.id, senderUsername: message.senderUsername })}>{copy.reply}</button>}
+                {group.enhancedGroups && group.state !== "archived" && <div className="flex flex-wrap items-center gap-2">
+                  {(Object.keys(groupReactions) as GroupReaction[]).map(reaction => {
+                    const people = message.reactions?.[reaction] ?? [];
+                    const mine = people.includes(me);
+                    return <button key={reaction} type="button" aria-label={copy[reaction]} aria-pressed={mine}
+                      className="min-h-9 rounded-lg px-1 text-xs aria-pressed:ring-1"
+                      onClick={() => void interact("react", message, mine ? null : reaction)}>
+                      {groupReactions[reaction]}{people.length ? " " + people.length : ""}
+                    </button>;
+                  })}
+                  {canPin && <button type="button" className="min-h-9 text-xs underline" onClick={() => {
+                    const pinned = group.pinned && messageKey(group.pinned) === messageKey(message);
+                    void interact(pinned ? "unpin" : "pin", message);
+                  }}>{group.pinned && messageKey(group.pinned) === messageKey(message) ? copy.unpin : copy.pin}</button>}
+                </div>}
                 <p className="mt-1 text-end text-[10px] opacity-70">
                   {new Date(message.at).toLocaleTimeString(lang, {
                     hour: "2-digit",
@@ -557,7 +640,12 @@ function GroupConversation({
         </p>
       )}
 
+      {group.enhancedGroups && reply && canSend && <div className="flex items-center justify-between border-t px-4 text-sm">
+        <span>{copy.reply} <bdi>@{reply.senderUsername}</bdi></span>
+        <button type="button" className="min-h-11" disabled={sending} onClick={() => setReply(undefined)}>{copy.cancel}</button>
+      </div>}
       {group.state === "archived" ? <p role="status" className="p-3">Archived group · Read only</p> :
+        topic?.closed ? <p role="status" className="p-3">{copy.closedTopic}</p> :
         group.adminsOnly && group.ownerUsername !== me && !group.admins?.includes(me) ? (
           <p role="status" className="p-3">{getGroupCopy(lang).adminsOnly}</p>
         ) : (

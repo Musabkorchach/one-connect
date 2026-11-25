@@ -1627,6 +1627,16 @@ test("production group management retains legacy history, roles, and live access
   assert.equal((await action(invitee, "accept-invite")).status, 404);
   assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
   assert.equal((await action(invitee, "accept-invite")).status, 200);
+  assert.equal((await action(invitee, "leave")).status, 200);
+  inviteSocket.disconnect();
+  assert.equal((await action(reader, "invite", { username: "group-audit-owner" })).status, 200);
+  const storedInvite = await client.db("oneconnect").collection("chat_groups").findOne({
+    _id: new ObjectId(groupId), invitations: "group-audit-owner",
+  }, { projection: { _id: 1 } });
+  assert.ok(storedInvite);
+  await openMailSocket(t, origin, invitee, "/");
+  assert.equal((await request("/api/group-management/invitations", { token: invitee })).body.invitations[0].id, groupId);
+  assert.equal((await action(invitee, "accept-invite")).status, 200);
   assert.equal((await action(owner, "demote", { username: "group-reader" })).status, 200);
   assert.equal((await action(reader, "remove", { username: "group-audit-owner" })).status, 403);
   assert.equal((await action(owner, "promote", { username: "group-reader" })).status, 200);
@@ -1653,6 +1663,31 @@ test("production group management retains legacy history, roles, and live access
   assert.equal(activity.filter(message => message.activity.action === "details").length, 1);
 
 
+
+  const replyTo = { id: "legacy-group-msg", senderUsername: "group-outsider" };
+  const reply = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "group-reply", kind: "text", text: "reply @group-reader @nonmember", replyTo } });
+  assert.equal(reply.status, 201);
+  assert.deepEqual(reply.body.message.replyTo, replyTo);
+  assert.deepEqual(reply.body.message.mentions, ["group-reader"]);
+  const badReply = await request(root + "/messages", { token: reader, method: "POST",
+    body: { id: "bad-group-reply", kind: "text", text: "reply", replyTo: { ...replyTo, id: "not-in-group" } } });
+  assert.equal(badReply.status, 404);
+  assert.equal(badReply.body.code, "GROUP_REPLY_UNAVAILABLE");
+  const interact = (token, action, reaction) => request(root + "/interactions", { token, method: "POST",
+    body: { action, target: replyTo, reaction } });
+  assert.equal((await interact(invitee, "react", "heart")).status, 404);
+  assert.equal((await interact(third, "pin")).status, 403);
+  const reactionRace = await Promise.all([interact(reader, "react", "like"), interact(third, "react", "heart")]);
+  assert.deepEqual(reactionRace.map(result => result.status), [200, 200]);
+  let refreshed = await request(root + "/messages", { token: reader });
+  assert.deepEqual(refreshed.body.messages.find(message => message.id === replyTo.id).reactions,
+    { like: ["group-reader"], heart: ["group-outsider"] });
+  assert.equal((await interact(reader, "pin")).status, 200);
+  refreshed = await request(root + "/messages", { token: third });
+  assert.deepEqual(refreshed.body.group.pinned, replyTo);
+  assert.equal((await interact(reader, "unpin")).status, 200);
+
   const literalText = "Literal .* https://example.test/shared";
   assert.equal((await request(root + "/messages", { token: reader, method: "POST",
     body: { id: "filtered-history", kind: "text", text: literalText } })).status, 201);
@@ -1666,6 +1701,69 @@ test("production group management retains legacy history, roles, and live access
 
   assert.equal((await request(root + "/messages", { token: invitee, method: "POST",
     body: { id: "rejected", kind: "text", text: "rejected" } })).status, 404);
+
+  assert.equal((await action(third, "create-link")).status, 403);
+  const generated = await action(reader, "create-link");
+  assert.equal(generated.status, 200);
+  const accessLink = new URL(generated.body.invitationUrl);
+  assert.equal(accessLink.hostname, "apppiconnectuvr9006.pinet.com");
+  const invitation = accessLink.searchParams.get("groupInvite");
+  const join = token => request("/api/group-management/join-request", { token, method: "POST", body: { invitation } });
+  assert.equal((await join()).status, 401);
+  assert.equal((await join(invitee)).status, 200);
+  assert.equal((await join(invitee)).status, 200);
+  assert.deepEqual((await details(reader)).body.group.joinRequests, ["group-audit-owner"]);
+  assert.equal((await details(invitee)).status, 404);
+  assert.equal((await action(third, "approve-join", { username: "group-audit-owner" })).status, 403);
+  assert.equal((await action(reader, "approve-join", { username: "group-audit-owner" })).status, 200);
+  assert.equal((await details(invitee)).status, 200);
+  assert.equal((await action(reader, "revoke-link")).status, 200);
+  assert.equal((await join(owner)).body.code, "GROUP_LINK_UNAVAILABLE");
+  const another = await action(reader, "create-link");
+  const expired = new URL(another.body.invitationUrl).searchParams.get("groupInvite");
+  await client.db("oneconnect").collection("chat_groups").updateOne({ _id: new ObjectId(groupId) },
+    { $set: { "inviteLink.expiresAt": Date.now() - 1000 } });
+  assert.equal((await request("/api/group-management/join-request", { token: owner, method: "POST",
+    body: { invitation: expired } })).body.code, "GROUP_LINK_UNAVAILABLE");
+
+  assert.equal((await action(third, "topic:create", { title: "Unauthorized" })).status, 403);
+  const topicResult = await action(reader, "topic:create", { title: "Logistics" });
+  assert.equal(topicResult.status, 200);
+  const topicId = topicResult.body.group.planning.topics[0].id;
+  const postTopic = (id, topicId) => request(root + "/messages", { token: third, method: "POST",
+    body: { id, kind: "text", text: "topic message", topicId } });
+  assert.equal((await postTopic("topic-message", topicId)).status, 201);
+  const general = await request(root + "/messages", { token: third });
+  assert.ok(!general.body.messages.some(message => message.id === "topic-message"));
+  const topicHistory = await request(root + "/messages?topic=" + topicId, { token: third });
+  assert.deepEqual(topicHistory.body.messages.map(message => message.id), ["topic-message"]);
+  assert.equal((await request(root + "/messages?topic=" + topicId, { token: owner })).status, 404);
+  assert.equal((await action(reader, "topic:close", { id: topicId })).status, 200);
+  assert.equal((await postTopic("blocked-topic-message", topicId)).body.code, "GROUP_TOPIC_UNAVAILABLE");
+
+  assert.equal((await action(reader, "poll:create", { title: "Duplicates", options: ["A", "A"] })).status, 400);
+  const pollResult = await action(reader, "poll:create", { title: "When?", options: ["A", "B"] });
+  assert.equal(pollResult.status, 200);
+  const pollId = pollResult.body.group.planning.polls[0].id;
+  assert.equal((await action(third, "poll:vote", { id: pollId, choice: 1 })).status, 200);
+  assert.equal((await action(reader, "poll:vote", { id: pollId, choice: 0 })).status, 200);
+  const poll = (await details(third)).body.group.planning.polls[0];
+  assert.deepEqual(poll.totals, [1, 1]);
+  assert.equal(poll.choice, 1);
+  assert.equal((await action(third, "poll:close", { id: pollId })).status, 403);
+  assert.equal((await action(reader, "poll:close", { id: pollId })).status, 200);
+  assert.equal((await action(third, "poll:vote", { id: pollId, choice: 0 })).status, 409);
+
+  const eventResult = await action(reader, "event:create", { title: "Meet", startsAt: Date.now() + 3600000 });
+  assert.equal(eventResult.status, 200);
+  const eventId = eventResult.body.group.planning.events[0].id;
+  assert.equal((await action(third, "event:rsvp", { id: eventId, attending: true })).status, 200);
+  assert.equal((await details(reader)).body.group.planning.events[0].attendees, 1);
+  assert.equal((await details(third)).body.group.planning.events[0].attending, true);
+  assert.equal((await action(reader, "event:close", { id: eventId })).status, 200);
+  assert.equal((await action(third, "event:rsvp", { id: eventId, attending: false })).status, 409);
+
+
 });
 
 test("legacy group deletion uses verified identity and resumes without losing history", async () => {

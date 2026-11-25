@@ -1,12 +1,25 @@
+import { createHash, randomBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
+import { groupPlanningChange, groupPlanningView, removePlanningParticipant } from "./group-planning.js";
 import { isCurrentOwnershipOffer, ownershipOffer } from "./group-ownership.js";
+
+const accessAppUrl = "https://apppiconnectuvr9006.pinet.com/";
+const inviteLifeMs = 24 * 60 * 60 * 1000;
+
+function inviteDigest(secret) {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+function currentInvitation(group) {
+  return group.inviteLink && group.inviteLink.expiresAt > Date.now() ? group.inviteLink : null;
+}
 
 export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
   const username = binding.username;
   if (!username || !await db.collection("email_users").findOne({ _id: username, groupPiUid: binding._id }, { session })) return [];
   const groups = db.collection("chat_groups");
   const rows = await groups.find({
-    $or: [{ members: username }, { admins: username }, { invitations: username },
+    $or: [{ members: username }, { admins: username }, { invitations: username }, { "joinRequests.username": username },
       { "ownershipOffer.toAccountId": username }, { ownerUsername: username, state: { $ne: "archived" } }],
   }, { session }).toArray();
   const notices = [];
@@ -14,11 +27,14 @@ export async function removeVerifiedLegacyGroupAccess(db, binding, session) {
     const owned = group.ownerUsername === username;
     const invitations = group.invitations ?? [];
     const update = {
-      $pull: { members: username, admins: username, mutedBy: username, ...(!owned && { invitations: username }) },
+      $pull: { members: username, admins: username, mutedBy: username, ...(!owned && { invitations: username, joinRequests: { username } }) },
       $inc: { managementRevision: 1 },
       $max: { updatedAt: Date.now() },
-      ...(owned && { $set: { state: "archived", invitations: [] } }),
-      ...((owned || group.ownershipOffer?.toAccountId === username) && { $unset: { ownershipOffer: "" } }),
+      $set: {
+        ...removePlanningParticipant(group, username),
+        ...(owned && { state: "archived", invitations: [], joinRequests: [] }),
+      },
+      ...((owned || group.ownershipOffer?.toAccountId === username) && { $unset: { ownershipOffer: "", ...(owned && { inviteLink: "" }) } }),
     };
     await groups.updateOne({ _id: group._id }, update, { session });
     notices.push({ id: group._id, legacy: true, invitees: owned ? invitations : [username] });
@@ -46,6 +62,8 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     const admin = admins.includes(username);
     const active = group.state !== "archived";
     const offer = group.ownershipOffer;
+    const link = currentInvitation(group);
+    const canShare = active && (owner || (admin && group.adminsCanShare === true));
     return {
       id: group._id.toHexString(), name: group.name, description: group.description ?? "",
       owner: group.ownerUsername, members: group.members.map(member => ({
@@ -53,12 +71,18 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
       })),
       ownRole: owner ? "owner" : admin ? "admin" : "member",
       canManage: active && (owner || admin), canLeave: active && !owner,
+      enhancedGroups: true,
+      canShare, adminsCanShare: group.adminsCanShare === true,
+      inviteExpiresAt: canShare ? link?.expiresAt ?? null : null,
+      inviteGeneration: canShare ? link?.generation ?? null : null,
+      joinRequests: active && (owner || admin) && link ? (group.joinRequests ?? []).map(request => request.username) : [],
       adminsOnly: group.adminsOnly === true,
       photoId: group.photoId ?? null,
       muted: group.mutedBy?.includes(username) ?? false,
       invitations: active && (owner || admin) ? group.invitations ?? [] : [],
       offer: active && offer && (owner || offer.toAccountId === username) ? offer : null,
       revision: group.managementRevision ?? 0,
+      planning: groupPlanningView(group, username),
     };
   }
 
@@ -68,6 +92,30 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     res.set("Cache-Control", "private, no-store").json({ invitations: records.map(group => ({
       id: group._id.toHexString(), name: group.name, owner: group.ownerUsername,
     })) });
+  }));
+
+  app.post("/api/group-management/join-request", requireSession, authenticated(async (req, res, username) => {
+    const { invitation } = req.body ?? {};
+    if (typeof invitation !== "string" || !/^[a-f0-9]{24}\.[A-Za-z0-9_-]{43}$/.test(invitation)) {
+      return error(res, 400, "Invalid invitation link");
+    }
+    const [id, secret] = invitation.split(".");
+    const filter = { _id: new ObjectId(id), "inviteLink.digest": inviteDigest(secret),
+      "inviteLink.expiresAt": { $gt: Date.now() }, state: { $ne: "archived" } };
+    const group = await groups.findOne(filter);
+    if (!group) return error(res, 404, "Invitation link has expired or was revoked", "GROUP_LINK_UNAVAILABLE");
+    if (group.members.includes(username)) return error(res, 409, "This person is already a member", "GROUP_ALREADY_MEMBER");
+    const requests = group.joinRequests ?? [];
+    const uid = req.user.verifiedPiUid;
+    if (requests.some(request => request.uid === uid)) return res.json({ pending: true, groupName: group.name });
+    if (requests.length >= 50) return error(res, 409, "Too many pending join requests");
+    const updated = await groups.findOneAndUpdate({
+      ...filter, managementRevision: group.managementRevision, members: { $ne: username },
+    }, { $set: { joinRequests: [...requests, { username, uid }] }, $inc: { managementRevision: 1 } },
+    { returnDocument: "after" });
+    if (!updated) return error(res, 409, "Group changed. Refresh and retry.");
+    await publish(updated);
+    return res.json({ pending: true, groupName: updated.name });
   }));
 
   app.get(base, requireSession, authenticated(async (req, res, username) => {
@@ -94,6 +142,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     const regular = member && target !== group.ownerUsername && !admins.includes(target);
     const changes = {};
     let notifyInvite;
+    let invitationUrl;
     let departed;
     const unset = {};
 
@@ -109,6 +158,50 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
         if (typeof req.body.muted !== "boolean") return error(res, 400, "Invalid notification preference");
         const mutedBy = group.mutedBy ?? [];
         changes.mutedBy = req.body.muted ? [...new Set([...mutedBy, username])] : mutedBy.filter(person => person !== username);
+        break;
+      }
+      case "sharing-permission":
+        if (!owner) return error(res, 403, "Only the owner may change sharing permission");
+        if (typeof req.body.adminsCanShare !== "boolean") return error(res, 400, "Invalid sharing permission");
+        changes.adminsCanShare = req.body.adminsCanShare;
+        if (!changes.adminsCanShare) {
+          unset.inviteLink = "";
+          changes.joinRequests = [];
+        }
+        break;
+      case "create-link":
+      case "revoke-link": {
+        if (!owner && !(manage && group.adminsCanShare === true)) return error(res, 403, "Cannot share this group");
+        changes.joinRequests = [];
+        if (action === "revoke-link") {
+          unset.inviteLink = "";
+        } else {
+          const secret = randomBytes(32).toString("base64url");
+          changes.inviteLink = { digest: inviteDigest(secret), generation: new ObjectId().toHexString(), expiresAt: Date.now() + inviteLifeMs };
+          const url = new URL(accessAppUrl);
+          url.searchParams.set("groupInvite", _id.toHexString() + "." + secret);
+          invitationUrl = url.toString();
+        }
+        break;
+      }
+      case "approve-join":
+      case "decline-join": {
+        if (!manage) return error(res, 403, "Group management permission required");
+        const requests = group.joinRequests ?? [];
+        const request = currentInvitation(group) && requests.find(entry => entry.username === target);
+        if (!request) return error(res, 404, "Join request is unavailable");
+        changes.joinRequests = requests.filter(entry => entry.username !== target);
+        if (action === "approve-join") {
+          if (member || (group.members.length + invitations.filter(person => person !== target).length >= 50)) {
+            return error(res, 409, "Invitation cannot be added");
+          }
+          if (!await users.findOne({ _id: target, groupPiUid: request.uid }, { projection: { _id: 1 } })) {
+            return error(res, 404, "Invitee must sign in with a verified Pi identity", "GROUP_INVITEE_NOT_VERIFIED");
+          }
+          changes.members = [...group.members, target];
+          changes.invitations = invitations.filter(person => person !== target);
+          notifyInvite = target;
+        }
         break;
       }
       case "photo": {
@@ -146,7 +239,10 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
       case "accept-invite":
       case "decline-invite":
         changes.invitations = invitations.filter(person => person !== username);
-        if (action === "accept-invite") changes.members = [...new Set([...group.members, username])];
+        if (action === "accept-invite") {
+          changes.members = [...new Set([...group.members, username])];
+          changes.joinRequests = (group.joinRequests ?? []).filter(request => request.username !== username);
+        }
         notifyInvite = username;
         break;
       case "promote":
@@ -165,6 +261,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
         changes.members = group.members.filter(person => person !== departed);
         changes.admins = admins.filter(person => person !== departed);
         changes.mutedBy = (group.mutedBy ?? []).filter(person => person !== departed);
+        Object.assign(changes, removePlanningParticipant(group, departed));
         if (group.ownershipOffer?.toAccountId === departed) unset.ownershipOffer = "";
         break;
       case "offer":
@@ -186,12 +283,17 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
           changes.admins = admins.filter(person => person !== username);
         }
         break;
-      default:
-        return error(res, 400, "Unknown group action");
+      default: {
+        if (typeof action !== "string" || !/^(topic|poll|event):/.test(action)) return error(res, 400, "Unknown group action");
+        const planning = groupPlanningChange(group, username, manage, req.body);
+        if (planning.status) return error(res, planning.status, planning.message);
+        Object.assign(changes, planning.changes);
+      }
     }
 
     const filter = {
       _id, managementRevision: group.managementRevision ?? { $exists: false },
+      ...((action === "approve-join" || action === "decline-join") && { "inviteLink.expiresAt": { $gt: Date.now() } }),
       state: { $ne: "archived" }, [invitationResponse ? "invitations" : "members"]: username,
     };
     const at = Date.now();
@@ -202,6 +304,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     const activity = ({
       details: "updated the group details.",
       "accept-invite": "joined the group.",
+      "approve-join": "approved a request to join the group.",
       leave: "left the group.",
       remove: "removed a member.",
       promote: "appointed an administrator.",
@@ -211,7 +314,7 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     const message = activity ? {
       _id: new ObjectId(), groupId: _id.toHexString(), id: "group-activity-" + new ObjectId().toHexString(),
       kind: "text", senderUsername: username, text: "@" + username + " " + activity, at, readBy: [username], deletedFor: [],
-      activity: { action, ...(["remove", "promote", "demote"].includes(action) && { target }) },
+      activity: { action, ...(["remove", "promote", "demote", "approve-join"].includes(action) && { target }) },
     } : null;
     const result = message ? await commitActivity(filter, update, message) :
       await groups.findOneAndUpdate(filter, update, { returnDocument: "after" });
@@ -220,6 +323,6 @@ export function registerLegacyGroupManagement({ app, groups, users, authorizePho
     if (message) publishActivity(result, message);
     if (departed) await revoke(result, departed);
     if (notifyInvite) inviteChanged(notifyInvite);
-    return res.json({ group: result.members.includes(username) ? view(result, username) : null });
+    return res.set("Cache-Control", "private, no-store").json({ group: result.members.includes(username) ? view(result, username) : null, ...(invitationUrl && { invitationUrl }) });
   }));
 }
