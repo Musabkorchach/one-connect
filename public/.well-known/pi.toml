@@ -1,0 +1,6 @@
+[[CURRENCIES]]
+code = "ONECONNECT"
+issuer = "GAFBASCSEBJ4L2UF5HMMV5O3TDOW7KWLSBLJ7NZFWHKJNNDY5HY4AEWW"
+name = "One Connect"
+desc = "One Connect Token for Pi Testnet."
+image = "https://one-connect.onrender.com/oneconnect-token.svg"
