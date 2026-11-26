@@ -319,6 +319,11 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
   }
 
   const initialize = async (explicit = false, requestedLanguage?: LangId) => {
+    if (PI_NETWORK_CONFIG.PRODUCTION_REVIEW) {
+      setAuthMessage("Production sign-in is disabled until account isolation is verified.");
+      setHasError(true);
+      return;
+    }
     if (authAttempt.current || activeSessionToken.current) return;
     const attempt = new AbortController();
     authAttempt.current = attempt;

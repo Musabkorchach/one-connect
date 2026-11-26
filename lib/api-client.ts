@@ -2,10 +2,12 @@ import io from "socket.io-client";
 import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 
 export const API_URL =
+  process.env.NEXT_PUBLIC_ONECONNECT_API_URL ||
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
 const WS_URL =
+  process.env.NEXT_PUBLIC_ONECONNECT_WS_URL ||
   process.env.REACT_APP_WS_URL ||
   "https://one-connect.onrender.com";
 

@@ -2,6 +2,22 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 
+if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") {
+  for (const name of ["NEXT_PUBLIC_ONECONNECT_API_URL", "NEXT_PUBLIC_ONECONNECT_WS_URL"]) {
+    const value = process.env[name];
+    let origin;
+    try {
+      origin = new URL(value);
+    } catch {
+      throw new Error(name + " must be an explicit HTTPS origin for Production review.");
+    }
+    if (origin.protocol !== "https:" || value !== origin.origin ||
+        origin.hostname === "one-connect.onrender.com") {
+      throw new Error(name + " must be a dedicated HTTPS origin outside the shared Testnet backend.");
+    }
+  }
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: {
