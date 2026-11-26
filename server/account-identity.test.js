@@ -595,7 +595,7 @@ test("Production runs existing account routes with separate data and sessions", 
   assert.equal(reviewer.piUsername, testnet.piUsername);
   assert.notEqual(reviewer.userId, testnet.userId);
   assert.equal(reviewer.subscriptionStatusSupported, false);
-  assert.equal(reviewer.accountDeletionSupported, false);
+  assert.equal(reviewer.accountDeletionSupported, true);
   assert.equal((await legacy.request("/api/profile", { token, method: "GET" })).status, 401);
   assert.equal((await production.request("/api/profile", { token: testnet.sessionToken })).status, 401);
   assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken, method: "PUT", body: { displayName: "Testnet only" } })).status, 200);
@@ -636,8 +636,32 @@ test("Production runs existing account routes with separate data and sessions", 
   const history = await production.request("/api/chat/conversations/" + conversationId, { token: peer.sessionToken });
   assert.equal(history.status, 200);
   assert.equal(history.body.messages[0].text, "Production chat");
-  assert.equal((await production.request("/api/groups", { token, method: "POST", body: { name: "Production group" } })).status, 201);
+  const group = await production.request("/api/groups", { token, method: "POST", body: { name: "Production group", members: ["demo-peer"] } });
+  assert.equal(group.status, 201);
   assert.equal((await production.request("/api/groups", { token })).body.groups.length, 1);
+  const groupRoute = "/api/groups/" + group.body.group.id;
+  const groupApi = (who, path, method = "GET", body) => production.request(groupRoute + path, { token: who, method, body });
+  assert.equal((await groupApi(peer.sessionToken, "/messages")).status, 404);
+  assert.equal((await groupApi(peer.sessionToken, "/invitations/accept", "POST")).status, 200);
+  assert.equal((await groupApi(peer.sessionToken, "/invitations", "POST", { username: "demo-reviewer" })).status, 403);
+  const attachment = new FormData();
+  attachment.set("kind", "file");
+  attachment.set("file", new Blob(["production group file"]), "review.txt");
+  const file = await groupApi(token, "/media", "POST", attachment);
+  assert.equal(file.status, 201);
+  const mediaId = file.body.mediaId;
+  assert.equal((await groupApi(peer.sessionToken, "/media/" + mediaId)).status, 404);
+  assert.equal((await groupApi(token, "/messages", "POST", { id: "production-media", kind: "file", text: "", mediaId })).status, 201);
+  assert.equal((await groupApi(peer.sessionToken, "/media/" + mediaId)).body, "production group file");
+  const member = (await production.request("/api/groups", { token })).body.groups[0].members.find(item => item.username === "demo-peer");
+  const offer = await groupApi(token, "/ownership-offers", "POST", { memberId: member.id });
+  assert.equal(offer.status, 201);
+  assert.equal((await groupApi(peer.sessionToken, "/ownership-offers/" + offer.body.offerId + "/accept", "POST")).status, 200);
+  assert.equal((await production.request("/api/groups", { token: peer.sessionToken })).body.groups[0].isOwner, true);
+  assert.equal((await groupApi(token, "/invitations", "POST", { username: "demo-peer" })).status, 403);
+  const formerOwner = (await production.request("/api/groups", { token: peer.sessionToken })).body.groups[0].members.find(item => item.username === "demo-reviewer");
+  assert.equal((await groupApi(peer.sessionToken, "/members/" + formerOwner.id, "DELETE")).status, 200);
+  assert.equal((await groupApi(token, "/media/" + mediaId)).status, 404);
   const mail = await production.request("/api/emails/internal", { token, method: "POST", body: {
     id: "production-demo-mail", recipient: "@demo-peer", subject: "Production mail", body: "isolated",
   } });
@@ -646,6 +670,43 @@ test("Production runs existing account routes with separate data and sessions", 
   for (const path of ["/api/pi-testnet/subscription/plan", "/api/subscriptions/status", "/api/emails/external", "/api/calls/pstn/prepare"]) {
     assert.equal((await production.request(path, { token })).status, 404);
   }
+  await rejectMailSocket(t, production.origin, testnet.sessionToken, "/calls");
+  const [caller, receiver] = (await Promise.all([token, peer.sessionToken].map(value =>
+    openMailSocket(t, production.origin, value, "/calls")))).map(value => value.socket);
+  assert.equal((await production.request("/api/calls/ice-servers", { token })).status, 200);
+  const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
+  receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
+  assert.equal((await groupCallRejected).reason, "unavailable");
+  for (const kind of ["voice", "video"]) {
+    const callId = "production-call-" + kind;
+    const incoming = expectSocketEvent(receiver, "call:incoming");
+    caller.emit("call:initiate", { callId, kind, to: "demo-peer" });
+    assert.equal((await incoming).kind, kind);
+    const accepted = expectSocketEvent(caller, "call:accepted");
+    receiver.emit("call:accept", { callId });
+    await accepted;
+    const offerEvent = expectSocketEvent(receiver, "call:offer");
+    caller.emit("call:offer", { callId, offer: { type: "offer", sdp: "production fixture" } });
+    assert.equal((await offerEvent).offer.sdp, "production fixture");
+    const answered = expectSocketEvent(caller, "call:answered");
+    receiver.emit("call:answer", { callId, answer: { type: "answer", sdp: "production answer" } });
+    await answered;
+    const ended = expectSocketEvent(receiver, "call:ended");
+    caller.emit("call:end", { callId });
+    await ended;
+  }
+  const challenge = await production.request("/api/account/deletion/challenge", { token, method: "POST", body: {} });
+  assert.equal(challenge.status, 201);
+  const payload = { confirmationToken: challenge.body.confirmationToken, confirm: true };
+  const confirmDelete = (accessToken) => production.request("/api/account/deletion/confirm", {
+    token, method: "POST", body: { ...payload, accessToken },
+  });
+  assert.equal((await confirmDelete("demo-peer")).body.code, "PI_IDENTITY_MISMATCH");
+  const disconnected = expectSocketEvent(caller, "disconnect");
+  assert.equal((await confirmDelete("demo-reviewer")).status, 202);
+  await disconnected;
+  assert.equal((await production.request("/api/profile", { token })).status, 401);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken })).body.profile.displayName, "Testnet only");
 });
 
 test("all authorized subscription previews reach session checks independently of PiNet", async (t) => {

@@ -104,8 +104,9 @@ export function createVerifyPiLogin({
       res.json({
         sessionToken, userId, piUsername, message: "Authenticated",
         ...(bindAccounts ? {
-          accountDeletionSupported: !production, subscriptionStatusSupported: !production,
-          ...(production ? {} : { accountDataStatus: migrationRequired.code, callSocketMode: "account" }),
+          accountDeletionSupported: true, subscriptionStatusSupported: !production,
+          ...(production ? {} : { accountDataStatus: migrationRequired.code }),
+          callSocketMode: "account",
           emailSocketMode: "account", chatSocketMode: "account", groupSocketMode: "account",
           privateDataOwner: privateDataOwnerKey(accountId),
         } : {}),

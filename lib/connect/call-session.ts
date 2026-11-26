@@ -11,7 +11,15 @@ import {
   createRemoteSignalQueue,
 } from "./call-media";
 
+export interface PeerCallTransport {
+  on: typeof onCallEvent;
+  send: typeof sendCallEvent;
+  configuration: () => Promise<RTCConfiguration>;
+  connected: () => boolean;
+}
+
 export interface CallSessionOptions {
+  transport?: PeerCallTransport;
   callId: string;
   username: string;
   kind: "voice" | "video";
@@ -25,6 +33,7 @@ export interface CallSessionOptions {
 }
 
 export class CallSession {
+  private readonly transport: Pick<PeerCallTransport, "on" | "send" | "configuration">;
   private ended = false;
   private started = false;
   private cameraFacingMode: "user" | "environment" = "user";
@@ -37,8 +46,11 @@ export class CallSession {
   private listeners: Array<() => void> = [];
 
     constructor(private readonly options: CallSessionOptions) {
+    this.transport = options.transport ?? {
+      on: onCallEvent, send: sendCallEvent, configuration: getCallConfiguration,
+    };
     this.listeners.push(
-      onCallEvent("call:accepted", (data) => {
+      this.transport.on("call:accepted", (data) => {
         if (
           data?.callId !== this.options.callId ||
           this.ended ||
@@ -55,7 +67,7 @@ export class CallSession {
           });
         }
       }),
-            onCallEvent("call:offer", (data) => {
+            this.transport.on("call:offer", (data) => {
         if (
           data?.callId !== this.options.callId ||
           this.options.direction !== "incoming" ||
@@ -69,7 +81,7 @@ export class CallSession {
         });
       }),
 
-            onCallEvent("call:answered", (data) => {
+            this.transport.on("call:answered", (data) => {
         if (
           data?.callId !== this.options.callId ||
           this.options.direction !== "outgoing" ||
@@ -83,13 +95,13 @@ export class CallSession {
         });
       }),
 
-      onCallEvent("call:ended", (data) => {
+      this.transport.on("call:ended", (data) => {
         if (data?.callId !== this.options.callId) return;
 
         this.end(data.reason, false);
       }),
 
-            onCallEvent("call:ice-candidate", (data) => {
+            this.transport.on("call:ice-candidate", (data) => {
         if (
           data?.callId !== this.options.callId ||
           this.ended
@@ -105,17 +117,17 @@ export class CallSession {
         });
       }),
 
-      onCallEvent("call:error", (data) => {
+      this.transport.on("call:error", (data) => {
         if (data?.callId !== this.options.callId) return;
 
         this.end(data.reason, false);
       }),
 
-      onCallEvent("disconnect", () => {
+      this.transport.on("disconnect", () => {
         this.end("disconnected", false);
       }),
 
-      onCallEvent("call:connected", (data) => {
+      this.transport.on("call:connected", (data) => {
         if (
           data?.callId !== this.options.callId ||
           this.ended ||
@@ -140,7 +152,7 @@ export class CallSession {
     await peer.setLocalDescription(offer);
     if (this.ended) return;
 
-    const sent = sendCallEvent("call:offer", {
+    const sent = this.transport.send("call:offer", {
       callId: this.options.callId,
       offer: {
         type: "offer",
@@ -167,7 +179,7 @@ export class CallSession {
     await peer.setLocalDescription(answer);
     if (this.ended) return;
 
-    const sent = sendCallEvent("call:answer", {
+    const sent = this.transport.send("call:answer", {
       callId: this.options.callId,
       answer: {
         type: "answer",
@@ -203,7 +215,7 @@ export class CallSession {
       this.negotiated &&
       this.peer?.connectionState === "connected"
     ) {
-      sendCallEvent("call:connected", {
+      this.transport.send("call:connected", {
         callId: this.options.callId,
       });
     }
@@ -216,7 +228,7 @@ export class CallSession {
     let failureReason = "configuration-error";
 
     try {
-      const configuration = await getCallConfiguration();
+      const configuration = await this.transport.configuration();
       if (this.ended) return;
 
       failureReason = "media-error";
@@ -225,12 +237,12 @@ export class CallSession {
 
       const sent =
         this.options.direction === "outgoing"
-          ? sendCallEvent("call:initiate", {
+          ? this.transport.send("call:initiate", {
               callId: this.options.callId,
               to: this.options.username,
               kind: this.options.kind,
             })
-          : sendCallEvent("call:accept", {
+          : this.transport.send("call:accept", {
               callId: this.options.callId,
             });
 
@@ -266,7 +278,7 @@ export class CallSession {
         onCandidate: (candidate) => {
           if (this.ended) return;
 
-          if (!sendCallEvent("call:ice-candidate", {
+          if (!this.transport.send("call:ice-candidate", {
             callId: this.options.callId,
             candidate,
           })) {
@@ -421,7 +433,7 @@ export class CallSession {
     this.localStream = null;
 
     if (notifyPeer) {
-      sendCallEvent("call:end", { callId: this.options.callId });
+      this.transport.send("call:end", { callId: this.options.callId });
     }
 
     this.options.onEnd(reason);

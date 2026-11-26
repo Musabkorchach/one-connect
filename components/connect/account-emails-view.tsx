@@ -79,6 +79,7 @@ export function AccountEmailsView({ sessionToken, username }: { sessionToken: st
       </div>
       {!terminal && emails !== null && <MailboxView mailbox={{
         t, lang: "en", emails, contacts: [],
+        internalOnly: process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review",
         pushToast: setNotice,
         sendEmail: (recipient, subject, body, _attachmentName, _attachmentSize, requestId, file) =>
           changeMailbox(async (canUseMailbox) => {

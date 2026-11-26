@@ -657,16 +657,11 @@ export function onUserStatus(callback: (data: Record<string, unknown>) => void) 
   socket.on("user:status", callback);
 }
 
-export async function getCallConfiguration(): Promise<RTCConfiguration> {
+export async function getCallConfiguration(sessionToken?: string): Promise<RTCConfiguration> {
   const activeSocket = socket;
   const auth = activeSocket?.auth;
-
-  if (
-    !activeSocket?.connected ||
-    !auth ||
-    typeof auth !== "object" ||
-    typeof auth.sessionToken !== "string"
-  ) {
+  const token = sessionToken ?? (activeSocket?.connected && auth && typeof auth === "object" ? auth.sessionToken : undefined);
+  if (typeof token !== "string" || !token) {
     throw new Error("An active session is required for calls.");
   }
 
@@ -676,7 +671,7 @@ export async function getCallConfiguration(): Promise<RTCConfiguration> {
   try {
     const response = await fetch(`${API_URL}/api/calls/ice-servers`, {
       headers: {
-        Authorization: `Bearer ${auth.sessionToken}`,
+        Authorization: `Bearer ${token}`,
       },
       cache: "no-store",
       signal: controller.signal,
@@ -739,7 +734,7 @@ export async function getCallConfiguration(): Promise<RTCConfiguration> {
       iceServers.push(server);
     }
 
-    if (socket !== activeSocket || !activeSocket.connected) {
+    if (!sessionToken && (socket !== activeSocket || !activeSocket?.connected)) {
       throw new Error("The call session changed.");
     }
 

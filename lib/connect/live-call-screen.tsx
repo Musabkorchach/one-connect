@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import type { CallViewState } from "@/lib/connect/use-call-controller";
+import type { getDict } from "@/lib/connect/i18n";
 import { formatDuration } from "@/lib/connect/data";
 import { Avatar } from "@/components/connect/ui";
 import { CallStream } from "./call-stream";
@@ -15,22 +16,28 @@ import {
   IconHangup,
 } from "@/components/connect/icons";
 
-export function LiveCallScreen({
-  call,
-  onAccept,
-  onEnd,
-  onMutedChange,
-  onVideoEnabledChange,
-  onSwitchCamera,
-}: {
+type CallScreenProps = {
   call: CallViewState;
   onAccept: () => void;
   onEnd: () => void;
   onMutedChange: (muted: boolean) => void;
   onVideoEnabledChange: (enabled: boolean) => void;
-    onSwitchCamera: () => Promise<void>;
-}) {
+  onSwitchCamera: () => Promise<void>;
+};
+
+export function LiveCallScreen(props: CallScreenProps) {
   const { t } = useConnect();
+  return <LivePeerCallScreen {...props} t={t} />;
+}
+
+export function LivePeerCallScreen({
+  call,
+  onAccept,
+  onEnd,
+  onMutedChange,
+  onVideoEnabledChange,
+  onSwitchCamera, t,
+}: CallScreenProps & { t: ReturnType<typeof getDict> }) {
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {

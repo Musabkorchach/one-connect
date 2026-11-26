@@ -5,6 +5,7 @@ import { AccountPrivateDataView } from "@/components/connect/account-private-dat
 import { AccountGroupsView } from "@/components/connect/account-groups-view";
 import { AccountPrivateChat } from "@/components/connect/account-private-chat";
 import { AccountEmailsView } from "@/components/connect/account-emails-view";
+import { AccountPeerCalls, type StartPeerCall } from "@/components/connect/account-peer-calls";
 import { ConnectApp } from "@/components/connect/connect-app";
 
 import { usePiAuth } from "@/contexts/pi-auth-context";
@@ -35,7 +36,7 @@ function AccountCommunication({ sessionToken, username, emailEnabled, chatEnable
   sessionToken: string; username: string; emailEnabled: boolean; chatEnabled: boolean; groupsEnabled: boolean; privateDataEnabled: boolean;
 }) {
   const [view, setView] = useState<"chat" | "email" | "groups" | "private">(chatEnabled ? "chat" : groupsEnabled ? "groups" : "private");
-  return (
+  const content = (startCall?: StartPeerCall) => (
     <>
       {process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && (
         <header className="mx-auto flex max-w-md items-center justify-between px-4 pt-4">
@@ -54,7 +55,10 @@ function AccountCommunication({ sessionToken, username, emailEnabled, chatEnable
       {privateDataEnabled && view === "private" ? <AccountPrivateDataView sessionToken={sessionToken} />
         : groupsEnabled && view === "groups" ? <AccountGroupsView sessionToken={sessionToken} /> : emailEnabled && view === "email"
         ? <AccountEmailsView sessionToken={sessionToken} username={username} />
-        : <AccountPrivateChat sessionToken={sessionToken} username={username} />}
+        : <AccountPrivateChat sessionToken={sessionToken} username={username} startCall={startCall} />}
     </>
   );
+  return process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review"
+    ? <AccountPeerCalls sessionToken={sessionToken} username={username}>{content}</AccountPeerCalls>
+    : content();
 }

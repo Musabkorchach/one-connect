@@ -15,6 +15,8 @@ export function productionSettings(env) {
 const accountRoutes = [
   ["GET", /^\/health$/],
   ["POST", /^\/api\/auth\/(verify|logout)$/],
+  ["POST", /^\/api\/account\/deletion\/(challenge|confirm)$/],
+  ["GET", /^\/api\/calls\/(ice-servers|history)$/],
   ["GET,PUT", /^\/api\/profile$/],
   ["GET,POST", /^\/api\/contacts$/],
   ["GET,PUT", /^\/api\/state\/connect\.(profile|contacts|invoice-drafts)$/],
@@ -29,6 +31,7 @@ const accountRoutes = [
   ["POST", /^\/api\/groups\/[a-f\d]{24}\/(read|leave|invitations|media)$/i],
   ["POST", /^\/api\/groups\/[a-f\d]{24}\/invitations\/(accept|decline)$/i],
   ["DELETE", /^\/api\/groups\/[a-f\d]{24}\/(members|invitations)\/[^/]+$/i],
+  ["POST", /^\/api\/groups\/[a-f\d]{24}\/ownership-offers(?:\/[a-f\d]{24}\/(accept|decline))?$/i],
   ["GET", /^\/api\/groups\/[a-f\d]{24}\/media\/[a-f\d]{24}$/i],
   ["GET", /^\/api\/emails$/],
   ["POST", /^\/api\/emails\/(internal|attachments)$/],

@@ -241,8 +241,8 @@ const {
   app, io, db, writeAccount, bindAccounts, userSessions, authenticateSession, requireSession,
   normalizeMessagingUsername, chatAttachmentsBucket, chatImagesBucket,
 });
-const accountCalls = bindAccounts && !production ? await createAccountCalls({
-  app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername,
+const accountCalls = bindAccounts ? await createAccountCalls({
+  app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, allowGroupCalls: !production,
 }) : null;
 const privateData = bindAccounts ? await createPrivateData({
   app, db, writeAccount, authenticateSession, normalizeMessagingUsername,
@@ -259,7 +259,7 @@ const revokeDeletionAccess = async (accountId) => {
   const binding = await db.collection(identityBindingsCollection).findOne({ accountId }, { projection: { _id: 1 } });
   revokeAccountConnections(io, userSessions, accountId, binding?._id);
 };
-export const accountDeletion = bindAccounts && !production ? createAccountDeletion({
+export const accountDeletion = bindAccounts ? createAccountDeletion({
   db, client: mongoClient,
   revokeAccess: revokeDeletionAccess,
   stopCalls: (accountId, ownsLease) => accountCalls.endForDeletion(accountId, undefined, ownsLease),

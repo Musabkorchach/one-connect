@@ -11,6 +11,7 @@ import { getDict } from "@/lib/connect/i18n";
 import { ConversationBubble } from "./conversation-view";
 import { ConfirmDialog, Sheet } from "./feedback";
 import { VoiceRecorder } from "./voice-recorder";
+import type { StartPeerCall } from "./account-peer-calls";
 
 type Chat = ReturnType<typeof startPrivateChat>;
 const migrationNotice = "ACCOUNT_MIGRATION_REQUIRED — Older chat history requires account migration.";
@@ -23,7 +24,9 @@ const connectionMessages: Record<ChatConnectionStatus, string> = {
   migration: migrationNotice,
 };
 
-export function AccountPrivateChat({ sessionToken, username }: { sessionToken: string; username: string }) {
+export function AccountPrivateChat({ sessionToken, username, startCall }: {
+  sessionToken: string; username: string; startCall?: StartPeerCall;
+}) {
   const { endLocalSession, isCurrentSession } = usePiAuth();
   const [status, setStatus] = useState<ChatConnectionStatus>("connecting");
   const [entries, setEntries] = useState<PrivateConversation[] | null>(null);
@@ -63,6 +66,7 @@ export function AccountPrivateChat({ sessionToken, username }: { sessionToken: s
   const opened = history?.conversationId === selected ? history : null;
   const listed = entries?.find((entry) => entry.conversationId === selected);
   const visibleHistory = opened && listed && !listed.canSend ? { ...opened, ...listed } : opened;
+  const callPeer = visibleHistory?.canSend && visibleHistory.peer.state === "active" ? visibleHistory.peer.username : null;
 
   return (
     <main className="mx-auto max-w-md space-y-3 p-4">
@@ -112,6 +116,12 @@ export function AccountPrivateChat({ sessionToken, username }: { sessionToken: s
       {!terminal && selected !== null && (
         <>
           <button type="button" className="underline" onClick={() => chat.current?.select(null)}>Back to chats</button>
+          {startCall && callPeer && (
+            <div className="flex gap-4">
+              <button type="button" className="underline" onClick={() => startCall(callPeer, "voice")}>Voice call</button>
+              <button type="button" className="underline" onClick={() => startCall(callPeer, "video")}>Video call</button>
+            </div>
+          )}
           {visibleHistory && chat.current ? (
             <PrivateConversationView key={selected} history={visibleHistory} chat={chat.current}
               online={status === "connected"} sessionToken={sessionToken} username={username} onError={setNotice} />

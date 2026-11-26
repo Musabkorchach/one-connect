@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CallSession } from "@/lib/connect/call-session";
+import { CallSession, type PeerCallTransport } from "@/lib/connect/call-session";
 import { useConnect } from "@/contexts/connect-context";
-import { getSocket, onCallEvent, sendCallEvent } from "@/lib/api-client";
+import { getSocket, getCallConfiguration, onCallEvent, sendCallEvent } from "@/lib/api-client";
 
 export interface CallDetails {
   callId: string;
@@ -29,7 +29,26 @@ export function useCallController(
   configuration: RTCConfiguration,
   isOtherCallActive: () => boolean = () => false,
 ) {
-  const connect = useConnect();
+  return usePeerCallController(useConnect(), configuration, legacyTransport, isOtherCallActive);
+}
+
+const legacyTransport: PeerCallTransport = {
+  on: onCallEvent, send: sendCallEvent,
+  configuration: getCallConfiguration,
+  connected: () => Boolean(getSocket()?.connected),
+};
+
+type CallContext = Pick<ReturnType<typeof useConnect>, "ready" | "pushToast" | "logCall"> & {
+  profile: Pick<ReturnType<typeof useConnect>["profile"], "username" | "setupDone">;
+  contacts: Pick<ReturnType<typeof useConnect>["contacts"][number], "username" | "name" | "color">[];
+};
+
+export function usePeerCallController(
+  connect: CallContext,
+  configuration: RTCConfiguration,
+  transport: PeerCallTransport,
+  isOtherCallActive: () => boolean = () => false,
+) {
   const otherCallRef = useRef(isOtherCallActive);
   otherCallRef.current = isOtherCallActive;
   const connectRef = useRef(connect);
@@ -56,6 +75,7 @@ export function useCallController(
     const session = new CallSession({
       ...details,
       configuration,
+      transport,
       onLocalStream: (stream) => {
         updateState({ localStream: stream });
       },
@@ -151,7 +171,7 @@ export function useCallController(
   createSessionRef.current = createSession;
 
   useEffect(() => {
-    return onCallEvent("call:incoming", (data) => {
+    return transport.on("call:incoming", (data) => {
       if (
         !data ||
         typeof data.callId !== "string" ||
@@ -174,7 +194,7 @@ export function useCallController(
         !current.ready ||
         !current.profile.setupDone
       ) {
-        sendCallEvent("call:end", { callId: data.callId });
+        transport.send("call:end", { callId: data.callId });
         return;
       }
 
@@ -191,7 +211,7 @@ export function useCallController(
         direction: "incoming",
       });
     });
-  }, []);
+  }, [transport]);
 
     const acceptCall = (): void => {
     const current = sessionRef.current;
@@ -225,7 +245,7 @@ export function useCallController(
   ): void => {
     if (sessionRef.current) return;
 
-    if (!getSocket()?.connected) {
+    if (!transport.connected()) {
       connectRef.current.pushToast("Please reconnect before calling.", "error");
       return;
     }
