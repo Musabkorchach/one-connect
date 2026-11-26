@@ -24,3 +24,5 @@ Use the same candidate commit on both services and disposable Production test us
 5. In Production, delete disposable user A using the existing confirmation flow. Verify canceled confirmation preserves the account; on confirmation check Pi reauthentication, immediate session and socket revocation, and that signing in again after cleanup starts with no old private data. Confirm B's group and the separate Testnet account remain intact.
 
 Record device, network, candidate SHA and actual results. Local signaling tests do not certify audio/video capture, rendering or TURN traversal inside Pi Browser.
+
+See the [optional Testnet data migration proposal](production-data-migration.md) for eligibility and rehearsal requirements.
