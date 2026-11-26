@@ -37,6 +37,12 @@ function AccountCommunication({ sessionToken, username, emailEnabled, chatEnable
   const [view, setView] = useState<"chat" | "email" | "groups" | "private">(chatEnabled ? "chat" : groupsEnabled ? "groups" : "private");
   return (
     <>
+      {process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && (
+        <header className="mx-auto flex max-w-md items-center justify-between px-4 pt-4">
+          <span className="font-semibold">One Connect</span>
+          <span className="text-sm text-muted-foreground">@{username.replace(/^@/, "")}</span>
+        </header>
+      )}
       {(emailEnabled || privateDataEnabled || (chatEnabled && groupsEnabled)) && (
         <nav className="mx-auto flex max-w-md gap-4 px-4 pt-4" aria-label="Account communication">
           {chatEnabled && <button type="button" aria-pressed={view === "chat"} onClick={() => setView("chat")}>Chats</button>}

@@ -71,7 +71,9 @@ export function AccountPrivateChat({ sessionToken, username }: { sessionToken: s
         <button type="button" className="underline" onClick={() => endLocalSession("en")}>Sign out</button>
       </header>
       {connectionMessages[status] && <p role="status">{connectionMessages[status]}</p>}
-      {!terminal && <p className="text-sm text-muted-foreground">{migrationNotice}</p>}
+      {!terminal && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review" && (
+        <p className="text-sm text-muted-foreground">{migrationNotice}</p>
+      )}
       {!terminal && notice && <p role="alert">{notice}</p>}
       {!terminal && selected === null && (
         <>

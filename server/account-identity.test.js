@@ -50,6 +50,7 @@ before(async () => {
   mongo = spawn(binary, [
     "--bind_ip", "127.0.0.1", "--port", String(port), "--dbpath", dataPath,
     "--logpath", join(dataPath, "mongod.log"), "--replSet", "one-connect-fixture",
+    "--setParameter", "indexBuildMinAvailableDiskSpaceMB=32",
   ], { stdio: "ignore", windowsHide: true });
   await new Promise((resolve, reject) => {
     mongo.once("spawn", resolve);
@@ -473,6 +474,8 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
         const token = options.headers.Authorization.slice(7);
         if (token === "subscription-no-uid") return Response.json({ username: token });
         if (token === "delete-http-different-uid") return Response.json({ uid: "different-uid", username: "delete-http" });
+        if (token === "demo-reviewer-other") return Response.json({ uid: "demo-reviewer-other", username: "demo-reviewer" });
+        if (token === "demo-reviewer" || token === "demo-peer") return Response.json({ uid: token + "-uid", username: token });
         const username = ["group-audit-owner", "delete-restart-audit", "delete-http", "delete-http-peer", "delete-http-rate", "alice", "bob", "eve", "dan", "fran", "pat", "chat-a", "chat-b", "chat-c", "group-owner", "group-reader", "group-removed", "group-invite", "group-outsider", "owner-transfer", "owner-successor", "owner-reader", "priv-a", "priv-b", "priv-c", "priv-legacy", "call-a", "call-b", "call-c", "phone-a", "phone-b", "delete-fixture", "delete-peer"].includes(token) ? token : undefined;
         return username ? Response.json({ uid: token + "-uid", username }) : new Response(null, { status: 401 });
       }
@@ -567,6 +570,83 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
   }
   return { request, login, upload, webhook, child, origin: `http://127.0.0.1:${port}` };
 }
+
+test("Production runs existing account routes with separate data and sessions", async (t) => {
+  const localMongo = client.options.hosts[0].toString();
+  const legacy = await startEmailTestServer(t, true);
+  const production = await startEmailTestServer(t, false, {
+    NODE_ENV: "production",
+    ONECONNECT_DEPLOYMENT: "production",
+    ONECONNECT_PRODUCTION_ORIGIN: "https://production-review.example",
+    ONECONNECT_PRODUCTION_MONGODB_URI: `mongodb://${localMongo}/oneconnect_production?directConnection=true`,
+    PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460",
+  });
+  assert.equal((await production.login("invalid")).status, 401);
+  const getSession = async (server, token) => {
+    const result = await server.login(token);
+    assert.equal(result.status, 200);
+    return result.body;
+  };
+  const testnet = await getSession(legacy, "demo-reviewer");
+  const reviewer = await getSession(production, "demo-reviewer");
+  assert.equal((await production.login("demo-reviewer-other")).status, 409);
+  const peer = await getSession(production, "demo-peer");
+  const token = reviewer.sessionToken;
+  assert.equal(reviewer.piUsername, testnet.piUsername);
+  assert.notEqual(reviewer.userId, testnet.userId);
+  assert.equal(reviewer.subscriptionStatusSupported, false);
+  assert.equal(reviewer.accountDeletionSupported, false);
+  assert.equal((await legacy.request("/api/profile", { token, method: "GET" })).status, 401);
+  assert.equal((await production.request("/api/profile", { token: testnet.sessionToken })).status, 401);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken, method: "PUT", body: { displayName: "Testnet only" } })).status, 200);
+  assert.equal((await production.request("/api/profile", { token })).body.profile, null);
+  assert.equal((await production.request("/api/profile", { token, method: "PUT", body: { displayName: "Production only" } })).body.profile.displayName, "Production only");
+  assert.equal((await production.request("/api/profile", { token: peer.sessionToken })).body.profile, null);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken })).body.profile.displayName, "Testnet only");
+  assert.equal((await production.request("/api/contacts", { token, method: "POST", body: { username: "demo-peer" } })).status, 201);
+  assert.equal((await production.request("/api/contacts", { token })).body.contacts.length, 1);
+  const draftsPath = "/api/state/connect.invoice-drafts";
+  assert.equal((await production.request(draftsPath, { token })).body.revision, 0);
+  const drafts = { schemaVersion: "1.0", items: [] };
+  const savedDrafts = await production.request(draftsPath, { token, method: "PUT", body: { blob: drafts, expectedRevision: 0 } });
+  assert.deepEqual(savedDrafts.body, { revision: 1 });
+  assert.deepEqual((await production.request(draftsPath, { token })).body.blob, drafts);
+  assert.equal((await production.request(draftsPath, { token: peer.sessionToken })).body.blob, null);
+
+  for (const [server, wrongToken] of [[legacy, token], [production, testnet.sessionToken]]) {
+    const { socket } = connectMailSocket(t, server.origin, wrongToken, "/chat");
+    const rejected = expectSocketEvent(socket, "connect_error");
+    socket.connect();
+    await rejected;
+  }
+  const { socket } = connectMailSocket(t, production.origin, token, "/chat");
+  const connected = expectSocketEvent(socket, "connect");
+  socket.connect();
+  await connected;
+  const { socket: peerSocket } = connectMailSocket(t, production.origin, peer.sessionToken, "/chat");
+  const peerConnected = expectSocketEvent(peerSocket, "connect");
+  peerSocket.connect();
+  await peerConnected;
+  const conversation = await production.request("/api/chat/conversations", { token, method: "POST", body: { username: "demo-peer" } });
+  assert.equal(conversation.status, 200);
+  const conversationId = conversation.body.conversationId;
+  const received = expectSocketEvent(peerSocket, "message:new");
+  socket.emit("message:send", { conversationId, kind: "text", text: "Production chat", messageId: "prod-demo-message" });
+  await received;
+  const history = await production.request("/api/chat/conversations/" + conversationId, { token: peer.sessionToken });
+  assert.equal(history.status, 200);
+  assert.equal(history.body.messages[0].text, "Production chat");
+  assert.equal((await production.request("/api/groups", { token, method: "POST", body: { name: "Production group" } })).status, 201);
+  assert.equal((await production.request("/api/groups", { token })).body.groups.length, 1);
+  const mail = await production.request("/api/emails/internal", { token, method: "POST", body: {
+    id: "production-demo-mail", recipient: "@demo-peer", subject: "Production mail", body: "isolated",
+  } });
+  assert.equal(mail.status, 201);
+  assert.equal((await production.request("/api/emails", { token: peer.sessionToken })).body.emails[0].subject, "Production mail");
+  for (const path of ["/api/pi-testnet/subscription/plan", "/api/subscriptions/status", "/api/emails/external", "/api/calls/pstn/prepare"]) {
+    assert.equal((await production.request(path, { token })).status, 404);
+  }
+});
 
 test("all authorized subscription previews reach session checks independently of PiNet", async (t) => {
   const { request, login } = await startEmailTestServer(t, false, { PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460" });

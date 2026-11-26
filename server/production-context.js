@@ -1,120 +1,47 @@
-import { randomBytes } from "node:crypto";
-import cors from "cors";
-import express from "express";
-import { Server } from "socket.io";
-
-const lifetime = 60 * 60 * 1000;
-const appId = "6b0816fb28dcb2b91021ca03";
-
-export function mountProductionContext({ app, httpServer, origin, profiles, verifyFetch = fetch }) {
-  const sessions = new Map();
-  const socketServer = new Server(httpServer, {
-    path: "/production/socket.io",
-    destroyUpgrade: false,
-    cors: { origin },
-    allowRequest: (req, done) => done(null, req.headers.origin === origin),
-  });
-  const production = express.Router();
-  production.use(cors({ origin }), express.json({ limit: "8kb" }));
-  production.use((_req, res, next) => {
-    res.set("Cache-Control", "no-store");
-    next();
-  });
-
-  function active(token) {
-    const session = sessions.get(token);
-    if (!session || session.expiresAt <= Date.now()) return null;
-    return session;
+export function productionSettings(env) {
+  if (env.ONECONNECT_DEPLOYMENT !== "production") return null;
+  const { ONECONNECT_PRODUCTION_MONGODB_URI: mongoUri, ONECONNECT_PRODUCTION_ORIGIN: origin } = env;
+  if (!mongoUri || mongoUri === env.MONGODB_URI) {
+    throw new Error("Production requires a dedicated MongoDB connection.");
   }
-
-  function revoke(token) {
-    const session = sessions.get(token);
-    if (!session) return;
-    clearTimeout(session.timer);
-    sessions.delete(token);
-    socketServer.in(token).disconnectSockets(true);
+  if (!origin || origin !== new URL(origin).origin || !origin.startsWith("https://")) {
+    throw new Error("Production requires a dedicated HTTPS frontend origin.");
   }
+  return { mongoUri, origin, database: "oneconnect_production" };
+}
 
-  function requireSession(req, res, next) {
-    const token = req.get("Authorization")?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
-    const session = active(token);
-    if (!session) return res.sendStatus(401);
-    res.locals.session = session;
-    res.locals.token = token;
+// The existing account-scoped handlers implement these features. Other legacy,
+// external-provider and payment routes are unavailable in the Production process.
+const accountRoutes = [
+  ["GET", /^\/health$/],
+  ["POST", /^\/api\/auth\/(verify|logout)$/],
+  ["GET,PUT", /^\/api\/profile$/],
+  ["GET,POST", /^\/api\/contacts$/],
+  ["GET,PUT", /^\/api\/state\/connect\.(profile|contacts|invoice-drafts)$/],
+  ["GET,POST", /^\/api\/chat\/conversations$/],
+  ["GET", /^\/api\/chat\/conversations\/[a-f\d]{64}$/i],
+  ["POST", /^\/api\/chat\/(attachments|images)$/],
+  ["GET", /^\/api\/chat\/(attachments|images)\/[a-f\d]{24}$/i],
+  ["DELETE", /^\/api\/chat\/messages\/[^/]+\/[^/]+$/],
+  ["GET,POST", /^\/api\/groups$/],
+  ["GET", /^\/api\/groups\/invitations$/],
+  ["GET,POST", /^\/api\/groups\/[a-f\d]{24}\/messages$/i],
+  ["POST", /^\/api\/groups\/[a-f\d]{24}\/(read|leave|invitations|media)$/i],
+  ["POST", /^\/api\/groups\/[a-f\d]{24}\/invitations\/(accept|decline)$/i],
+  ["DELETE", /^\/api\/groups\/[a-f\d]{24}\/(members|invitations)\/[^/]+$/i],
+  ["GET", /^\/api\/groups\/[a-f\d]{24}\/media\/[a-f\d]{24}$/i],
+  ["GET", /^\/api\/emails$/],
+  ["POST", /^\/api\/emails\/(internal|attachments)$/],
+  ["GET", /^\/api\/emails\/[^/]+\/attachment$/],
+  ["PATCH", /^\/api\/emails\/[^/]+\/read$/],
+  ["DELETE", /^\/api\/emails\/[^/]+$/],
+];
+
+export function restrictProductionRoutes(req, res, next) {
+  const method = req.method === "HEAD" ? "GET" : req.method;
+  if (accountRoutes.some(([methods, route]) => methods.split(",").includes(method) && route.test(req.path))) {
     next();
+  } else {
+    res.sendStatus(404);
   }
-
-  production.post("/auth", async (req, res, next) => {
-    const token = req.body?.accessToken;
-    if (typeof token !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(token)) return res.sendStatus(401);
-    try {
-      const reply = await verifyFetch("https://api.minepi.com/v2/me", {
-        headers: { Authorization: "Bearer " + token },
-        redirect: "error", signal: AbortSignal.timeout(8000),
-      });
-      if (reply.status === 401 || reply.status === 403) return res.sendStatus(401);
-      if (!reply.ok) return res.sendStatus(502);
-      const { uid, username } = await reply.json();
-      if (typeof uid !== "string" || !uid || uid !== uid.trim() ||
-          typeof username !== "string" || !username.trim()) return res.sendStatus(401);
-      // Pi's public /me contract identifies the user but does not attest this appId.
-      const account = { _id: { appId, uid } };
-      const profile = await profiles.findOneAndUpdate(account,
-        { $set: { username }, $setOnInsert: { status: "" } },
-        { upsert: true, returnDocument: "after" });
-      const sessionToken = randomBytes(32).toString("hex");
-      const timer = setTimeout(() => revoke(sessionToken), lifetime);
-      timer.unref();
-      sessions.set(sessionToken, { account, username, expiresAt: Date.now() + lifetime, timer });
-      res.json({ sessionToken, username, status: profile.status });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  production.get("/profile", requireSession, async (_req, res, next) => {
-    try {
-      const { account, username } = res.locals.session;
-      const profile = await profiles.findOne(account);
-      res.json({ username, status: profile?.status ?? "" });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  production.put("/profile", requireSession, async (req, res, next) => {
-    const status = req.body?.status;
-    if (typeof status !== "string" || status.length > 140) return res.sendStatus(400);
-    try {
-      const { account, username } = res.locals.session;
-      const profile = { username, status: status.trim() };
-      await profiles.updateOne(account, { $set: { status: profile.status } });
-      socketServer.in(res.locals.token).emit("profile:updated", profile);
-      res.json(profile);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  production.post("/logout", requireSession, (_req, res) => {
-    revoke(res.locals.token);
-    res.sendStatus(204);
-  });
-  production.use((_req, res) => res.sendStatus(404));
-  production.use((error, _req, res, _next) => {
-    res.sendStatus(error.status === 400 || error.status === 413 ? error.status : 502);
-  });
-
-  socketServer.use((socket, next) => {
-    const token = socket.handshake.auth?.sessionToken;
-    if (!active(token)) return next(new Error("Unauthorized"));
-    socket.data.sessionToken = token;
-    next();
-  });
-  socketServer.on("connection", (socket) => {
-    const token = socket.data.sessionToken;
-    if (!active(token)) return socket.disconnect(true);
-    socket.join(token);
-  });
-  app.use("/api/production", production);
 }

@@ -26,7 +26,7 @@ import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
 import { registerTokenMetadataRoutes } from "./token-metadata-routes.js";
-import { mountProductionContext } from "./production-context.js";
+import { productionSettings, restrictProductionRoutes } from "./production-context.js";
 
 import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindingEnabled, migrationRequired } from "./pi-login.js";
 import {
@@ -37,15 +37,25 @@ config();
 
 dns.setServers(["8.8.8.8"]);
 
-const bindAccounts = isAccountBindingEnabled(process.env);
+const production = productionSettings(process.env);
+const bindAccounts = Boolean(production) || isAccountBindingEnabled(process.env);
 const useSubscriptionFixtures = subscriptionProofMode(process.env, bindAccounts);
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
-if (bindAccounts) assertLocalAccountBindingDatabase(mongoClient.options);
+const mongoClient = new MongoClient(production?.mongoUri ?? process.env.MONGODB_URI);
+if (bindAccounts && !production) assertLocalAccountBindingDatabase(mongoClient.options);
 
 await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
-const db = mongoClient.db("oneconnect");
+const db = mongoClient.db(production?.database ?? "oneconnect");
+if (production) {
+  // Existing peer lookups use the verified handle. An ambiguous handle must
+  // never select a different UID or take over an existing account.
+  await db.collection(identityBindingsCollection).createIndex({ username: 1 }, {
+    name: "unique_production_handle",
+    unique: true,
+    partialFilterExpression: { username: { $type: "string" } },
+  });
+}
 const writeAccount = createAccountWriteFence(db, mongoClient);
 if (bindAccounts) await prepareScopedBuckets(db);
 const { requireEmailSession, findEmailRecipient, emailNotFound } =
@@ -181,7 +191,7 @@ const allowedStateKeys = new Set([
   "phone-contacts",
 ]);
 
-const allowedOrigins = [
+const allowedOrigins = production ? [production.origin] : [
   process.env.FRONTEND_URL,
   ...(process.env.CORS_EXTRA_ORIGINS || "")
     .split(",")
@@ -193,7 +203,7 @@ const allowedOrigins = [
   "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
   "http://localhost:3000",
 ].filter(Boolean);
-const testnetSubscriptionsEnabled = process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
+const testnetSubscriptionsEnabled = !production && process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -206,19 +216,12 @@ const io = new Server(httpServer, {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-if (process.env.ONECONNECT_PRODUCTION_ORIGIN && process.env.ONECONNECT_PRODUCTION_MONGODB_URI) {
-  const productionMongo = new MongoClient(process.env.ONECONNECT_PRODUCTION_MONGODB_URI);
-  mountProductionContext({
-    app, httpServer, origin: process.env.ONECONNECT_PRODUCTION_ORIGIN,
-    profiles: productionMongo.db("oneconnect_production").collection("profiles"),
-  });
-}
-
 // Middleware
 app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
+if (production) app.use(restrictProductionRoutes);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb" }));
 registerTokenMetadataRoutes(app);
@@ -238,13 +241,13 @@ const {
   app, io, db, writeAccount, bindAccounts, userSessions, authenticateSession, requireSession,
   normalizeMessagingUsername, chatAttachmentsBucket, chatImagesBucket,
 });
-const accountCalls = bindAccounts ? await createAccountCalls({
+const accountCalls = bindAccounts && !production ? await createAccountCalls({
   app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername,
 }) : null;
 const privateData = bindAccounts ? await createPrivateData({
   app, db, writeAccount, authenticateSession, normalizeMessagingUsername,
 }) : null;
-if (privateData) {
+if (privateData && !production) {
   registerSubscriptionStatus({
     app, db, privateData, settings: subscriptionSettings(process.env), useFixtures: useSubscriptionFixtures,
   });
@@ -256,7 +259,7 @@ const revokeDeletionAccess = async (accountId) => {
   const binding = await db.collection(identityBindingsCollection).findOne({ accountId }, { projection: { _id: 1 } });
   revokeAccountConnections(io, userSessions, accountId, binding?._id);
 };
-export const accountDeletion = bindAccounts ? createAccountDeletion({
+export const accountDeletion = bindAccounts && !production ? createAccountDeletion({
   db, client: mongoClient,
   revokeAccess: revokeDeletionAccess,
   stopCalls: (accountId, ownsLease) => accountCalls.endForDeletion(accountId, undefined, ownsLease),
@@ -1530,7 +1533,7 @@ function emailForUser(record, username, accountId) {
   };
 }
 
-await registerMailgunInboundRoutes({
+if (!production) await registerMailgunInboundRoutes({
   app,
   db,
   writeAccount,
@@ -1540,7 +1543,7 @@ await registerMailgunInboundRoutes({
   emailAttachmentsBucket,
 });
 
-await registerPstnRoutes({
+if (!production) await registerPstnRoutes({
   app,
   db,
   writeAccount,
@@ -1549,14 +1552,14 @@ await registerPstnRoutes({
   normalizeMessagingUsername,
 });
 
-registerPstnVoiceWebhook({
+if (!production) registerPstnVoiceWebhook({
   app,
   db,
   writeAccount,
   bindAccounts,
 });
 
-registerExternalEmailRoutes({
+if (!production) registerExternalEmailRoutes({
   app,
   db,
   writeAccount,
@@ -2557,7 +2560,7 @@ app.get("/health", (req, res) => {
 
 app.post("/api/auth/verify", express.json(), createVerifyPiLogin({
   db, emailUsersCollection, users, userSessions,
-  normalizeMessagingUsername, bindAccounts,
+  normalizeMessagingUsername, bindAccounts, production: Boolean(production),
 }));
 // Revoke the current authenticated session
 app.post("/api/auth/logout", authenticateSession, (req, res) => {

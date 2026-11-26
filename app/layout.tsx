@@ -3,8 +3,6 @@ import type { Metadata } from "next";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { AppWrapper } from "@/components/app-wrapper";
-import { ProductionProfile } from "@/components/production-profile";
-import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -38,7 +36,7 @@ html {
         `}</style>
       </head>
       <body>
-        {PI_NETWORK_CONFIG.PRODUCTION_REVIEW ? <ProductionProfile /> : <AppWrapper>{children}</AppWrapper>}
+        <AppWrapper>{children}</AppWrapper>
       </body>
     </html>
   );
