@@ -18,6 +18,7 @@ import { LANGUAGES, fileToAvatar, type LangId, type UserStatus } from "@/lib/con
 import { IconLogout } from "./icons";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { PRODUCT_CONFIG } from "@/lib/product-config";
+import { CallSafetySettings } from "./call-safety-settings";
 
 export function ProfileView() {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
@@ -211,6 +212,9 @@ export function ProfileView() {
 
       {/* logout */}
       <div className="mt-4 px-4 pb-4">
+        <div className="mb-4">
+          <CallSafetySettings key={profile.username} username={profile.username} />
+        </div>
         <Button variant="outline" className="w-full py-3 text-destructive border-destructive/50 hover:bg-destructive/10" onClick={logout}>
           <IconLogout className="h-4 w-4" />
           {t.logout || "Logout"}

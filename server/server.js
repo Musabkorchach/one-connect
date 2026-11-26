@@ -7,23 +7,35 @@ import cors from "cors";
 import { config } from "dotenv";
 import dns from "dns";
 import { fileURLToPath } from "url";
-import { dirname } from "path";
+import { dirname, resolve } from "path";
 import crypto from "node:crypto";
 import { registerExternalEmailRoutes } from "./external-email-routes.js";
 import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
+import { selectVerifiedCallSockets, VERIFIED_CALL_PROTOCOL } from "./verified-call-protocol.js";
+import { allowsCallTestEvent, allowsCallTestRoute, callTestSettings } from "./call-test-settings.js";
+
+function validCallProof(description) {
+  return typeof description.publicKey === "string" && /^04[a-f0-9]{128}$/.test(description.publicKey) &&
+    typeof description.signature === "string" && /^[a-f0-9]{128}$/.test(description.signature);
+}
 
 config();
 
+const callTest = callTestSettings(process.env,
+  resolve(process.argv[1] ?? "") === fileURLToPath(new URL("./call-test-server.js", import.meta.url)));
 dns.setServers(["8.8.8.8"]);
 
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
+const mongoClient = new MongoClient(callTest ? callTest.uri : process.env.MONGODB_URI);
+if (callTest && mongoClient.options.dbName !== callTest.database) {
+  throw new Error("Call test MongoDB URI must name its assigned test database.");
+}
 
 await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
-const db = mongoClient.db("oneconnect");
+const db = mongoClient.db(callTest?.database ?? "oneconnect");
 const emailsCollection = db.collection("emails");
 const emailUsersCollection = db.collection("email_users");
 
@@ -155,7 +167,7 @@ const allowedStateKeys = new Set([
   "phone-contacts",
 ]);
 
-const allowedOrigins = [
+const allowedOrigins = callTest ? [callTest.origin] : [
   process.env.FRONTEND_URL,
   ...(process.env.CORS_EXTRA_ORIGINS || "")
     .split(",")
@@ -173,6 +185,7 @@ const io = new Server(httpServer, {
     origin: allowedOrigins,
     credentials: true,
   },
+  ...(callTest && { allowRequest: (req, callback) => callback(null, callTest.acceptsOrigin(req.headers.origin)) }),
 });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -183,8 +196,13 @@ app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb" }));
+if (callTest) app.use((req, res, next) => {
+  if (!allowsCallTestRoute(req.method, req.path)) return res.sendStatus(404);
+  if (req.path !== "/health" && !callTest.acceptsOrigin(req.headers.origin)) return res.sendStatus(403);
+  next();
+});
+app.use(express.json({ limit: callTest ? "2kb" : "50mb" }));
+if (!callTest) app.use(express.urlencoded({ limit: "50mb" }));
 app.use(express.static(new URL("../public", import.meta.url).pathname));
 
 // In-memory storage (replace with MongoDB in production)
@@ -192,6 +210,22 @@ const users = new Map();
 const conversations = new Map();
 const contacts = new Map();
 const userSessions = new Map();
+
+if (callTest) app.post("/api/call-test/login", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const { user, code, build } = req.body ?? {};
+  const result = callTest.login(user, code, build);
+  if (!result) return res.sendStatus(401);
+  for (const [token, session] of userSessions) {
+    if (session.userId !== user) continue;
+    userSessions.delete(token);
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.sessionToken === token) socket.disconnect(true);
+    }
+  }
+  userSessions.set(result.token, result.session);
+  res.json({ sessionToken: result.token, username: user, build: callTest.build });
+});
 
 function detectChatImageType(buffer) {
   if (!Buffer.isBuffer(buffer)) return null;
@@ -1164,7 +1198,7 @@ function emailForUser(record, username) {
   };
 }
 
-await registerMailgunInboundRoutes({
+if (!callTest) await registerMailgunInboundRoutes({
   app,
   db,
   io,
@@ -1172,19 +1206,19 @@ await registerMailgunInboundRoutes({
   emailAttachmentsBucket,
 });
 
-await registerPstnRoutes({
+if (!callTest) await registerPstnRoutes({
   app,
   db,
   requireSession,
   normalizeMessagingUsername,
 });
 
-registerPstnVoiceWebhook({
+if (!callTest) registerPstnVoiceWebhook({
   app,
   db,
 });
 
-registerExternalEmailRoutes({
+if (!callTest) registerExternalEmailRoutes({
   app,
   db,
   io,
@@ -2100,6 +2134,7 @@ app.get("/api/chat/images/:imageId", requireSession, async (req, res) => {
 
 // Routes
 app.get("/health", (req, res) => {
+  if (callTest) return res.json({ mode: "call-test", build: callTest.build, protocol: VERIFIED_CALL_PROTOCOL });
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
@@ -2626,10 +2661,13 @@ function finishLiveCall(callId, reason = "ended") {
   if (call.recipientSocketId) {
     io.to(call.recipientSocketId).emit("call:ended", event);
   } else {
-    io.to(`peer:${call.recipientUsername}`).emit("call:ended", event);
+    for (const id of call.invitedSockets) io.to(id).emit("call:ended", event);
   }
 }
 io.use((socket, next) => {
+  if (callTest && socket.handshake.auth?.callTestBuild !== callTest.build) {
+    return next(new Error("Call test build mismatch"));
+  }
   const sessionToken = socket.handshake.auth?.sessionToken;
 
   if (typeof sessionToken !== "string" || !sessionToken) {
@@ -2659,6 +2697,10 @@ io.on("connection", (socket) => {
   }
 
   socket.join(`peer:${messagingUsername}`);
+  if (callTest) socket.use(([event], next) => {
+    // Discard unrelated frontend events without invoking their handlers.
+    if (allowsCallTestEvent(event)) next();
+  });
 
       socket.on("conversation:join", async (conversationId) => {
     const peer = normalizeMessagingUsername(conversationId);
@@ -3424,7 +3466,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       }
     }
   });
-  socket.on("call:initiate", (data = {}) => {
+  const initiateVerifiedCall = (legacyEvent, data = {}) => {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       return;
     }
@@ -3467,7 +3509,19 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       return;
     }
 
-    if (!io.sockets.adapter.rooms.get(`peer:${to}`)?.size) {
+    const recipients = [...(io.sockets.adapter.rooms.get(`peer:${to}`) ?? [])]
+      .map((id) => io.sockets.sockets.get(id)).filter(Boolean);
+    const compatible = selectVerifiedCallSockets(
+      legacyEvent, data.protocol, socket.handshake.auth?.verifiedCallProtocol, recipients,
+    );
+    if (!compatible || (recipients.length && !compatible.length)) {
+      reject("call-update-required");
+      for (const recipient of recipients) {
+        recipient.emit("call:update-required", { reason: "call-update-required" });
+      }
+      return;
+    }
+    if (!compatible.length) {
       reject("offline");
       return;
     }
@@ -3477,6 +3531,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       recipientUsername: to,
       callerSocketId: socket.id,
       recipientSocketId: null,
+      invitedSockets: new Set(compatible.map(({ id }) => id)),
       kind,
       phase: "ringing",
       ringTimer: null,
@@ -3490,17 +3545,21 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       finishLiveCall(callId, "no-answer");
     }, 45000);
 
-    socket.emit("call:initiated", { callId });
+    socket.emit("call:initiated", { callId, protocol: VERIFIED_CALL_PROTOCOL });
 
-    io.to(`peer:${to}`).emit("call:incoming", {
+    for (const recipient of compatible) recipient.emit("call:incoming", {
       callId,
       from: messagingUsername,
       kind,
+      protocol: VERIFIED_CALL_PROTOCOL,
     });
-  });
+  };
+  socket.on("call:initiate", (data) => initiateVerifiedCall(true, data));
+  socket.on("call:verified-initiate", (data) => initiateVerifiedCall(false, data));
 
     socket.on("call:accept", (data = {}) => {
     const callId = data?.callId;
+    const challenge = data?.challenge;
     const call = liveCallsById.get(callId);
     const session = userSessions.get(socket.sessionToken);
 
@@ -3508,6 +3567,9 @@ if (kind === "file" || kind === "video" || kind === "voice") {
 
     if (
       !call ||
+      !call.invitedSockets.has(socket.id) ||
+      typeof challenge !== "string" ||
+      !/^[a-f0-9]{32}$/.test(challenge) ||
       call.recipientUsername !== messagingUsername ||
       call.phase !== "ringing" ||
       call.recipientSocketId
@@ -3528,8 +3590,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       reason: "answered-elsewhere",
     });
 
-    socket.emit("call:accepted", { callId });
-    io.to(call.callerSocketId).emit("call:accepted", { callId });
+    socket.emit("call:accepted", { callId, challenge });
+    io.to(call.callerSocketId).emit("call:accepted", { callId, challenge });
   });
 
     socket.on("call:offer", (data = {}) => {
@@ -3548,6 +3610,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       call.offerSent ||
       offer?.type !== "offer" ||
       typeof offer.sdp !== "string" ||
+      !validCallProof(offer) ||
       !offer.sdp.length ||
       offer.sdp.length > 100000
     ) {
@@ -3561,6 +3624,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       offer: {
         type: "offer",
         sdp: offer.sdp,
+        publicKey: offer.publicKey,
+        signature: offer.signature,
       },
     });
   });
@@ -3581,6 +3646,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       call.answerSent ||
       answer?.type !== "answer" ||
       typeof answer.sdp !== "string" ||
+      !validCallProof(answer) ||
       !answer.sdp.length ||
       answer.sdp.length > 100000
     ) {
@@ -3594,6 +3660,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       answer: {
         type: "answer",
         sdp: answer.sdp,
+        publicKey: answer.publicKey,
+        signature: answer.signature,
       },
     });
   });
@@ -3690,7 +3758,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
     const isRecipient =
       call.recipientSocketId === socket.id ||
       (call.phase === "ringing" &&
-        call.recipientUsername === messagingUsername);
+        call.invitedSockets.has(socket.id));
 
     if (!isCaller && !isRecipient) return;
 
@@ -3723,8 +3791,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
 
       const recipientUnavailable =
         call.phase === "ringing" &&
-        call.recipientUsername === messagingUsername &&
-        !io.sockets.adapter.rooms.get(`peer:${messagingUsername}`)?.size;
+        call.invitedSockets.delete(socket.id) &&
+        call.invitedSockets.size === 0;
 
       if (isCaller || isRecipient || recipientUnavailable) {
         finishLiveCall(callId, "disconnected");
@@ -3745,7 +3813,7 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, callTest?.local ? "127.0.0.1" : undefined, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Frontend URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}`);
 });

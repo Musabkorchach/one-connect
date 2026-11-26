@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: oneconnect-verified-calls-ui
+    runtime: node
+    plan: starter
+    branch: feat/verified-peer-calls
+    autoDeployTrigger: "off"
+    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start --hostname 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: NEXT_PUBLIC_CALL_TEST_MODE
+        value: "1"
+      - key: NEXT_PUBLIC_CALL_TEST_API_URL
+        sync: false
+      - key: NEXT_PUBLIC_CALL_TEST_WS_URL
+        sync: false
+      - key: NEXT_PUBLIC_CALL_TEST_BUILD_ID
+        sync: false
+  - type: web
+    name: oneconnect-verified-calls-api
+    runtime: node
+    plan: starter
+    branch: feat/verified-peer-calls
+    rootDir: server
+    autoDeployTrigger: "off"
+    buildCommand: npm ci
+    startCommand: node call-test-server.js
+    healthCheckPath: /health
+    envVars:
+      - key: ONECONNECT_CALL_TEST
+        value: "1"
+      - key: CALL_TEST_BUILD_ID
+        sync: false
+      - key: CALL_TEST_FRONTEND_ORIGIN
+        sync: false
+      - key: CALL_TEST_MONGODB_URI
+        sync: false
+      - key: CALL_TEST_DATABASE
+        sync: false
+      - key: CALL_TEST_CODE_A
+        sync: false
+      - key: CALL_TEST_CODE_B
+        sync: false
+      - key: CLOUDFLARE_TURN_TOKEN_ID
+        sync: false
+      - key: CLOUDFLARE_TURN_API_TOKEN
+        sync: false
