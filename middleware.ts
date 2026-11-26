@@ -5,6 +5,9 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  if (request.nextUrl.pathname.startsWith("/api/") || request.nextUrl.pathname === "/api") {
+    return new NextResponse(null, { status: 404 });
+  }
   const headers = { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" };
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new NextResponse(null, { status: 405, headers: { ...headers, Allow: "GET, HEAD" } });
@@ -14,4 +17,4 @@ export function middleware(request: NextRequest) {
   return new NextResponse(request.method === "HEAD" ? null : key, { headers });
 }
 
-export const config = { matcher: "/validation-key.txt" };
+export const config = { matcher: ["/validation-key.txt", "/api/:path*"] };

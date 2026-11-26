@@ -26,6 +26,7 @@ import { registerMailgunInboundRoutes } from "./mailgun-inbound-routes.js";
 import { registerPstnRoutes } from "./pstn-routes.js";
 import { registerPstnVoiceWebhook } from "./pstn-voice-webhook.js";
 import { registerTokenMetadataRoutes } from "./token-metadata-routes.js";
+import { mountProductionContext } from "./production-context.js";
 
 import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindingEnabled, migrationRequired } from "./pi-login.js";
 import {
@@ -204,6 +205,14 @@ const io = new Server(httpServer, {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+if (process.env.ONECONNECT_PRODUCTION_ORIGIN && process.env.ONECONNECT_PRODUCTION_MONGODB_URI) {
+  const productionMongo = new MongoClient(process.env.ONECONNECT_PRODUCTION_MONGODB_URI);
+  mountProductionContext({
+    app, httpServer, origin: process.env.ONECONNECT_PRODUCTION_ORIGIN,
+    profiles: productionMongo.db("oneconnect_production").collection("profiles"),
+  });
+}
 
 // Middleware
 app.use(cors({

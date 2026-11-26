@@ -11,9 +11,8 @@ if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") {
     } catch {
       throw new Error(name + " must be an explicit HTTPS origin for Production review.");
     }
-    if (origin.protocol !== "https:" || value !== origin.origin ||
-        origin.hostname === "one-connect.onrender.com") {
-      throw new Error(name + " must be a dedicated HTTPS origin outside the shared Testnet backend.");
+    if (origin.protocol !== "https:" || value !== origin.origin) {
+      throw new Error(name + " must be an HTTPS origin without a path.");
     }
   }
 }

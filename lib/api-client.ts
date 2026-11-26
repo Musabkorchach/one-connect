@@ -6,7 +6,7 @@ export const API_URL =
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
-const WS_URL =
+export const WS_URL =
   process.env.NEXT_PUBLIC_ONECONNECT_WS_URL ||
   process.env.REACT_APP_WS_URL ||
   "https://one-connect.onrender.com";
