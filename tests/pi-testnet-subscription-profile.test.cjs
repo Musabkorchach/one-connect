@@ -98,6 +98,7 @@ function mount({ origin = "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net", 
     "./call-safety-settings": { CallSafetySettings: "call-safety-settings" },
     "./account-deletion-settings": { AccountDeletionSettings: "account-deletion-settings" },
     "next/link": { default: "link" },
+    "@/lib/production-origins.mjs": {},
   })[name], profile, browse, undefined, { env: {} });
   const entry = nodes(profile.ProfileView()).find(node => node.type === status.AccountSubscriptionStatus);
   assert.ok(entry, "production ProfileView mounts the subscription component");

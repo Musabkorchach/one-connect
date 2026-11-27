@@ -21,6 +21,7 @@ import { usePiAuth } from "@/contexts/pi-auth-context";
 import { AccountDeletionSettings } from "./account-deletion-settings";
 import { AccountSubscriptionStatus } from "./account-subscription-status";
 import { CallSafetySettings } from "./call-safety-settings";
+import { productionPiNetOrigin } from "@/lib/production-origins.mjs";
 
 export function ProfileView() {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
@@ -42,6 +43,24 @@ export function ProfileView() {
   };
 
   const currentLang = LANGUAGES.find((l) => l.id === profile.language);
+  const shareLabel = profile.language === "ar" ? "مشاركة One Connect" :
+    profile.language === "fr" ? "Partager One Connect" : "Share One Connect";
+  const shareApp = async () => {
+    if (typeof navigator.share === "function") {
+      try {
+        await navigator.share({ title: t.appName, url: productionPiNetOrigin });
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(productionPiNetOrigin);
+      pushToast(t.copied || "Copied to clipboard", "success");
+    } catch {
+      pushToast(productionPiNetOrigin, "default");
+    }
+  };
 
   return (
     <div className="pb-24">
@@ -76,6 +95,9 @@ export function ProfileView() {
           </div>
           {copied ? <IconCheck className="h-5 w-5 text-success" /> : <IconCopy className="h-5 w-5 text-muted-foreground" />}
         </button>
+        {process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && (
+          <Button variant="outline" className="mt-2 w-full" onClick={() => void shareApp()}>{shareLabel}</Button>
+        )}
       </div>
 
       {/* status */}

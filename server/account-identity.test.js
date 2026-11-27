@@ -4,6 +4,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile } from "node:fs/promises";
 import ts from "typescript";
+import { productionHostingOrigin, productionPiNetOrigin } from "../lib/production-origins.mjs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -578,12 +579,15 @@ test("Production runs existing account routes with separate data and sessions", 
   const production = await startEmailTestServer(t, false, {
     NODE_ENV: "production",
     ONECONNECT_DEPLOYMENT: "production",
-    ONECONNECT_PRODUCTION_ORIGIN: "https://production-review.example",
+    ONECONNECT_PRODUCTION_ORIGIN: productionHostingOrigin,
     ONECONNECT_PRODUCTION_MONGODB_URI: `mongodb://${localMongo}/oneconnect_production?directConnection=true`,
     PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460",
   });
   assert.equal((await production.login("invalid")).status, 401);
-  const productionOrigin = "https://production-review.example";
+  const productionOrigin = productionHostingOrigin;
+  assert.equal((await production.request("/api/auth/verify", {
+    method: "POST", body: { accessToken: "invalid" }, origin: productionPiNetOrigin,
+  })).status, 401);
   assert.equal((await production.request("/api/auth/verify", {
     method: "POST", body: { accessToken: "demo-reviewer" }, origin: "https://testnet.example",
   })).status, 403);
@@ -706,7 +710,7 @@ test("Production runs existing account routes with separate data and sessions", 
   caller.emit("call:verified-initiate", { callId: randomBytes(16).toString("hex"), protocol: 1, kind: "voice", to: "demo-peer" });
   assert.equal((await newToOld).reason, "call-update-required");
   await update;
-  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 1 }, productionOrigin);
+  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 1 }, productionPiNetOrigin);
   const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
   receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
   assert.equal((await groupCallRejected).reason, "unavailable");

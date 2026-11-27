@@ -1,3 +1,5 @@
+import { productionHostingOrigin, productionPiNetOrigin } from "../lib/production-origins.mjs";
+
 export function productionSettings(env) {
   if (env.ONECONNECT_DEPLOYMENT !== "production") return null;
   const { ONECONNECT_PRODUCTION_MONGODB_URI: mongoUri, ONECONNECT_PRODUCTION_ORIGIN: origin } = env;
@@ -7,7 +9,9 @@ export function productionSettings(env) {
   if (!origin || origin !== new URL(origin).origin || !origin.startsWith("https://")) {
     throw new Error("Production requires a dedicated HTTPS frontend origin.");
   }
-  return { mongoUri, origin, database: "oneconnect_production" };
+  const verifiedOrigins = [productionHostingOrigin, productionPiNetOrigin];
+  const origins = verifiedOrigins.includes(origin) ? verifiedOrigins : [origin];
+  return { mongoUri, origin, origins, database: "oneconnect_production" };
 }
 
 // The existing account-scoped handlers implement these features. Other legacy,

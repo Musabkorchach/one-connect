@@ -204,7 +204,7 @@ const allowedStateKeys = new Set([
   "phone-contacts",
 ]);
 
-const allowedOrigins = production || isolatedCalls ? [(production ?? isolatedCalls).origin] : [
+const allowedOrigins = production ? production.origins : isolatedCalls ? [isolatedCalls.origin] : [
   process.env.FRONTEND_URL,
   ...(process.env.CORS_EXTRA_ORIGINS || "")
     .split(",")
@@ -225,7 +225,7 @@ const io = new Server(httpServer, {
     credentials: true,
   },
   ...((production || isolatedCalls) && {
-    allowRequest: (req, callback) => callback(null, req.headers.origin === allowedOrigins[0]),
+    allowRequest: (req, callback) => callback(null, allowedOrigins.includes(req.headers.origin)),
   }),
 });
 
@@ -235,7 +235,7 @@ const __dirname = dirname(__filename);
 // Middleware
 if (production || callIntegration) app.use((req, res, next) => {
   if (req.method === "GET" && req.path === "/health") return next();
-  if (req.headers.origin !== allowedOrigins[0]) return res.sendStatus(403);
+  if (!allowedOrigins.includes(req.headers.origin)) return res.sendStatus(403);
   next();
 });
 app.use(cors({
