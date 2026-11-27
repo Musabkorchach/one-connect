@@ -592,27 +592,32 @@ test("home renders scoped email per session and retains the previous routes for 
     "@/components/connect/account-private-chat": { AccountPrivateChat: "scoped-chat" },
     "@/components/connect/account-emails-view": { AccountEmailsView: "scoped-email" },
     "@/components/connect/connect-app": { ConnectApp: "legacy-app" },
+    "@/components/connect/call-test-app": { CallTestApp: "call-test-app" },
     "@/contexts/pi-auth-context": { usePiAuth: () => auth },
   };
   compile("app/page.tsx")((name) => {
     assert.ok(Object.hasOwn(modules, name), name);
     return modules[name];
   }, exportsPage);
+  const renderHome = () => {
+    const entry = exportsPage.default();
+    return entry.type(entry.props);
+  };
   auth = { emailSocketMode: "legacy", sessionToken: "legacy" };
-  assert.equal(exportsPage.default().type, "legacy-app");
+  assert.equal(renderHome().type, "legacy-app");
   auth = { ...auth, accountMigrationRequired: true };
-  assert.equal(exportsPage.default().type, "main");
+  assert.equal(renderHome().type, "main");
   auth = { ...auth, emailSocketMode: "account", sessionToken: "first", piUsername: "alice" };
-  assert.equal(exportsPage.default().type, "scoped-email");
-  assert.equal(exportsPage.default().key, "first");
+  assert.equal(renderHome().type, "scoped-email");
+  assert.equal(renderHome().key, "first");
   auth = { ...auth, sessionToken: "second", chatSocketMode: "account" };
-  assert.equal(exportsPage.default().key, "second");
-  assert.equal(exportsPage.default().type.name, "AccountCommunication");
-  assert.equal(exportsPage.default().props.groupsEnabled, false);
+  assert.equal(renderHome().key, "second");
+  assert.equal(renderHome().type.name, "AccountCommunication");
+  assert.equal(renderHome().props.groupsEnabled, false);
   auth = { ...auth, groupSocketMode: "account" };
-  assert.equal(exportsPage.default().props.groupsEnabled, true);
+  assert.equal(renderHome().props.groupsEnabled, true);
   auth = { ...auth, privateDataOwner: "account-fixture" };
-  assert.equal(exportsPage.default().props.privateDataEnabled, true);
+  assert.equal(renderHome().props.privateDataEnabled, true);
 });
 
 const oldConversation = "a".repeat(64);

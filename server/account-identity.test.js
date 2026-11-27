@@ -2479,7 +2479,7 @@ test("PSTN mock callbacks and service quotas stay tied to the original account a
   assert.equal((await usage.findOne({ _id: nextKey })).count, 1);
 });
 
-test("disabled account calls retain legacy signals and mock PSTN preparation", { timeout: 30000 }, async (t) => {
+test("the ordinary server supports verified calls and preserves mock PSTN preparation", { timeout: 30000 }, async (t) => {
   const { request, login, origin } = await startEmailTestServer(t, false, {
     PSTN_ENABLED: "true", PSTN_ALLOWED_USERS: "phone-b", TWILIO_ACCOUNT_SID: "AC" + "1".repeat(32),
     TWILIO_API_KEY_SID: "SK" + "2".repeat(32), TWILIO_API_KEY_SECRET: "fixture-only",
@@ -2490,14 +2490,16 @@ test("disabled account calls retain legacy signals and mock PSTN preparation", {
   for (const suffix of ["challenge", "confirm"]) {
     assert.equal((await request("/api/account/deletion/" + suffix, { token: a.sessionToken, method: "POST", body: {} })).status, 404);
   }
+  assert.equal((await request("/api/call-test/login", { method: "POST", body: {} })).status, 404);
   const [left, right] = (await Promise.all([a, b].map(({ sessionToken }) =>
-    openMailSocket(t, origin, sessionToken, "/")))).map(({ socket }) => socket);
+    openMailSocket(t, origin, sessionToken, "/", { verifiedCallProtocol: 1 })))).map(({ socket }) => socket);
   assert.equal((await rejectMailSocket(t, origin, a.sessionToken, "/calls")).message, "Invalid namespace");
+  const callId = "verified-call-fixture";
   const incoming = expectSocketEvent(right, "call:incoming");
-  left.emit("call:initiate", { callId: "legacy-call-fixture", to: "phone-b", kind: "voice" });
-  assert.equal((await incoming).from, "call-a");
+  left.emit("call:verified-initiate", { callId, to: "phone-b", kind: "voice", protocol: 1 });
+  assert.deepEqual(await incoming, { callId, from: "call-a", kind: "voice", protocol: 1 });
   const ending = expectSocketEvent(right, "call:ended");
-  left.emit("call:end", { callId: "legacy-call-fixture" });
+  left.emit("call:end", { callId });
   await ending;
   const prepare = await request("/api/calls/pstn/prepare", {
     token: b.sessionToken, method: "POST", body: { requestId: "legacy-phone-fixture", phone: "+33123456789" },
