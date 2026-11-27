@@ -5,6 +5,7 @@ import { API_URL, callTestBuildId, disconnectSocket, getSocket, initSocket, onCa
   sendCallEvent, VERIFIED_CALL_PROTOCOL } from "@/lib/api-client";
 import { newCallChallenge } from "@/lib/connect/call-identity";
 import { CallSession } from "@/lib/connect/call-session";
+import type { CallIceStatistics } from "@/lib/connect/call-ice-statistics";
 import { useCallRingtone } from "@/lib/connect/use-call-ringtone";
 import { CallSafetySettings } from "./call-safety-settings";
 import { CallStream } from "@/lib/connect/call-stream";
@@ -29,7 +30,10 @@ export function CallTestApp() {
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [remote, setRemote] = useState<MediaStream | null>(null);
   const [muted, setMuted] = useState(false);
-  const [diagnostic, setDiagnostic] = useState("");
+  const [ice, setIce] = useState<
+    { phase: "idle" | "loading" } | { phase: "error"; message: string } |
+    { phase: "ready"; stats: CallIceStatistics }
+  >({ phase: "idle" });
   const active = useRef<CallSession | null>(null);
   const peer = testUsers.find((name) => name !== user)!;
   const { ringtoneBlocked, enableRingtone } = useCallRingtone(phase === "Incoming");
@@ -63,7 +67,7 @@ export function CallTestApp() {
   function makeCall(callId: string, kind: "voice" | "video", direction: "incoming" | "outgoing") {
     if (active.current) return;
     setStatus("");
-    setDiagnostic("");
+    setIce({ phase: "idle" });
     setMuted(false);
     setPhase(direction === "incoming" ? "Incoming" : "Preparing");
     const session = new CallSession({
@@ -78,6 +82,7 @@ export function CallTestApp() {
         active.current = null;
         setLocal(null);
         setRemote(null);
+        setIce({ phase: "idle" });
         setPhase("Idle");
         setStatus(callErrors[reason] ?? reason);
       },
@@ -121,12 +126,20 @@ export function CallTestApp() {
   }
 
   async function inspectIce() {
+    const session = active.current;
+    if (!session || ice.phase === "loading") return;
+    setIce({ phase: "loading" });
     try {
-      const pair = await active.current?.selectedIcePair();
-      setDiagnostic(pair ? `ICE: ${pair.local} → ${pair.remote} (${pair.protocol ?? "unknown transport"})`
-        : "Selected ICE pair unavailable in this browser.");
-    } catch {
-      setDiagnostic("Unable to read ICE statistics.");
+      const stats = await session.selectedIcePair();
+      if (active.current !== session) return;
+      setIce(stats ? { phase: "ready", stats } : {
+        phase: "error", message: "The browser did not report an unambiguous ICE pair. Retry while connected.",
+      });
+    } catch (error) {
+      if (active.current !== session) return;
+      setIce({ phase: "error", message: error instanceof Error && error.message === "ice-statistics-timeout"
+        ? "Reading ICE statistics timed out. Try again."
+        : "The browser could not read ICE statistics. Try again." });
     }
   }
 
@@ -169,14 +182,30 @@ export function CallTestApp() {
             {Boolean(local?.getVideoTracks().length) && <button className={button} onClick={() => {
               void active.current?.switchCamera().catch(() => setStatus("Camera switching failed."));
             }}>Switch camera</button>}
-            <button className={button} onClick={() => void inspectIce()}>Read ICE statistics</button>
           </>}
           <button className={button} onClick={() => void logout()}>Sign out</button>
         </div>
+        {phase === "Peer device verified" && <section className="space-y-2 rounded border p-3">
+          <button type="button" className={button} disabled={ice.phase === "loading"}
+            onClick={() => void inspectIce()}>Read ICE statistics</button>
+          <div aria-live="polite" aria-busy={ice.phase === "loading"} className="text-sm">
+            {ice.phase === "loading" && <p>Reading ICE statistics…</p>}
+            {ice.phase === "error" && <p>{ice.message}</p>}
+            {ice.phase === "ready" && <>
+              <p>{ice.stats.source === "selected" ? "Selected ICE pair" : "Nominated ICE pair (selection unconfirmed)"}</p>
+              <dl className="grid grid-cols-2 gap-x-2">
+                <dt>Connection</dt><dd>{ice.stats.connectionState}</dd>
+                <dt>Local candidate</dt><dd>{ice.stats.local ?? "Unavailable"}</dd>
+                <dt>Remote candidate</dt><dd>{ice.stats.remote ?? "Unavailable"}</dd>
+                <dt>Bytes sent</dt><dd>{ice.stats.bytesSent?.toLocaleString() ?? "Unavailable"}</dd>
+                <dt>Bytes received</dt><dd>{ice.stats.bytesReceived?.toLocaleString() ?? "Unavailable"}</dd>
+              </dl>
+            </>}
+          </div>
+        </section>}
         <p role="status">{phase}</p>
         {remote && <CallStream stream={remote} playbackLabel="Play remote media" />}
         {local && <CallStream stream={local} muted playbackLabel="Play local preview" />}
-        {diagnostic && <output>{diagnostic}</output>}
       </>}
       {status && <p role="status">{status}</p>}
     </main>

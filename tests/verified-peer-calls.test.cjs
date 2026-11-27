@@ -18,11 +18,50 @@ function load(file, dependencies = {}) {
 }
 
 const identity = load("lib/connect/call-identity.ts");
+const ice = load("lib/connect/call-ice-statistics.ts");
 const binding = {
   callId: "aa".repeat(16), challenge: "bb".repeat(16), caller: "alice", recipient: "bob", kind: "video",
 };
 const sdp = "v=0\r\na=fingerprint:sha-256 AA:BB\r\n";
 const keyPair = () => crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+
+test("ICE diagnostics prefer the selected pair and expose only candidate types, state and bytes", () => {
+  const report = new Map([
+    ["transport", { type: "transport", selectedCandidatePairId: "pair" }],
+    ["other", { type: "candidate-pair", state: "succeeded", nominated: true }],
+    ["pair", { type: "candidate-pair", localCandidateId: "local", remoteCandidateId: "remote", bytesSent: 0, bytesReceived: 171 }],
+    ["local", { type: "local-candidate", candidateType: "relay", address: "192.0.2.1", usernameFragment: "sensitive" }],
+    ["remote", { type: "remote-candidate", candidateType: "srflx", address: "192.0.2.2", url: "turn:example.invalid" }],
+  ]);
+  assert.deepEqual(ice.selectIceStatistics(report, "connected"), {
+    source: "selected", connectionState: "connected", local: "relay", remote: "srflx", bytesSent: 0, bytesReceived: 171,
+  });
+});
+
+test("ICE diagnostics label a unique nominated pair, reject ambiguous reports and preserve missing counters", () => {
+  const pair = { type: "candidate-pair", localCandidateId: "local", state: "succeeded", nominated: true };
+  const report = new Map([
+    ["pair", pair],
+    ["local", { type: "local-candidate", candidateType: "host" }],
+  ]);
+  assert.deepEqual(ice.selectIceStatistics(report, "connected"), {
+    source: "nominated", connectionState: "connected", local: "host", remote: null, bytesSent: null, bytesReceived: null,
+  });
+  assert.equal(ice.selectIceStatistics(report, "disconnected"), null);
+  report.set("another", pair);
+  assert.equal(ice.selectIceStatistics(report, "connected"), null);
+  report.set("transport", { type: "transport", selectedCandidatePairId: "missing" });
+  assert.equal(ice.selectIceStatistics(report, "connected"), null);
+  report.set("transport", { type: "transport", selectedCandidatePairId: "pair" });
+  report.set("another-transport", { type: "transport", selectedCandidatePairId: "another" });
+  assert.equal(ice.selectIceStatistics(report, "connected"), null);
+});
+
+test("reading ICE diagnostics rejects failed or stalled getStats calls", async () => {
+  const failure = new Error("test failure");
+  await assert.rejects(ice.readIceStatistics({ getStats: async () => { throw failure; } }), failure);
+  await assert.rejects(ice.readIceStatistics({ getStats: () => new Promise(() => {}) }, 5), /ice-statistics-timeout/);
+});
 
 test("test safety settings distinguish self, code and storage failures and save either hyphenated peer", () => {
   const stored = new Map();
@@ -140,6 +179,7 @@ async function callFixture({ paired = true, direction = "outgoing", keyError } =
   const outgoing = direction === "outgoing";
   const pin = paired ? await identity.callSafetyCode((outgoing ? bob : alice).publicKey) : null;
   const { CallSession } = load("lib/connect/call-session.ts", {
+    "./call-ice-statistics": load("lib/connect/call-ice-statistics.ts"),
     "./call-identity": { ...identity, getCallDevice: async () => {
       if (keyError) throw new identity.CallKeyError(keyError);
       return outgoing ? alice : bob;

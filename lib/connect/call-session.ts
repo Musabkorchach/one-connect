@@ -21,6 +21,7 @@ import {
   type CallBinding,
   type SignedCallDescription,
 } from "./call-identity";
+import { readIceStatistics } from "./call-ice-statistics";
 
 export interface CallSessionOptions {
   callId: string;
@@ -186,19 +187,10 @@ export class CallSession {
   }
 
   async selectedIcePair() {
-    const stats = await this.peer?.getStats();
-    if (!stats) return null;
-    for (const entry of stats.values()) {
-      if (entry.type !== "transport" || !entry.selectedCandidatePairId) continue;
-      const pair = stats.get(entry.selectedCandidatePairId);
-      const local = stats.get(pair?.localCandidateId);
-      const remote = stats.get(pair?.remoteCandidateId);
-      return local && remote ? {
-        local: local.candidateType, remote: remote.candidateType,
-        protocol: local.relayProtocol ?? local.protocol,
-      } : null;
-    }
-    return null;
+    const peer = this.peer;
+    if (!peer || this.ended) return null;
+    const stats = await readIceStatistics(peer);
+    return this.ended || this.peer !== peer ? null : stats;
   }
 
   private binding(): CallBinding {
