@@ -25,7 +25,7 @@ export function setCallPin(own: string, peer: string, code: string) {
 }
 
 export class CallKeyError extends Error {
-  constructor(readonly reason: "call-storage-unavailable" | "call-device-missing") {
+  constructor(readonly reason: "call-storage-unavailable" | "call-device-missing" | "call-identity-unavailable") {
     super(reason);
   }
 }
@@ -63,26 +63,39 @@ export function openCallKeyStore(timeoutMs = 4000) {
 }
 
 export async function getCallDevice(own: string, create = false): Promise<CryptoKeyPair> {
-  if (!validCallName(own) || !globalThis.isSecureContext) throw new Error("Secure call identity unavailable.");
+  if (!validCallName(own) || !globalThis.isSecureContext || !globalThis.crypto?.subtle) {
+    throw new CallKeyError("call-identity-unavailable");
+  }
   const db = await openCallKeyStore();
   try {
     const read = () => new Promise<CryptoKeyPair | undefined>((resolve, reject) => {
       const request = db.transaction("devices").objectStore("devices").get(own);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      const timer = setTimeout(() => reject(storageError()), 4000);
+      request.onsuccess = () => { clearTimeout(timer); resolve(request.result); };
+      request.onerror = () => { clearTimeout(timer); reject(request.error); };
     });
     const existing = await read();
     if (existing) return existing;
     if (!create) throw new CallKeyError("call-device-missing");
-    const pair = await crypto.subtle.generateKey(curve, false, ["sign", "verify"]);
+    let pair: CryptoKeyPair;
+    try {
+      pair = await crypto.subtle.generateKey(curve, false, ["sign", "verify"]);
+      await callSafetyCode(pair.publicKey);
+    } catch {
+      throw new CallKeyError("call-identity-unavailable");
+    }
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction("devices", "readwrite");
       const request = transaction.objectStore("devices").add(pair, own);
       request.onerror = (event) => {
         if (request.error?.name === "ConstraintError") event.preventDefault();
       };
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(transaction.error);
+      const timer = setTimeout(() => {
+        try { transaction.abort(); } catch {}
+        reject(storageError());
+      }, 4000);
+      transaction.oncomplete = () => { clearTimeout(timer); resolve(); };
+      transaction.onabort = () => { clearTimeout(timer); reject(transaction.error); };
     });
     const stored = await read();
     if (!stored) throw new Error("Call identity could not be saved.");

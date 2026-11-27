@@ -18,12 +18,13 @@ import {
 import { LANGUAGES, fileToAvatar, type LangId, type UserStatus } from "@/lib/connect/data";
 import { IconLogout } from "./icons";
 import { usePiAuth } from "@/contexts/pi-auth-context";
+import { AccountDeletionSettings } from "./account-deletion-settings";
 import { AccountSubscriptionStatus } from "./account-subscription-status";
 import { CallSafetySettings } from "./call-safety-settings";
 
 export function ProfileView() {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
-  const { sessionToken } = usePiAuth();
+  const { sessionToken, piUsername } = usePiAuth();
   const [editOpen, setEditOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
@@ -119,7 +120,7 @@ export function ProfileView() {
         </button>
       </div>
 
-      {sessionToken && (
+      {sessionToken && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review" && (
         <div className="mt-4 px-4">
           <AccountSubscriptionStatus sessionToken={sessionToken} language={profile.language} />
         </div>
@@ -143,12 +144,14 @@ export function ProfileView() {
       {/* logout */}
       <div className="mt-4 px-4 pb-4">
         <div className="mb-4">
-          <CallSafetySettings key={profile.username} username={profile.username} />
+          <CallSafetySettings key={piUsername || profile.username} username={piUsername || profile.username} language={profile.language} />
         </div>
         <div className="mb-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm">
           <Link href="/privacy" className="text-accent underline underline-offset-4">{t.privacyPolicy}</Link>
           <Link href="/terms" className="text-accent underline underline-offset-4">{t.termsOfUse}</Link>
         </div>
+        {sessionToken && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" &&
+          <AccountDeletionSettings sessionToken={sessionToken} language={profile.language} />}
         <Button variant="outline" className="w-full py-3 text-destructive border-destructive/50 hover:bg-destructive/10" onClick={logout}>
           <IconLogout className="h-4 w-4" />
           {t.logout || "Logout"}

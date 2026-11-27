@@ -1,31 +1,31 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import type { LangId } from "@/lib/connect/data";
 import {
   CallKeyError, callSafetyCode, getCallDevice, normalizeCallName, setCallPin, validCallName, validSafetyCode,
 } from "@/lib/connect/call-identity";
 
-export function CallSafetySettings({ username, testPeer }: { username: string; testPeer?: string }) {
+export function CallSafetySettings({ username, testPeer, language }: { username: string; testPeer?: string; language?: LangId }) {
   const own = normalizeCallName(username);
   const [ownCode, setOwnCode] = useState("");
   const [peer, setPeer] = useState("");
   const [code, setCode] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
-  const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  async function showCode(create = false) {
+  async function showCode() {
     setBusy(true);
     setOwnCode("");
-    setMissing(false);
     try {
-      setOwnCode(await callSafetyCode((await getCallDevice(own, create)).publicKey));
+      setOwnCode(await callSafetyCode((await getCallDevice(own, true)).publicKey));
       setMessage("");
     } catch (error) {
       const keyMissing = error instanceof CallKeyError && error.reason === "call-device-missing";
-      setMissing(keyMissing);
-      setMessage(keyMissing
+      setMessage(error instanceof CallKeyError && error.reason === "call-identity-unavailable"
+        ? "Secure device identity is unavailable. Open One Connect directly over HTTPS in Pi Browser."
+        : keyMissing
         ? "There is no call key on this device. Create one here, then verify its new code with the other person."
         : "Call key storage is blocked or unavailable. Allow site storage or close other One Connect tabs, then retry.");
     } finally {
@@ -66,16 +66,14 @@ export function CallSafetySettings({ username, testPeer }: { username: string; t
 
   return (
     <section className="rounded-2xl pc-glass p-5 space-y-3" aria-labelledby="call-safety-title">
-      <h3 id="call-safety-title" className="font-bold">Call safety codes</h3>
+      <h3 id="call-safety-title" className="font-bold">{language === "ar" ? "رموز أمان المكالمات" : language === "fr" ? "Codes de sécurité des appels" : "Call safety codes"}</h3>
       <p className="text-sm text-muted-foreground">
         Both people must exchange their device codes in person or through a separate trusted channel
         before calling. Verify the new code again if either person changes devices.
       </p>
       <button type="button" disabled={busy} className="text-sm text-accent underline" onClick={() => void showCode()}>
-        Show my device code / retry
+        {language === "ar" ? "عرض رمز جهازي أو إنشاؤه" : language === "fr" ? "Afficher ou créer le code de mon appareil" : "Show or create my device code"}
       </button>
-      {missing && <button type="button" disabled={busy} className="block text-sm text-accent underline"
-        onClick={() => void showCode(true)}>Create a device key</button>}
       {ownCode && <output className="block break-all select-all font-mono text-sm">{ownCode}</output>}
       <form className="space-y-3" onSubmit={save}>
         <label className="block text-sm">

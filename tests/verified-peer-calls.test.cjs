@@ -361,6 +361,54 @@ test("reading a missing device key never opens a write transaction", async () =>
   }
 });
 
+test("an explicit device-code request creates one non-exportable private key and reuses it", async () => {
+  const descriptors = ["indexedDB", "isSecureContext"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]);
+  let stored;
+  let writes = 0;
+  const database = {
+    transaction(_store, mode) {
+      const transaction = { objectStore: () => ({
+        get() {
+          const request = { result: stored };
+          queueMicrotask(() => request.onsuccess());
+          return request;
+        },
+        add(key) {
+          assert.equal(mode, "readwrite");
+          assert.equal(stored, undefined);
+          stored = key;
+          writes++;
+          queueMicrotask(() => transaction.oncomplete());
+          return {};
+        },
+      }) };
+      return transaction;
+    },
+    close() {},
+  };
+  Object.defineProperty(globalThis, "isSecureContext", { configurable: true, value: true });
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: {
+    open() {
+      const request = { result: database };
+      queueMicrotask(() => request.onsuccess());
+      return request;
+    },
+  } });
+  try {
+    const first = await identity.getCallDevice("alice", true);
+    assert.equal(first.privateKey.extractable, false);
+    const code = await identity.callSafetyCode(first.publicKey);
+    assert.ok(identity.validSafetyCode(code));
+    assert.equal(await identity.callSafetyCode((await identity.getCallDevice("alice", true)).publicKey), code);
+    assert.equal(writes, 1);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});
+
 test("incompatible or missing signaling confirmation never rings or captures media", async () => {
   const incompatible = await callFixture();
   await incompatible.session.start();

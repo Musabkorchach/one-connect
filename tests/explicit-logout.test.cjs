@@ -641,6 +641,15 @@ test("home renders scoped email per session and retains the previous routes for 
   assert.equal(renderHome().props.groupsEnabled, true);
   auth = { ...auth, privateDataOwner: "account-fixture" };
   assert.equal(renderHome().props.privateDataEnabled, true);
+  const originalMode = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+  try {
+    process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = "production-review";
+    assert.equal(renderHome().type, "legacy-app");
+    assert.equal(renderHome().key, "second");
+  } finally {
+    if (originalMode === undefined) delete process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+    else process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = originalMode;
+  }
 });
 
 const oldConversation = "a".repeat(64);
@@ -905,6 +914,12 @@ test("archived group renders its existing media viewer but blocks the composer a
     react: { useState: (initial) => [initial, () => {}], useRef: (value) => ({ current: value }) },
     "@/contexts/pi-auth-context": {},
     "@/lib/account-groups": {},
+    "@/lib/api-client": {},
+    "@/contexts/connect-context": {},
+    "./create-group-sheet": {},
+    "./group-avatar": {},
+    "./ui": {},
+    "./icons": {},
     "./group-media": { GroupMediaContent: "existing-group-media" },
     "./feedback": {},
     "./voice-recorder": {},

@@ -175,6 +175,9 @@ export async function getAppState(
 
   const record: unknown = await response.json();
   if (record === null) return null;
+  if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" &&
+      record && typeof record === "object" && "blob" in record && record.blob === null &&
+      "legacyHistory" in record && (record.legacyHistory as { code?: string } | null)?.code === "ACCOUNT_MIGRATION_REQUIRED") return null;
 
   if (
     typeof record !== "object" ||

@@ -53,9 +53,11 @@ export function ConversationView({
     markChatRead,
     lang,
     pushToast,
+    openChat,
   } = useConnect();
 
   const { sessionToken } = usePiAuth();
+  const production = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review";
   const [imageUploading, setImageUploading] = useState(false);
   const conv = getChat(username);
   const contact = contacts.find((c) => c.username === username);
@@ -70,8 +72,12 @@ export function ConversationView({
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    if (production) {
+      openChat(username);
+      return () => openChat(null);
+    }
     joinConversation(username);
-  }, [username]);
+  }, [username, production, openChat]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -191,13 +197,18 @@ export function ConversationView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username, conv?.messages]);
 
-  if (!conv) return null;
+  if (!conv) return production ? (
+    <div className="fixed inset-0 z-40 bg-background p-3">
+      <IconButton onClick={onBack} aria-label={t.back}><IconBack className="h-5 w-5 rtl:rotate-180" /></IconButton>
+    </div>
+  ) : null;
 
-  const submit = () => {
+  const submit = async () => {
     const v = text.trim();
     if (!v) return;
-    sendMessage(username, "text", v);
-    setText("");
+    if (await sendMessage(username, "text", v) !== false) {
+      setText((current) => current.trim() === v ? "" : current);
+    }
   };
 
   const onImage = async (file?: File) => {
@@ -213,12 +224,13 @@ export function ConversationView({
 
     try {
       const image = await uploadChatImage(
-        username,
+        production ? conv.id : username,
         file,
-        sessionToken
+        sessionToken,
+        production ? { accountConversation: true } : undefined,
       );
 
-      sendMessage(
+      await sendMessage(
         username,
         "image",
         "",
@@ -254,13 +266,14 @@ export function ConversationView({
 
   try {
     const attachment = await uploadChatAttachment(
-      username,
+      production ? conv.id : username,
       kind,
       file,
       sessionToken,
+      production ? { accountConversation: true } : undefined,
     );
 
-    sendMessage(
+    const sent = await sendMessage(
       username,
       kind,
       "",
@@ -270,7 +283,7 @@ export function ConversationView({
       attachment.attachmentId,
     );
 
-    return true;
+    return sent !== false;
   } catch (error) {
     pushToast(
       error instanceof Error
@@ -305,10 +318,10 @@ const onVideo = (file?: File) => {
           <div className="min-w-0 flex-1">
             <p className="truncate font-semibold leading-tight">{conv.name}</p>
             <p className={cx("truncate text-xs", typing ? "text-gold animate-pulse" : contact?.online ? "text-success" : "text-muted-foreground")}>
-              {typing ? "typing..." : contact?.online ? t.online : `@${conv.username}`}
+              {typing ? "typing..." : contact?.online ? t.online : conv.username ? `@${conv.username}` : ""}
             </p>
           </div>
-          <IconButton
+          {!conv.readOnly && <><IconButton
             className="h-9 w-9 text-turquoise"
             onClick={() =>
   onCall(
@@ -328,7 +341,7 @@ const onVideo = (file?: File) => {
             aria-label={t.videoCall}
           >
             <IconVideo className="h-5 w-5" />
-          </IconButton>
+          </IconButton></>}
         </div>
       </header>
 
@@ -350,7 +363,7 @@ const onVideo = (file?: File) => {
       </div>
 
       {/* composer */}
-      <div className="pc-glass-strong pc-safe-bottom border-t border-border/60 px-2 py-2">
+      {!conv.readOnly && <div className="pc-glass-strong pc-safe-bottom border-t border-border/60 px-2 py-2">
         {imageUploading && (
           <p
             role="status"
@@ -411,7 +424,7 @@ const onVideo = (file?: File) => {
             </IconButton>
       )}
         </div>
-      </div>
+      </div>}
 
       <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={(e) => onImage(e.target.files?.[0])} />
       <input ref={fileRef} type="file" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />

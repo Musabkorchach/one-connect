@@ -22,6 +22,9 @@ import { GroupCallScreen } from "./group-call-screen";
 import { GroupCallActionsProvider } from "@/contexts/group-call-actions-context";
 import { usePstnCallController } from "@/lib/connect/use-pstn-call-controller";
 import { PstnCallScreen } from "./pstn-call-screen";
+import { usePiAuth } from "@/contexts/pi-auth-context";
+import { useAccountCallTransport } from "./account-peer-calls";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
 
 const CALL_CONFIGURATION: RTCConfiguration = {
@@ -32,6 +35,9 @@ const CALL_CONFIGURATION: RTCConfiguration = {
 
 function AppInner() {
   const { ready, profile, ensureChat, contacts, t } = useConnect();
+  const { sessionToken } = usePiAuth();
+  const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
+  const accountTransport = useAccountCallTransport(production ? sessionToken : null);
   const [tab, setTab] = useState<TabId>("chats");
   const [openChat, setOpenChat] = useState<string | null>(null);
   const groupCallBusyRef = useRef(false);
@@ -48,6 +54,7 @@ function AppInner() {
     } = useCallController(
     CALL_CONFIGURATION,
     () => groupCallBusyRef.current || pstnBusyRef.current(),
+    accountTransport,
   );
 
   const {
@@ -100,7 +107,7 @@ pstnBusyRef.current = isPstnBusy;
   };
 
     return (
-    <GroupCallActionsProvider value={startGroupCall}>
+    <GroupCallActionsProvider value={production ? null : startGroupCall}>
       <div className="relative mx-auto min-h-[100dvh] max-w-md bg-background">
       {tab === "chats" && <ChatsView onOpen={(u) => setOpenChat(u)} />}
       {tab === "contacts" && (
@@ -109,7 +116,7 @@ pstnBusyRef.current = isPstnBusy;
       {tab === "calls" && (
         <CallsView
           onCall={startCall}
-          onPhoneCall={process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? undefined : (phone) => void startPstnCall(phone)}
+          onPhoneCall={production || process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? undefined : (phone) => void startPstnCall(phone)}
           phoneCallDisabled={
             Boolean(callState) ||
             Boolean(groupCallState) ||

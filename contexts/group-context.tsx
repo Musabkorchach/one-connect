@@ -97,7 +97,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (!token || !me) return;
+    if (!token || !me || process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") return;
 
     const controller = new AbortController();
     let disposed = false;

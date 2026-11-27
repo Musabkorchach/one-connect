@@ -31,8 +31,9 @@ export interface CallViewState extends CallDetails {
 export function useCallController(
   configuration: RTCConfiguration,
   isOtherCallActive: () => boolean = () => false,
+  transport = legacyTransport,
 ) {
-  return usePeerCallController(useConnect(), configuration, legacyTransport, isOtherCallActive);
+  return usePeerCallController(useConnect(), configuration, transport, isOtherCallActive);
 }
 
 const legacyTransport: PeerCallTransport = {

@@ -7,8 +7,18 @@ import { GroupAvatar } from "./group-avatar";
 import { CreateGroupSheet } from "./create-group-sheet";
 import { GroupConversationView } from "./group-conversation-view";
 import { GroupInvitations, GroupJoinLink } from "./group-management";
+import { usePiAuth } from "@/contexts/pi-auth-context";
+import { AccountGroupsView } from "./account-groups-view";
 
 export function GroupsPanel({ query = "" }: { query?: string }) {
+  const { sessionToken } = usePiAuth();
+  if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && sessionToken) {
+    return <AccountGroupsView sessionToken={sessionToken} embedded query={query} />;
+  }
+  return <LegacyGroupsPanel query={query} />;
+}
+
+function LegacyGroupsPanel({ query }: { query: string }) {
   const { lang } = useConnect();
   const { groups, loading, error } = useGroups();
   const arabic = lang === "ar";

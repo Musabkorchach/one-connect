@@ -19,7 +19,7 @@ const accountRoutes = [
   ["GET", /^\/api\/calls\/(ice-servers|history)$/],
   ["GET,PUT", /^\/api\/profile$/],
   ["GET,POST", /^\/api\/contacts$/],
-  ["GET,PUT", /^\/api\/state\/connect\.(profile|contacts|invoice-drafts)$/],
+  ["GET,PUT", /^\/api\/state\/connect\.(profile|contacts|calls|emails|invoice-drafts)$/],
   ["GET,POST", /^\/api\/chat\/conversations$/],
   ["GET", /^\/api\/chat\/conversations\/[a-f\d]{64}$/i],
   ["POST", /^\/api\/chat\/(attachments|images)$/],

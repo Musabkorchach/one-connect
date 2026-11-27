@@ -26,7 +26,7 @@ type MailboxViewProps = Pick<ReturnType<typeof useConnect>,
 
 export function EmailsView() {
   const mailbox = useConnect();
-  return <MailboxView mailbox={mailbox} />;
+  return <MailboxView mailbox={{ ...mailbox, internalOnly: process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" }} />;
 }
 
 export function MailboxView({ mailbox }: { mailbox: MailboxViewProps }) {

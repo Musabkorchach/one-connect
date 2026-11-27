@@ -617,6 +617,14 @@ test("Production runs existing account routes with separate data and sessions", 
   assert.deepEqual(savedDrafts.body, { revision: 1 });
   assert.deepEqual((await production.request(draftsPath, { token })).body.blob, drafts);
   assert.equal((await production.request(draftsPath, { token: peer.sessionToken })).body.blob, null);
+  for (const key of ["connect.calls", "connect.emails"]) {
+    const path = "/api/state/" + key;
+    const blob = { items: [{ id: "owner-only" }] };
+    assert.equal((await production.request(path, { token, method: "PUT", body: { blob } })).status, 204);
+    assert.deepEqual((await production.request(path, { token })).body.blob, blob);
+    assert.equal((await production.request(path, { token: peer.sessionToken })).body.blob, null);
+    assert.equal((await production.request(path, { token: testnet.sessionToken })).status, 401);
+  }
 
   for (const [server, wrongToken] of [[legacy, token], [production, testnet.sessionToken]]) {
     const { socket } = connectMailSocket(t, server.origin, wrongToken, "/chat", {}, server === production ? productionOrigin : undefined);
@@ -641,6 +649,9 @@ test("Production runs existing account routes with separate data and sessions", 
   const history = await production.request("/api/chat/conversations/" + conversationId, { token: peer.sessionToken });
   assert.equal(history.status, 200);
   assert.equal(history.body.messages[0].text, "Production chat");
+  const inbox = await production.request("/api/chat/conversations", { token: peer.sessionToken });
+  assert.equal(inbox.body.conversations[0].last.text, "Production chat");
+  assert.equal(inbox.body.conversations[0].unread, 1);
   const group = await production.request("/api/groups", { token, method: "POST", body: { name: "Production group", members: ["demo-peer"] } });
   assert.equal(group.status, 201);
   assert.equal((await production.request("/api/groups", { token })).body.groups.length, 1);
