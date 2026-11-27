@@ -7,7 +7,7 @@ import cors from "cors";
 import { config } from "dotenv";
 import dns from "dns";
 import { fileURLToPath } from "url";
-import { dirname } from "path";
+import { dirname, resolve } from "path";
 import crypto from "node:crypto";
 import { createAccountDeletion, observeAccountDeletion, revokeAccountConnections } from "./account-deletion.js";
 import { registerAccountDeletionRoutes } from "./account-deletion-routes.js";
@@ -32,21 +32,34 @@ import { assertLocalAccountBindingDatabase, createVerifyPiLogin, isAccountBindin
 import {
   createEmailAccess, emailAccountUnavailable, emailViewer, findEmailAccount, senderEmailKey,
 } from "./email-account-access.js";
+import { selectVerifiedCallSockets, validCallProof, VERIFIED_CALL_PROTOCOL } from "./verified-call-protocol.js";
+import { allowsCallTestEvent, allowsCallTestRoute, callIntegrationSettings, callTestSettings } from "./call-test-settings.js";
 
 config();
 
+const callTestEntry = resolve(process.argv[1] ?? "") === fileURLToPath(new URL("./call-test-server.js", import.meta.url));
+const callIntegration = callIntegrationSettings(process.env, callTestEntry);
+const callTest = callTestSettings(process.env, callTestEntry);
+const isolatedCalls = callTest ?? callIntegration;
 dns.setServers(["8.8.8.8"]);
 
 const production = productionSettings(process.env);
-const bindAccounts = Boolean(production) || isAccountBindingEnabled(process.env);
+if (production && isolatedCalls) throw new Error("Production and call test modes cannot be combined.");
+const bindAccounts = Boolean(production) || (!isolatedCalls && isAccountBindingEnabled(process.env));
 const useSubscriptionFixtures = subscriptionProofMode(process.env, bindAccounts);
-const mongoClient = new MongoClient(production?.mongoUri ?? process.env.MONGODB_URI);
+const mongoClient = new MongoClient(production?.mongoUri ?? isolatedCalls?.uri ?? process.env.MONGODB_URI);
+if (production && mongoClient.options.dbName !== production.database) {
+  throw new Error("Production MongoDB URI must name its assigned database.");
+}
+if (isolatedCalls && mongoClient.options.dbName !== isolatedCalls.database) {
+  throw new Error("Call test MongoDB URI must name its assigned test database.");
+}
 if (bindAccounts && !production) assertLocalAccountBindingDatabase(mongoClient.options);
 
 await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
-const db = mongoClient.db(production?.database ?? "oneconnect");
+const db = mongoClient.db(production?.database ?? isolatedCalls?.database ?? "oneconnect");
 if (production) {
   // Existing peer lookups use the verified handle. An ambiguous handle must
   // never select a different UID or take over an existing account.
@@ -191,7 +204,7 @@ const allowedStateKeys = new Set([
   "phone-contacts",
 ]);
 
-const allowedOrigins = production ? [production.origin] : [
+const allowedOrigins = production || isolatedCalls ? [(production ?? isolatedCalls).origin] : [
   process.env.FRONTEND_URL,
   ...(process.env.CORS_EXTRA_ORIGINS || "")
     .split(",")
@@ -203,7 +216,7 @@ const allowedOrigins = production ? [production.origin] : [
   "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
   "http://localhost:3000",
 ].filter(Boolean);
-const testnetSubscriptionsEnabled = !production && process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
+const testnetSubscriptionsEnabled = !production && !isolatedCalls && process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -211,20 +224,33 @@ const io = new Server(httpServer, {
     origin: allowedOrigins,
     credentials: true,
   },
+  ...((production || isolatedCalls) && {
+    allowRequest: (req, callback) => callback(null, req.headers.origin === allowedOrigins[0]),
+  }),
 });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Middleware
+if (production || callIntegration) app.use((req, res, next) => {
+  if (req.method === "GET" && req.path === "/health") return next();
+  if (req.headers.origin !== allowedOrigins[0]) return res.sendStatus(403);
+  next();
+});
 app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
 if (production) app.use(restrictProductionRoutes);
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb" }));
-registerTokenMetadataRoutes(app);
+if (callTest) app.use((req, res, next) => {
+  if (!allowsCallTestRoute(req.method, req.path)) return res.sendStatus(404);
+  if (req.path !== "/health" && !callTest.acceptsOrigin(req.headers.origin)) return res.sendStatus(403);
+  next();
+});
+app.use(express.json({ limit: callTest ? "2kb" : "50mb" }));
+if (!callTest) app.use(express.urlencoded({ limit: "50mb" }));
+if (!callTest) registerTokenMetadataRoutes(app);
 app.use(express.static(new URL("../public", import.meta.url).pathname));
 
 // In-memory storage (replace with MongoDB in production)
@@ -242,7 +268,7 @@ const {
   normalizeMessagingUsername, chatAttachmentsBucket, chatImagesBucket,
 });
 const accountCalls = bindAccounts ? await createAccountCalls({
-  app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, allowGroupCalls: !production,
+  app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, allowGroupCalls: !production, verifiedPeerCalls: Boolean(production),
 }) : null;
 const privateData = bindAccounts ? await createPrivateData({
   app, db, writeAccount, authenticateSession, normalizeMessagingUsername,
@@ -287,6 +313,22 @@ if (accountDeletion) {
   resumeDeletion();
   setInterval(resumeDeletion, 5000).unref();
 }
+
+if (callTest) app.post("/api/call-test/login", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const { user, code, build } = req.body ?? {};
+  const result = callTest.login(user, code, build);
+  if (!result) return res.sendStatus(401);
+  for (const [token, session] of userSessions) {
+    if (session.userId !== user) continue;
+    userSessions.delete(token);
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.sessionToken === token) socket.disconnect(true);
+    }
+  }
+  userSessions.set(result.token, result.session);
+  res.json({ sessionToken: result.token, username: user, build: callTest.build });
+});
 
 function detectChatImageType(buffer) {
   if (!Buffer.isBuffer(buffer)) return null;
@@ -1533,7 +1575,7 @@ function emailForUser(record, username, accountId) {
   };
 }
 
-if (!production) await registerMailgunInboundRoutes({
+if (!production && !isolatedCalls) await registerMailgunInboundRoutes({
   app,
   db,
   writeAccount,
@@ -1543,7 +1585,7 @@ if (!production) await registerMailgunInboundRoutes({
   emailAttachmentsBucket,
 });
 
-if (!production) await registerPstnRoutes({
+if (!production && !isolatedCalls) await registerPstnRoutes({
   app,
   db,
   writeAccount,
@@ -1552,14 +1594,14 @@ if (!production) await registerPstnRoutes({
   normalizeMessagingUsername,
 });
 
-if (!production) registerPstnVoiceWebhook({
+if (!production && !isolatedCalls) registerPstnVoiceWebhook({
   app,
   db,
   writeAccount,
   bindAccounts,
 });
 
-if (!production) registerExternalEmailRoutes({
+if (!production && !isolatedCalls) registerExternalEmailRoutes({
   app,
   db,
   writeAccount,
@@ -2555,6 +2597,8 @@ app.get("/api/chat/images/:imageId", requireChatSession, async (req, res) => {
 
 // Routes
 app.get("/health", (req, res) => {
+  if (callTest) return res.json({ mode: "call-test", build: callTest.build, protocol: VERIFIED_CALL_PROTOCOL });
+  if (callIntegration) return res.json({ mode: "call-integration", protocol: VERIFIED_CALL_PROTOCOL });
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
@@ -3024,10 +3068,13 @@ function finishLiveCall(callId, reason = "ended") {
   if (call.recipientSocketId) {
     io.to(call.recipientSocketId).emit("call:ended", event);
   } else {
-    io.to(`peer:${call.recipientUsername}`).emit("call:ended", event);
+    for (const id of call.invitedSockets) io.to(id).emit("call:ended", event);
   }
 }
 io.use((socket, next) => {
+  if (callTest && socket.handshake.auth?.callTestBuild !== callTest.build) {
+    return next(new Error("Call test build mismatch"));
+  }
   const sessionToken = socket.handshake.auth?.sessionToken;
 
   if (typeof sessionToken !== "string" || !sessionToken) {
@@ -3063,6 +3110,10 @@ io.on("connection", (socket) => {
   }
 
   socket.join(`peer:${messagingUsername}`);
+  if (callTest) socket.use(([event], next) => {
+    // Discard unrelated frontend events without invoking their handlers.
+    if (allowsCallTestEvent(event)) next();
+  });
 
       socket.on("conversation:join", async (conversationId) => {
     const peer = normalizeMessagingUsername(conversationId);
@@ -3835,7 +3886,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       }
     }
   });
-  socket.on("call:initiate", (data = {}) => {
+  const initiateVerifiedCall = (legacyEvent, data = {}) => {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       return;
     }
@@ -3878,7 +3929,19 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       return;
     }
 
-    if (!io.sockets.adapter.rooms.get(`peer:${to}`)?.size) {
+    const recipients = [...(io.sockets.adapter.rooms.get(`peer:${to}`) ?? [])]
+      .map((id) => io.sockets.sockets.get(id)).filter(Boolean);
+    const compatible = selectVerifiedCallSockets(
+      legacyEvent, data.protocol, socket.handshake.auth?.verifiedCallProtocol, recipients,
+    );
+    if (!compatible || (recipients.length && !compatible.length)) {
+      reject("call-update-required");
+      for (const recipient of recipients) {
+        recipient.emit("call:update-required", { reason: "call-update-required" });
+      }
+      return;
+    }
+    if (!compatible.length) {
       reject("offline");
       return;
     }
@@ -3888,6 +3951,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       recipientUsername: to,
       callerSocketId: socket.id,
       recipientSocketId: null,
+      invitedSockets: new Set(compatible.map(({ id }) => id)),
       kind,
       phase: "ringing",
       ringTimer: null,
@@ -3901,17 +3965,21 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       finishLiveCall(callId, "no-answer");
     }, 45000);
 
-    socket.emit("call:initiated", { callId });
+    socket.emit("call:initiated", { callId, protocol: VERIFIED_CALL_PROTOCOL });
 
-    io.to(`peer:${to}`).emit("call:incoming", {
+    for (const recipient of compatible) recipient.emit("call:incoming", {
       callId,
       from: messagingUsername,
       kind,
+      protocol: VERIFIED_CALL_PROTOCOL,
     });
-  });
+  };
+  socket.on("call:initiate", (data) => initiateVerifiedCall(true, data));
+  socket.on("call:verified-initiate", (data) => initiateVerifiedCall(false, data));
 
     socket.on("call:accept", (data = {}) => {
     const callId = data?.callId;
+    const challenge = data?.challenge;
     const call = liveCallsById.get(callId);
     const session = userSessions.get(socket.sessionToken);
 
@@ -3919,6 +3987,9 @@ if (kind === "file" || kind === "video" || kind === "voice") {
 
     if (
       !call ||
+      !call.invitedSockets.has(socket.id) ||
+      typeof challenge !== "string" ||
+      !/^[a-f0-9]{32}$/.test(challenge) ||
       call.recipientUsername !== messagingUsername ||
       call.phase !== "ringing" ||
       call.recipientSocketId
@@ -3939,8 +4010,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       reason: "answered-elsewhere",
     });
 
-    socket.emit("call:accepted", { callId });
-    io.to(call.callerSocketId).emit("call:accepted", { callId });
+    socket.emit("call:accepted", { callId, challenge });
+    io.to(call.callerSocketId).emit("call:accepted", { callId, challenge });
   });
 
     socket.on("call:offer", (data = {}) => {
@@ -3959,6 +4030,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       call.offerSent ||
       offer?.type !== "offer" ||
       typeof offer.sdp !== "string" ||
+      !validCallProof(offer) ||
       !offer.sdp.length ||
       offer.sdp.length > 100000
     ) {
@@ -3972,6 +4044,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       offer: {
         type: "offer",
         sdp: offer.sdp,
+        publicKey: offer.publicKey,
+        signature: offer.signature,
       },
     });
   });
@@ -3992,6 +4066,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       call.answerSent ||
       answer?.type !== "answer" ||
       typeof answer.sdp !== "string" ||
+      !validCallProof(answer) ||
       !answer.sdp.length ||
       answer.sdp.length > 100000
     ) {
@@ -4005,6 +4080,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
       answer: {
         type: "answer",
         sdp: answer.sdp,
+        publicKey: answer.publicKey,
+        signature: answer.signature,
       },
     });
   });
@@ -4101,7 +4178,7 @@ if (kind === "file" || kind === "video" || kind === "voice") {
     const isRecipient =
       call.recipientSocketId === socket.id ||
       (call.phase === "ringing" &&
-        call.recipientUsername === messagingUsername);
+        call.invitedSockets.has(socket.id));
 
     if (!isCaller && !isRecipient) return;
 
@@ -4134,8 +4211,8 @@ if (kind === "file" || kind === "video" || kind === "voice") {
 
       const recipientUnavailable =
         call.phase === "ringing" &&
-        call.recipientUsername === messagingUsername &&
-        !io.sockets.adapter.rooms.get(`peer:${messagingUsername}`)?.size;
+        call.invitedSockets.delete(socket.id) &&
+        call.invitedSockets.size === 0;
 
       if (isCaller || isRecipient || recipientUnavailable) {
         finishLiveCall(callId, "disconnected");
@@ -4156,7 +4233,7 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, isolatedCalls?.local ? "127.0.0.1" : undefined, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Frontend URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}`);
 });

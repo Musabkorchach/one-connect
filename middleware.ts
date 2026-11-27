@@ -1,13 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 export function middleware(request: NextRequest) {
-  if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review") {
+  const production = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review";
+  const isolated = process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1" || process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
+  const api = request.nextUrl.pathname === "/api" || request.nextUrl.pathname.startsWith("/api/");
+  if (api && (production || isolated)) return new NextResponse(null, { status: 404 });
+  if (!production) {
     return NextResponse.next();
   }
 
-  if (request.nextUrl.pathname.startsWith("/api/") || request.nextUrl.pathname === "/api") {
-    return new NextResponse(null, { status: 404 });
-  }
   const headers = { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" };
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new NextResponse(null, { status: 405, headers: { ...headers, Allow: "GET, HEAD" } });

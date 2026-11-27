@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createHmac, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import ts from "typescript";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -535,7 +536,7 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
     child.once("close", (code) => { clearTimeout(timer); reject(new Error(`Email fixture exited ${code}: ${errors}`)); });
   });
 
-  async function request(path, { token, method = "GET", body, origin } = {}) {
+  async function request(path, { token, method = "GET", body, origin = fixtureEnv.ONECONNECT_PRODUCTION_ORIGIN } = {}) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     if (origin) headers.Origin = origin;
     if (body && !(body instanceof FormData)) {
@@ -582,6 +583,10 @@ test("Production runs existing account routes with separate data and sessions", 
     PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460",
   });
   assert.equal((await production.login("invalid")).status, 401);
+  const productionOrigin = "https://production-review.example";
+  assert.equal((await production.request("/api/auth/verify", {
+    method: "POST", body: { accessToken: "demo-reviewer" }, origin: "https://testnet.example",
+  })).status, 403);
   const getSession = async (server, token) => {
     const result = await server.login(token);
     assert.equal(result.status, 200);
@@ -614,16 +619,16 @@ test("Production runs existing account routes with separate data and sessions", 
   assert.equal((await production.request(draftsPath, { token: peer.sessionToken })).body.blob, null);
 
   for (const [server, wrongToken] of [[legacy, token], [production, testnet.sessionToken]]) {
-    const { socket } = connectMailSocket(t, server.origin, wrongToken, "/chat");
+    const { socket } = connectMailSocket(t, server.origin, wrongToken, "/chat", {}, server === production ? productionOrigin : undefined);
     const rejected = expectSocketEvent(socket, "connect_error");
     socket.connect();
     await rejected;
   }
-  const { socket } = connectMailSocket(t, production.origin, token, "/chat");
+  const { socket } = connectMailSocket(t, production.origin, token, "/chat", {}, productionOrigin);
   const connected = expectSocketEvent(socket, "connect");
   socket.connect();
   await connected;
-  const { socket: peerSocket } = connectMailSocket(t, production.origin, peer.sessionToken, "/chat");
+  const { socket: peerSocket } = connectMailSocket(t, production.origin, peer.sessionToken, "/chat", {}, productionOrigin);
   const peerConnected = expectSocketEvent(peerSocket, "connect");
   peerSocket.connect();
   await peerConnected;
@@ -667,34 +672,86 @@ test("Production runs existing account routes with separate data and sessions", 
   } });
   assert.equal(mail.status, 201);
   assert.equal((await production.request("/api/emails", { token: peer.sessionToken })).body.emails[0].subject, "Production mail");
-  for (const path of ["/api/pi-testnet/subscription/plan", "/api/subscriptions/status", "/api/emails/external", "/api/calls/pstn/prepare"]) {
-    assert.equal((await production.request(path, { token })).status, 404);
+  for (const [method, path] of [["GET", "/api/pi-testnet/subscription/plan"], ["GET", "/api/subscriptions/status"],
+    ["POST", "/api/emails/external"], ["POST", "/api/emails/external/inbound"], ["POST", "/api/calls/pstn/prepare"], ["POST", "/api/call-test/login"]]) {
+    assert.equal((await production.request(path, { token, method })).status, 404);
   }
-  await rejectMailSocket(t, production.origin, testnet.sessionToken, "/calls");
-  const [caller, receiver] = (await Promise.all([token, peer.sessionToken].map(value =>
-    openMailSocket(t, production.origin, value, "/calls")))).map(value => value.socket);
+  for (const [session, origin] of [[testnet.sessionToken, productionOrigin], [token, "https://testnet.example"]]) {
+    const { socket: rejected } = connectMailSocket(t, production.origin, session, "/calls", { verifiedCallProtocol: 1 }, origin);
+    const error = expectSocketEvent(rejected, "connect_error");
+    rejected.connect();
+    await error;
+  }
+  const { socket: caller } = await openMailSocket(t, production.origin, token, "/calls", { verifiedCallProtocol: 1 }, productionOrigin);
   assert.equal((await production.request("/api/calls/ice-servers", { token })).status, 200);
+  const old = (await openMailSocket(t, production.origin, peer.sessionToken, "/calls", {}, productionOrigin)).socket;
+  const oldRings = [];
+  old.on("call:incoming", (data) => oldRings.push(data));
+  const protocolRejected = expectSocketEvent(old, "call:error");
+  old.emit("call:initiate", { callId: randomBytes(16).toString("hex"), kind: "voice", to: "demo-reviewer" });
+  assert.equal((await protocolRejected).reason, "call-update-required");
+  const newToOld = expectSocketEvent(caller, "call:error");
+  const update = expectSocketEvent(old, "call:update-required");
+  caller.emit("call:verified-initiate", { callId: randomBytes(16).toString("hex"), protocol: 1, kind: "voice", to: "demo-peer" });
+  assert.equal((await newToOld).reason, "call-update-required");
+  await update;
+  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 1 }, productionOrigin);
   const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
   receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
   assert.equal((await groupCallRejected).reason, "unavailable");
-  for (const kind of ["voice", "video"]) {
-    const callId = "production-call-" + kind;
-    const incoming = expectSocketEvent(receiver, "call:incoming");
-    caller.emit("call:initiate", { callId, kind, to: "demo-peer" });
-    assert.equal((await incoming).kind, kind);
-    const accepted = expectSocketEvent(caller, "call:accepted");
-    receiver.emit("call:accept", { callId });
-    await accepted;
-    const offerEvent = expectSocketEvent(receiver, "call:offer");
-    caller.emit("call:offer", { callId, offer: { type: "offer", sdp: "production fixture" } });
-    assert.equal((await offerEvent).offer.sdp, "production fixture");
-    const answered = expectSocketEvent(caller, "call:answered");
-    receiver.emit("call:answer", { callId, answer: { type: "answer", sdp: "production answer" } });
-    await answered;
-    const ended = expectSocketEvent(receiver, "call:ended");
-    caller.emit("call:end", { callId });
+  const identity = {};
+  const source = await readFile(new URL("../lib/connect/call-identity.ts", import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  new Function("exports", outputText)(identity);
+  const [callerKey, receiverKey, unknownKey] = await Promise.all(Array.from({ length: 3 }, () =>
+    crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])));
+  const callerPin = await identity.callSafetyCode(callerKey.publicKey);
+  const receiverPin = await identity.callSafetyCode(receiverKey.publicKey);
+  for (const [kind, untrusted] of [["voice", false], ["video", false], ["voice", true]]) {
+    const [from, to, fromKey, toKey, fromPin, toPin, fromName, toName] = kind === "video"
+      ? [receiver, caller, receiverKey, callerKey, receiverPin, callerPin, "demo-peer", "demo-reviewer"]
+      : [caller, receiver, callerKey, receiverKey, callerPin, receiverPin, "demo-reviewer", "demo-peer"];
+    const callId = randomBytes(16).toString("hex");
+    const challenge = randomBytes(16).toString("hex");
+    const binding = { callId, challenge, kind, caller: fromName, recipient: toName };
+    const incoming = expectSocketEvent(to, "call:incoming");
+    const initiated = expectSocketEvent(from, "call:initiated");
+    from.emit("call:verified-initiate", { callId, protocol: 1, kind, to: toName });
+    assert.deepEqual(await initiated, { callId, protocol: 1 });
+    assert.deepEqual(await incoming, { callId, protocol: 1, kind, from: fromName });
+    if (to === receiver) {
+      const denied = expectSocketEvent(old, "call:error");
+      old.emit("call:accept", { callId, challenge });
+      assert.equal((await denied).reason, "verification-failed");
+    }
+    const accepted = expectSocketEvent(from, "call:accepted");
+    to.emit("call:accept", { callId, challenge });
+    assert.deepEqual(await accepted, { callId, challenge });
+    const offer = await identity.signCallDescription(untrusted ? unknownKey : fromKey, binding, "offer", "production fixture");
+    const offered = expectSocketEvent(to, "call:offer");
+    from.emit("call:offer", { callId, offer });
+    const delivered = (await offered).offer;
+    assert.deepEqual(delivered, offer);
+    if (untrusted) {
+      await assert.rejects(identity.verifyCallDescription(delivered, binding, "offer", fromPin), /identity verification failed/);
+    } else {
+      assert.equal((await identity.verifyCallDescription(delivered, binding, "offer", fromPin)).sdp, offer.sdp);
+      const answer = await identity.signCallDescription(toKey, binding, "answer", "production answer");
+      const answered = expectSocketEvent(from, "call:answered");
+      to.emit("call:answer", { callId, answer });
+      assert.equal((await identity.verifyCallDescription((await answered).answer, binding, "answer", toPin)).sdp, answer.sdp);
+      const connected = [from, to].map(socket => expectSocketEvent(socket, "call:connected"));
+      from.emit("call:connected", { callId });
+      to.emit("call:connected", { callId });
+      await Promise.all(connected);
+    }
+    const ended = expectSocketEvent(from, "call:ended");
+    to.emit("call:end", { callId });
     await ended;
   }
+  assert.deepEqual(oldRings, []);
   const challenge = await production.request("/api/account/deletion/challenge", { token, method: "POST", body: {} });
   assert.equal(challenge.status, 201);
   const payload = { confirmationToken: challenge.body.confirmationToken, confirm: true };
@@ -976,13 +1033,14 @@ test("real HTTP email routes preserve legacy behavior with the flag disabled", a
   assert.equal((await webhook(scopedReplyToken, "scoped-disabled")).status, 406);
 });
 
-function connectMailSocket(t, origin, sessionToken, namespace = "/email", auth = {}) {
+function connectMailSocket(t, origin, sessionToken, namespace = "/email", auth = {}, frontendOrigin) {
   const socket = connectSocket(origin + namespace, {
     transports: ["websocket"],
     forceNew: true,
     reconnection: false,
     autoConnect: false,
     auth: { sessionToken, ...auth },
+    ...(frontendOrigin && { extraHeaders: { Origin: frontendOrigin } }),
   });
   const messages = [];
   socket.onAny((event, payload) => {
@@ -996,8 +1054,8 @@ function expectSocketEvent(socket, event) {
   return once(socket, event, { signal: AbortSignal.timeout(5000) }).then(([payload]) => payload);
 }
 
-async function openMailSocket(t, origin, sessionToken, namespace, auth) {
-  const client = connectMailSocket(t, origin, sessionToken, namespace, auth);
+async function openMailSocket(t, origin, sessionToken, namespace, auth, frontendOrigin) {
+  const client = connectMailSocket(t, origin, sessionToken, namespace, auth, frontendOrigin);
   const connected = expectSocketEvent(client.socket, "connect");
   client.socket.connect();
   await connected;
@@ -2620,7 +2678,7 @@ test("PSTN mock callbacks and service quotas stay tied to the original account a
   assert.equal((await usage.findOne({ _id: nextKey })).count, 1);
 });
 
-test("disabled account calls retain legacy signals and mock PSTN preparation", { timeout: 30000 }, async (t) => {
+test("the ordinary server supports verified calls and preserves mock PSTN preparation", { timeout: 30000 }, async (t) => {
   const { request, login, origin } = await startEmailTestServer(t, false, {
     PSTN_ENABLED: "true", PSTN_ALLOWED_USERS: "phone-b", TWILIO_ACCOUNT_SID: "AC" + "1".repeat(32),
     TWILIO_API_KEY_SID: "SK" + "2".repeat(32), TWILIO_API_KEY_SECRET: "fixture-only",
@@ -2631,14 +2689,16 @@ test("disabled account calls retain legacy signals and mock PSTN preparation", {
   for (const suffix of ["challenge", "confirm"]) {
     assert.equal((await request("/api/account/deletion/" + suffix, { token: a.sessionToken, method: "POST", body: {} })).status, 404);
   }
+  assert.equal((await request("/api/call-test/login", { method: "POST", body: {} })).status, 404);
   const [left, right] = (await Promise.all([a, b].map(({ sessionToken }) =>
-    openMailSocket(t, origin, sessionToken, "/")))).map(({ socket }) => socket);
+    openMailSocket(t, origin, sessionToken, "/", { verifiedCallProtocol: 1 })))).map(({ socket }) => socket);
   assert.equal((await rejectMailSocket(t, origin, a.sessionToken, "/calls")).message, "Invalid namespace");
+  const callId = "verified-call-fixture";
   const incoming = expectSocketEvent(right, "call:incoming");
-  left.emit("call:initiate", { callId: "legacy-call-fixture", to: "phone-b", kind: "voice" });
-  assert.equal((await incoming).from, "call-a");
+  left.emit("call:verified-initiate", { callId, to: "phone-b", kind: "voice", protocol: 1 });
+  assert.deepEqual(await incoming, { callId, from: "call-a", kind: "voice", protocol: 1 });
   const ending = expectSocketEvent(right, "call:ended");
-  left.emit("call:end", { callId: "legacy-call-fixture" });
+  left.emit("call:end", { callId });
   await ending;
   const prepare = await request("/api/calls/pstn/prepare", {
     token: b.sessionToken, method: "POST", body: { requestId: "legacy-phone-fixture", phone: "+33123456789" },

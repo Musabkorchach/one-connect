@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CallSession, type PeerCallTransport } from "@/lib/connect/call-session";
+import { normalizeCallName } from "@/lib/connect/call-identity";
 import { useConnect } from "@/contexts/connect-context";
-import { getSocket, getCallConfiguration, onCallEvent, sendCallEvent } from "@/lib/api-client";
+import { getSocket, getCallConfiguration, onCallEvent, sendCallEvent, VERIFIED_CALL_PROTOCOL } from "@/lib/api-client";
+
+const updateMessage = "Verified calling requires the latest One Connect version on both devices. Reload or update the app, then try again.";
 
 export interface CallDetails {
   callId: string;
@@ -74,6 +77,7 @@ export function usePeerCallController(
 
     const session = new CallSession({
       ...details,
+      ownUsername: normalizeCallName(connectRef.current.profile.username),
       configuration,
       transport,
       onLocalStream: (stream) => {
@@ -84,6 +88,9 @@ export function usePeerCallController(
       },
       onConnecting: () => {
         updateState({ phase: "connecting" });
+      },
+      onRinging: () => {
+        updateState({ phase: "ringing" });
       },
       onConnected: () => {
         const current = sessionRef.current;
@@ -123,6 +130,10 @@ export function usePeerCallController(
           declined: "Call declined.",
           "connection-timeout": "The call connection timed out.",
           "connection-failed": "Unable to connect the call.",
+          "verification-failed": "Call verification failed. Compare safety codes in your profile using a separate trusted channel.",
+          "call-update-required": updateMessage,
+          "call-storage-unavailable": "Call key storage is blocked or unavailable. Allow site storage or close other One Connect tabs, then retry.",
+          "call-device-missing": "This device has no call key. Create one in your profile and verify its new code before retrying.",
           disconnected: "The call ended because the connection was lost.",
           "media-error": "Unable to access the microphone or camera. Check permissions.",
         };
@@ -171,7 +182,10 @@ export function usePeerCallController(
   createSessionRef.current = createSession;
 
   useEffect(() => {
-    return transport.on("call:incoming", (data) => {
+    const stopUpdate = transport.on("call:update-required", () => {
+      connectRef.current.pushToast(updateMessage, "error");
+    });
+    const stopIncoming = transport.on("call:incoming", (data) => {
       if (
         !data ||
         typeof data.callId !== "string" ||
@@ -187,6 +201,11 @@ export function usePeerCallController(
       if (existing?.details.callId === data.callId) return;
 
       const current = connectRef.current;
+      if (data.protocol !== VERIFIED_CALL_PROTOCOL) {
+        current.pushToast(updateMessage, "error");
+        sendCallEvent("call:end", { callId: data.callId });
+        return;
+      }
 
       if (
         existing ||
@@ -211,6 +230,7 @@ export function usePeerCallController(
         direction: "incoming",
       });
     });
+    return () => { stopUpdate(); stopIncoming(); };
   }, [transport]);
 
     const acceptCall = (): void => {
@@ -280,18 +300,9 @@ export function usePeerCallController(
 
     if (!session) return;
 
-    void session.start().then(
-      () => {
-        setCallState((current) =>
-          current?.callId === callId && current.phase === "preparing"
-            ? { ...current, phase: "ringing" }
-            : current,
-        );
-      },
-      () => {
-        // CallSession has already ended and released its media.
-      },
-    );
+    void session.start().catch(() => {
+      // CallSession has already ended and released its media.
+    });
   };
 
     const setMuted = (muted: boolean): void => {

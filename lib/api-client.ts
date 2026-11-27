@@ -1,32 +1,43 @@
 import io from "socket.io-client";
 import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
+import type { SignedCallDescription } from "@/lib/connect/call-identity";
 
-export const API_URL =
+const callTestMode = process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1";
+export const callIntegrationMode = process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
+export const callTestBuildId = process.env.NEXT_PUBLIC_CALL_TEST_BUILD_ID;
+export const API_URL = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_API_URL! :
+  process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_API_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_API_URL! :
   process.env.NEXT_PUBLIC_ONECONNECT_API_URL ||
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
-export const WS_URL =
+export const WS_URL = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_WS_URL! :
+  process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_WS_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_WS_URL! :
   process.env.NEXT_PUBLIC_ONECONNECT_WS_URL ||
   process.env.REACT_APP_WS_URL ||
   "https://one-connect.onrender.com";
 
 let socket: ReturnType<typeof io> | null = null;
+export const VERIFIED_CALL_PROTOCOL = 1;
 export interface CallEventMap {
   "call:incoming": {
     callId: string;
     from: string;
     kind: "voice" | "video";
+    protocol: number;
   };
-  "call:initiated": { callId: string };
-  "call:accepted": { callId: string };
+  "call:initiated": { callId: string; protocol: number };
+  "call:update-required": { reason: "call-update-required" };
+  "call:accepted": { callId: string; challenge: string };
   "call:offer": {
     callId: string;
-    offer: RTCSessionDescriptionInit;
+    offer: SignedCallDescription;
   };
   "call:answered": {
     callId: string;
-    answer: RTCSessionDescriptionInit;
+    answer: SignedCallDescription;
   };
   "call:ice-candidate": {
     callId: string;
@@ -208,7 +219,8 @@ export function initSocket(userId: string, piUsername: string, sessionToken: str
 if (socket) disconnectSocket();
 
   socket = io(WS_URL, {
-  auth: { sessionToken },
+    auth: { sessionToken, verifiedCallProtocol: VERIFIED_CALL_PROTOCOL,
+      ...(callTestMode && { callTestBuild: callTestBuildId }) },
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
@@ -745,21 +757,23 @@ export async function getCallConfiguration(sessionToken?: string): Promise<RTCCo
 }
 
 export interface CallCommandMap {
-  "call:initiate": {
+  "call:verified-initiate": {
     callId: string;
     to: string;
     kind: "voice" | "video";
+    protocol: number;
   };
   "call:accept": {
     callId: string;
+    challenge: string;
   };
   "call:offer": {
     callId: string;
-    offer: RTCSessionDescriptionInit;
+    offer: SignedCallDescription;
   };
   "call:answer": {
     callId: string;
-    answer: RTCSessionDescriptionInit;
+    answer: SignedCallDescription;
   };
   "call:ice-candidate": {
     callId: string;

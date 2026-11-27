@@ -12,7 +12,7 @@ import React, {
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { LANGUAGES, type LangId } from "@/lib/connect/data";
 import { buildPiSdk, createSdk } from "@/lib/pi";
-import { verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
+import { callIntegrationMode, verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
 import type {
   SDKLiteInstance,
 } from "@/lib/sdklite-types";
@@ -330,7 +330,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // When running inside App Studio's restore-preview iframe, SDKLite.login()
       // cannot complete outside the Pi CDN wrapper and would hang indefinitely.
       const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
-      const parentCredentials = production ? null : await requestParentCredentials(signal);
+      const parentCredentials = production || callIntegrationMode ? null : await requestParentCredentials(signal);
       if (signal.aborted) return;
       if (parentCredentials) {
         const authResult = await verifyPiAuth(
@@ -404,7 +404,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       if (signal.aborted) return;
       setPiSdkReady(true);
       let sdkLite: SDKLiteInstance | null = null;
-      if (!production) {
+      if (!production && !callIntegrationMode) {
         setAuthMessage("Loading SDKLite...");
         await loadSDKLite();
         if (signal.aborted) return;
@@ -418,7 +418,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // the SDKLiteInstance surface so nothing downstream changes.
       setAuthMessage("Logging in...");
       const pi = buildPiSdk();
-      await pi.auth.login(production ? ["username"] : undefined, signal);
+      await pi.auth.login(production || callIntegrationMode ? ["username"] : undefined, signal);
       const renderSession = pi.auth.getRenderSession();
       if (signal.aborted) {
         if (renderSession) revokeOneConnectSession(renderSession.sessionToken);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, Button, TextInput, cx } from "./ui";
 import { Sheet } from "./feedback";
@@ -18,6 +19,7 @@ import { LANGUAGES, fileToAvatar, type LangId, type UserStatus } from "@/lib/con
 import { IconLogout } from "./icons";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { AccountSubscriptionStatus } from "./account-subscription-status";
+import { CallSafetySettings } from "./call-safety-settings";
 
 export function ProfileView() {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
@@ -140,6 +142,13 @@ export function ProfileView() {
 
       {/* logout */}
       <div className="mt-4 px-4 pb-4">
+        <div className="mb-4">
+          <CallSafetySettings key={profile.username} username={profile.username} />
+        </div>
+        <div className="mb-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm">
+          <Link href="/privacy" className="text-accent underline underline-offset-4">{t.privacyPolicy}</Link>
+          <Link href="/terms" className="text-accent underline underline-offset-4">{t.termsOfUse}</Link>
+        </div>
         <Button variant="outline" className="w-full py-3 text-destructive border-destructive/50 hover:bg-destructive/10" onClick={logout}>
           <IconLogout className="h-4 w-4" />
           {t.logout || "Logout"}

@@ -13,6 +13,10 @@ function getDevice(): DeviceConstructor | undefined {
 }
 
 export function loadTwilioVoice(): Promise<DeviceConstructor> {
+  if (process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ||
+      process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") {
+    return Promise.reject(new Error("Phone calling is disabled in this build."));
+  }
   if (typeof window === "undefined") {
     return Promise.reject(
       new Error("Phone calling requires Pi Browser."),

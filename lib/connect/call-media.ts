@@ -54,6 +54,9 @@ export function createCallPeer(
     onCandidate: (candidate: RTCIceCandidateInit) => void;
     onConnectionState: (state: RTCPeerConnectionState) => void;
   },
+  prepareTracks: (peer: RTCPeerConnection, stream: MediaStream) => void = (peer, stream) => {
+    for (const track of stream.getTracks()) peer.addTrack(track, stream);
+  },
 ): RTCPeerConnection {
   const peer = new RTCPeerConnection(configuration);
   const remoteStream = new MediaStream();
@@ -77,9 +80,7 @@ export function createCallPeer(
   };
 
   try {
-    for (const track of stream.getTracks()) {
-      peer.addTrack(track, stream);
-    }
+    prepareTracks(peer, stream);
   } catch (error) {
     peer.close();
     throw error;

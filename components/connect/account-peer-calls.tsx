@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { io } from "socket.io-client";
-import { getCallConfiguration, WS_URL, type CallEventMap } from "@/lib/api-client";
+import { getCallConfiguration, VERIFIED_CALL_PROTOCOL, WS_URL, type CallEventMap } from "@/lib/api-client";
 import type { PeerCallTransport } from "@/lib/connect/call-session";
 import { usePeerCallController } from "@/lib/connect/use-call-controller";
 import { LivePeerCallScreen } from "@/lib/connect/live-call-screen";
@@ -17,7 +17,7 @@ export function AccountPeerCalls({ sessionToken, username, children }: {
 }) {
   const [notice, setNotice] = useState("");
   const socket = useMemo(() => io(WS_URL + "/calls", {
-    autoConnect: false, forceNew: true, auth: { sessionToken },
+    autoConnect: false, forceNew: true, auth: { sessionToken, verifiedCallProtocol: VERIFIED_CALL_PROTOCOL },
   }), [sessionToken]);
   const transport = useMemo<PeerCallTransport>(() => ({
     on(event, listener) {

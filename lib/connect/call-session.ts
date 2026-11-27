@@ -2,6 +2,7 @@ import {
   getCallConfiguration,
   onCallEvent,
   sendCallEvent,
+  VERIFIED_CALL_PROTOCOL,
 } from "@/lib/api-client";
 import {
   openCallMedia,
@@ -10,6 +11,17 @@ import {
   createCallPeer,
   createRemoteSignalQueue,
 } from "./call-media";
+import {
+  getCallDevice,
+  CallKeyError,
+  getCallPin,
+  newCallChallenge,
+  signCallDescription,
+  verifyCallDescription,
+  type CallBinding,
+  type SignedCallDescription,
+} from "./call-identity";
+import { readIceStatistics } from "./call-ice-statistics";
 
 export interface PeerCallTransport {
   on: typeof onCallEvent;
@@ -22,12 +34,15 @@ export interface CallSessionOptions {
   transport?: PeerCallTransport;
   callId: string;
   username: string;
+  ownUsername: string;
   kind: "voice" | "video";
   direction: "incoming" | "outgoing";
   configuration: RTCConfiguration;
+  relayOnly?: boolean;
   onLocalStream: (stream: MediaStream) => void;
   onRemoteStream: (stream: MediaStream) => void;
   onConnecting: () => void;
+  onRinging: () => void;
   onConnected: () => void;
   onEnd: (reason: string) => void;
 }
@@ -39,7 +54,17 @@ export class CallSession {
   private cameraFacingMode: "user" | "environment" = "user";
   private cameraSwitching = false;
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private protocolTimer: ReturnType<typeof setTimeout> | null = null;
+  private protocolConfirmed = false;
   private negotiated = false;
+  private challenge = "";
+  private device: CryptoKeyPair | null = null;
+  private pin: string | null = null;
+  private descriptionReceived = false;
+  private openingMedia = false;
+  private mediaReady = false;
+  private pendingRemoteStream: MediaStream | null = null;
+  private pendingSenders: { sender: RTCRtpSender; track: MediaStreamTrack }[] = [];
   private localStream: MediaStream | null = null;
   private peer: RTCPeerConnection | null = null;
   private signals: ReturnType<typeof createRemoteSignalQueue> | null = null;
@@ -50,6 +75,17 @@ export class CallSession {
       on: onCallEvent, send: sendCallEvent, configuration: getCallConfiguration,
     };
     this.listeners.push(
+      this.transport.on("call:initiated", (data) => {
+        if (this.ended || !this.protocolTimer || data?.callId !== this.options.callId) return;
+        clearTimeout(this.protocolTimer);
+        this.protocolTimer = null;
+        if (data.protocol !== VERIFIED_CALL_PROTOCOL) {
+          this.end("call-update-required");
+          return;
+        }
+        this.protocolConfirmed = true;
+        this.options.onRinging();
+      }),
       this.transport.on("call:accepted", (data) => {
         if (
           data?.callId !== this.options.callId ||
@@ -62,7 +98,16 @@ export class CallSession {
         this.options.onConnecting();
 
         if (this.options.direction === "outgoing") {
-          void this.sendOffer().catch(() => {
+          if (!this.protocolConfirmed) {
+            this.end("call-update-required");
+            return;
+          }
+          if (this.challenge || typeof data.challenge !== "string" || !/^[a-f0-9]{32}$/.test(data.challenge)) {
+            this.end("verification-failed");
+            return;
+          }
+          this.challenge = data.challenge;
+          void this.prepareOutgoing().catch(() => {
             this.end("connection-failed");
           });
         }
@@ -77,7 +122,7 @@ export class CallSession {
         }
 
         void this.receiveOffer(data.offer).catch(() => {
-          this.end("connection-failed");
+          this.end("verification-failed");
         });
       }),
 
@@ -91,7 +136,7 @@ export class CallSession {
         }
 
         void this.receiveAnswer(data.answer).catch(() => {
-          this.end("connection-failed");
+          this.end("verification-failed");
         });
       }),
 
@@ -131,7 +176,7 @@ export class CallSession {
         if (
           data?.callId !== this.options.callId ||
           this.ended ||
-          !this.negotiated ||
+          !this.mediaReady ||
           this.peer?.connectionState !== "connected"
         ) {
           return;
@@ -142,9 +187,42 @@ export class CallSession {
     );
   }
 
+  private async prepareOutgoing() {
+    const configuration = await this.transport.configuration();
+    if (this.ended) return;
+    await this.prepare(this.withRelayPolicy(configuration));
+    if (!this.ended) await this.sendOffer();
+  }
+
+  private withRelayPolicy(configuration: RTCConfiguration): RTCConfiguration {
+    return this.options.relayOnly ? { ...configuration, iceTransportPolicy: "relay" } : configuration;
+  }
+
+  async selectedIcePair() {
+    const peer = this.peer;
+    if (!peer || this.ended) return null;
+    const stats = await readIceStatistics(peer);
+    return this.ended || this.peer !== peer ? null : stats;
+  }
+
+  private binding(): CallBinding {
+    const { callId, ownUsername, username, direction, kind } = this.options;
+    return {
+      callId, challenge: this.challenge, kind,
+      caller: direction === "outgoing" ? ownUsername : username,
+      recipient: direction === "outgoing" ? username : ownUsername,
+    };
+  }
+
+  private async verify(description: SignedCallDescription, type: "offer" | "answer") {
+    if (this.descriptionReceived || !this.pin) throw new Error("Unexpected call description.");
+    this.descriptionReceived = true;
+    return verifyCallDescription(description, this.binding(), type, this.pin);
+  }
+
     private async sendOffer(): Promise<void> {
     const peer = this.peer;
-    if (!peer || this.ended) return;
+    if (!peer || !this.device || this.ended) return;
 
     const offer = await peer.createOffer();
     if (this.ended) return;
@@ -152,40 +230,40 @@ export class CallSession {
     await peer.setLocalDescription(offer);
     if (this.ended) return;
 
-    const sent = this.transport.send("call:offer", {
-      callId: this.options.callId,
-      offer: {
-        type: "offer",
-        sdp: peer.localDescription?.sdp ?? offer.sdp,
-      },
-    });
+    const signed = await signCallDescription(this.device, this.binding(), "offer", peer.localDescription?.sdp ?? "");
+    if (this.ended) return;
+    const sent = this.transport.send("call:offer", { callId: this.options.callId, offer: signed });
 
     if (!sent) this.end("disconnected", false);
   }
 
     private async receiveOffer(
-    offer: RTCSessionDescriptionInit,
+    offer: SignedCallDescription,
   ): Promise<void> {
     const peer = this.peer;
     const signals = this.signals;
-    if (!peer || !signals || this.ended) return;
+    if (!peer || !signals || !this.device || this.ended) return;
 
-    await signals.setDescription(offer);
+    const verifiedOffer = await this.verify(offer, "offer");
+    if (this.ended) return;
+    await signals.setDescription(verifiedOffer);
     if (this.ended) return;
 
+    this.pendingSenders = (this.localStream?.getTracks() ?? []).map((track) => {
+      const transceiver = peer.getTransceivers().find(({ receiver }) => receiver.track.kind === track.kind);
+      if (!transceiver) throw new Error("Required media was not offered.");
+      transceiver.direction = "sendrecv";
+      return { track, sender: transceiver.sender };
+    });
     const answer = await peer.createAnswer();
     if (this.ended) return;
 
     await peer.setLocalDescription(answer);
     if (this.ended) return;
 
-    const sent = this.transport.send("call:answer", {
-      callId: this.options.callId,
-      answer: {
-        type: "answer",
-        sdp: peer.localDescription?.sdp ?? answer.sdp,
-      },
-    });
+    const signed = await signCallDescription(this.device, this.binding(), "answer", peer.localDescription?.sdp ?? "");
+    if (this.ended) return;
+    const sent = this.transport.send("call:answer", { callId: this.options.callId, answer: signed });
 
     if (!sent) {
       this.end("disconnected", false);
@@ -197,12 +275,14 @@ export class CallSession {
   }
 
     private async receiveAnswer(
-    answer: RTCSessionDescriptionInit,
+    answer: SignedCallDescription,
   ): Promise<void> {
     const signals = this.signals;
     if (!signals || this.ended) return;
 
-    await signals.setDescription(answer);
+    const verifiedAnswer = await this.verify(answer, "answer");
+    if (this.ended) return;
+    await signals.setDescription(verifiedAnswer);
     if (this.ended) return;
 
     this.negotiated = true;
@@ -211,46 +291,68 @@ export class CallSession {
 
   private reportConnected(): void {
     if (
-      !this.ended &&
-      this.negotiated &&
-      this.peer?.connectionState === "connected"
+      this.ended || this.openingMedia || !this.negotiated ||
+      this.peer?.connectionState !== "connected"
     ) {
-      this.transport.send("call:connected", {
-        callId: this.options.callId,
-      });
+      return;
     }
+    this.openingMedia = true;
+    void this.publishMedia().catch(() => this.end("verification-failed"));
+  }
+
+  private async publishMedia() {
+    if (getCallPin(this.options.ownUsername, this.options.username) !== this.pin) {
+      throw new Error("Call trust changed during negotiation.");
+    }
+    await Promise.all(this.pendingSenders.map(({ sender, track }) => sender.replaceTrack(track)));
+    if (this.ended) return;
+    this.mediaReady = true;
+    if (this.pendingRemoteStream) this.options.onRemoteStream(this.pendingRemoteStream);
+    if (!this.transport.send("call:connected", { callId: this.options.callId })) this.end("disconnected", false);
   }
 
   async start(): Promise<void> {
     if (this.started || this.ended) return;
     this.started = true;
 
-    let failureReason = "configuration-error";
+    let failureReason = "verification-failed";
 
     try {
+      try {
+        this.pin = getCallPin(this.options.ownUsername, this.options.username);
+      } catch {
+        throw new CallKeyError("call-storage-unavailable");
+      }
+      if (!this.pin) throw new Error("Verify the peer safety code before calling.");
+      this.device = await getCallDevice(this.options.ownUsername);
+      if (this.ended) return;
+      if (this.options.direction === "outgoing") {
+        this.protocolTimer = setTimeout(() => this.end("call-update-required"), 5000);
+        if (!this.transport.send("call:verified-initiate", {
+          callId: this.options.callId, to: this.options.username, kind: this.options.kind,
+          protocol: VERIFIED_CALL_PROTOCOL,
+        })) this.end("disconnected", false);
+        return;
+      }
+      this.challenge = newCallChallenge();
+      failureReason = "configuration-error";
       const configuration = await this.transport.configuration();
       if (this.ended) return;
 
       failureReason = "media-error";
-      await this.prepare(configuration);
+      await this.prepare(this.withRelayPolicy(configuration));
       if (this.ended) return;
 
-      const sent =
-        this.options.direction === "outgoing"
-          ? this.transport.send("call:initiate", {
-              callId: this.options.callId,
-              to: this.options.username,
-              kind: this.options.kind,
-            })
-          : this.transport.send("call:accept", {
-              callId: this.options.callId,
-            });
+      const sent = this.transport.send("call:accept", {
+        callId: this.options.callId,
+        challenge: this.challenge,
+      });
 
       if (!sent) {
         this.end("disconnected", false);
       }
     } catch (error) {
-      this.end(failureReason);
+      this.end(error instanceof CallKeyError ? error.reason : failureReason);
       throw error;
     }
   }
@@ -273,7 +375,9 @@ export class CallSession {
     try {
         this.peer = createCallPeer(stream, configuration, {
         onRemoteStream: (remoteStream) => {
-          if (!this.ended) this.options.onRemoteStream(remoteStream);
+          if (this.ended) return;
+          this.pendingRemoteStream = remoteStream;
+          if (this.mediaReady) this.options.onRemoteStream(remoteStream);
         },
         onCandidate: (candidate) => {
           if (this.ended) return;
@@ -302,6 +406,14 @@ export class CallSession {
           if (state === "connected") this.reportConnected();
           if (state === "failed") this.end("connection-failed");
         },
+      }, (peer, stream) => {
+        // Reserve send/receive sections without attaching microphone or camera tracks.
+        if (this.options.direction === "outgoing") {
+          this.pendingSenders = stream.getTracks().map((track) => ({
+            track,
+            sender: peer.addTransceiver(track.kind, { direction: "sendrecv" }).sender,
+          }));
+        }
       });
 
       this.signals = createRemoteSignalQueue(this.peer);
@@ -416,6 +528,8 @@ export class CallSession {
   end(reason = "ended", notifyPeer = true): void {
     if (this.ended) return;
     this.ended = true;
+    if (this.protocolTimer !== null) clearTimeout(this.protocolTimer);
+    this.protocolTimer = null;
 
     if (this.disconnectTimer !== null) {
       clearTimeout(this.disconnectTimer);
@@ -428,6 +542,9 @@ export class CallSession {
     this.peer?.close();
     this.peer = null;
     this.signals = null;
+    this.pendingSenders = [];
+    this.pendingRemoteStream = null;
+    this.device = null;
 
     stopCallMedia(this.localStream);
     this.localStream = null;

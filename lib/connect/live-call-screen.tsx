@@ -123,6 +123,7 @@ export function LivePeerCallScreen({
         <p className="mt-2 text-xs text-white/70">
           {call.kind === "video" ? t.videoCall : t.voiceCall}
         </p>
+        {call.phase === "active" && <p className="mt-1 text-xs text-white">Peer device verified</p>}
       </div>
 
       <div className="pc-safe-bottom relative z-[5] px-6 pb-8">
