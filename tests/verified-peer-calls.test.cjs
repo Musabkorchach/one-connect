@@ -7,7 +7,7 @@ const ts = require("typescript");
 
 function load(file, dependencies = {}) {
   const { outputText } = ts.transpileModule(readFileSync(join(__dirname, "..", file), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   });
   const exports = {};
   new Function("require", "exports", outputText)((name) => {
@@ -23,6 +23,69 @@ const binding = {
 };
 const sdp = "v=0\r\na=fingerprint:sha-256 AA:BB\r\n";
 const keyPair = () => crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+
+test("test safety settings distinguish self, code and storage failures and save either hyphenated peer", () => {
+  const stored = new Map();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let blocked = false;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key) => stored.get(key) ?? null,
+    setItem(key, value) {
+      if (blocked) throw new DOMException("Site storage blocked", "SecurityError");
+      stored.set(key, value);
+    },
+  } });
+  const element = (type, props) => ({ type, props });
+  function find(node, predicate) {
+    if (!node || typeof node !== "object") return undefined;
+    if (predicate(node)) return node;
+    for (const child of [node.props?.children].flat()) {
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+  }
+  function submit(username, testPeer, enteredPeer, code, confirmed = true) {
+    const state = ["", enteredPeer, code, confirmed, "", false, false];
+    let index = 0;
+    const { CallSafetySettings } = load("components/connect/call-safety-settings.tsx", {
+      react: { useState: () => {
+        const slot = index++;
+        return [state[slot], (value) => { state[slot] = value; }];
+      } },
+      "react/jsx-runtime": { jsx: element, jsxs: element },
+      "@/lib/connect/call-identity": identity,
+    });
+    const tree = CallSafetySettings({ username, testPeer });
+    const input = find(tree, (node) => node.type === "input");
+    if (testPeer !== undefined) {
+      assert.equal(input.props.value, testPeer);
+      assert.equal(input.props.readOnly, true);
+    }
+    find(tree, (node) => node.type === "form").props.onSubmit({ preventDefault() {} });
+    return state[4];
+  }
+  try {
+    const code = "ab".repeat(32);
+    assert.equal(identity.validCallName("calltest-a"), true);
+    assert.equal(identity.validCallName("calltest-b"), true);
+    assert.match(submit("calltest-b", undefined, "calltest-b", code), /Enter a valid Pi username/);
+    assert.match(submit("calltest-b", "calltest-b", "", code), /Invalid test peer/);
+    assert.match(submit("calltest-b", "calltest-a", "", "ab"), /64-character/);
+    assert.match(submit("calltest-b", "calltest-a", "", "z".repeat(64)), /hexadecimal/);
+    assert.equal(submit("calltest-b", "calltest-a", "", code, false), "");
+    blocked = true;
+    assert.match(submit("calltest-b", "calltest-a", "", code), /browser storage/);
+    assert.equal(stored.size, 0);
+    blocked = false;
+    assert.match(submit("calltest-b", "calltest-a", "calltest-b", code), /saved for @calltest-a/);
+    assert.match(submit("calltest-a", "calltest-b", "", code), /saved for @calltest-b/);
+    assert.equal(identity.getCallPin("calltest-b", "calltest-a"), code);
+    assert.equal(identity.getCallPin("calltest-a", "calltest-b"), code);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+    else delete globalThis.localStorage;
+  }
+});
 
 test("peer proof binds exact SDP, call, recipient challenge, participants, role and media kind", async () => {
   const alice = await keyPair();

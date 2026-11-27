@@ -2,10 +2,10 @@
 
 import { useState, type FormEvent } from "react";
 import {
-  CallKeyError, callSafetyCode, getCallDevice, normalizeCallName, setCallPin,
+  CallKeyError, callSafetyCode, getCallDevice, normalizeCallName, setCallPin, validCallName, validSafetyCode,
 } from "@/lib/connect/call-identity";
 
-export function CallSafetySettings({ username }: { username: string }) {
+export function CallSafetySettings({ username, testPeer }: { username: string; testPeer?: string }) {
   const own = normalizeCallName(username);
   const [ownCode, setOwnCode] = useState("");
   const [peer, setPeer] = useState("");
@@ -36,14 +36,31 @@ export function CallSafetySettings({ username }: { username: string }) {
   function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!confirmed) return;
+    const name = normalizeCallName(testPeer ?? peer);
+    const safetyCode = code.trim().toLowerCase();
+    if (testPeer !== undefined) {
+      if (!validCallName(own) || !validCallName(name) || own === name) {
+        setMessage("Invalid test peer. Use the other test account for this device.");
+        return;
+      }
+      if (safetyCode.length !== 64) {
+        setMessage("Paste the other device’s full 64-character safety code.");
+        return;
+      }
+      if (!validSafetyCode(safetyCode)) {
+        setMessage("The safety code must contain only hexadecimal characters (0–9 and A–F).");
+        return;
+      }
+    }
     try {
-      const name = normalizeCallName(peer);
-      setCallPin(own, name, code.trim().toLowerCase());
+      setCallPin(own, name, safetyCode);
       setMessage(`Safety code saved for @${name} on this device.`);
       setCode("");
       setConfirmed(false);
     } catch {
-      setMessage("Enter a valid Pi username and the full 64-character safety code. Make sure browser storage is available.");
+      setMessage(testPeer !== undefined
+        ? "Could not save the safety code in browser storage. Allow site storage and retry."
+        : "Enter a valid Pi username and the full 64-character safety code. Make sure browser storage is available.");
     }
   }
 
@@ -62,12 +79,13 @@ export function CallSafetySettings({ username }: { username: string }) {
       {ownCode && <output className="block break-all select-all font-mono text-sm">{ownCode}</output>}
       <form className="space-y-3" onSubmit={save}>
         <label className="block text-sm">
-          Other person's Pi username
-          <input required dir="ltr" className="mt-1 w-full rounded border bg-background p-2" value={peer}
+          {testPeer === undefined ? "Other person's Pi username" : "Other test account"}
+          <input required dir="ltr" className="mt-1 w-full rounded border bg-background p-2"
+            value={testPeer ?? peer} readOnly={testPeer !== undefined}
             onChange={(event) => { setPeer(event.target.value); setConfirmed(false); }} />
         </label>
         <label className="block text-sm">
-          Their device safety code
+          {testPeer === undefined ? "Their device safety code" : `Device safety code from @${testPeer}`}
           <input required dir="ltr" className="mt-1 w-full rounded border bg-background p-2 font-mono" value={code}
             autoComplete="off" autoCapitalize="off" spellCheck={false}
             onChange={(event) => { setCode(event.target.value); setConfirmed(false); }} />

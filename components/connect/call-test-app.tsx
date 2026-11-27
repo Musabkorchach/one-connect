@@ -148,7 +148,7 @@ export function CallTestApp() {
         </form>
       ) : <>
         <p>{user} → {peer}</p>
-        <CallSafetySettings key={user} username={user} />
+        <CallSafetySettings key={user} username={user} testPeer={peer} />
         <label className="block"><input type="checkbox" checked={relayOnly} disabled={phase !== "Idle"}
           onChange={(event) => setRelayOnly(event.target.checked)} /> Force TURN relay</label>
         <div className="flex flex-wrap gap-2">
