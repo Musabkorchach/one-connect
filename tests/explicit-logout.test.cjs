@@ -589,6 +589,7 @@ test("home renders scoped email per session and retains the previous routes for 
     react: {},
     "@/components/connect/account-private-data-view": { AccountPrivateDataView: "private-data" },
     "@/components/connect/account-groups-view": { AccountGroupsView: "scoped-groups" },
+    "@/components/connect/account-peer-calls": { AccountPeerCalls: "scoped-peer-calls" },
     "@/components/connect/account-private-chat": { AccountPrivateChat: "scoped-chat" },
     "@/components/connect/account-emails-view": { AccountEmailsView: "scoped-email" },
     "@/components/connect/connect-app": { ConnectApp: "legacy-app" },

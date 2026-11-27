@@ -22,7 +22,7 @@ function ice(value) {
     ...(value.usernameFragment != null ? { usernameFragment: value.usernameFragment } : {}) };
 }
 
-export async function createAccountCalls({ app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername }) {
+export async function createAccountCalls({ app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, allowGroupCalls = true }) {
   const namespace = io.of("/calls");
   const live = new Map();
   const busy = new Map();
@@ -148,6 +148,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
     async function initiate(data, isGroup) {
       const errorEvent = isGroup ? "group-call:error" : "call:error";
       const reject = (reason) => socket.emit(errorEvent, { callId: data.callId, reason });
+      if (isGroup && !allowGroupCalls) return reject("unavailable");
       if (!validCallId(data.callId) || !["voice", "video"].includes(data.kind)) return reject("invalid");
       let members;
       let groupRecord;

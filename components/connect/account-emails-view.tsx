@@ -70,18 +70,24 @@ export function AccountEmailsView({ sessionToken, username }: { sessionToken: st
       <div className="space-y-2 p-4">
         <button type="button" className="underline" onClick={() => endLocalSession("en")}>Sign out</button>
         {connectionMessages[status] && <p role="status">{connectionMessages[status]}</p>}
-        {!terminal && <p>Older email history requires account migration.</p>}
+        {!terminal && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review" && (
+          <p>Older email history requires account migration.</p>
+        )}
         {!terminal && notice && <p role="status">{notice}</p>}
         {!terminal && loadFailed && <p role="status">Unable to refresh email.</p>}
         {!terminal && emails === null && !loadFailed && <p>Loading email…</p>}
       </div>
       {!terminal && emails !== null && <MailboxView mailbox={{
         t, lang: "en", emails, contacts: [],
+        internalOnly: process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review",
         pushToast: setNotice,
         sendEmail: (recipient, subject, body, _attachmentName, _attachmentSize, requestId, file) =>
           changeMailbox(async (canUseMailbox) => {
             const type = validateEmailRecipient(recipient);
             if (!type) throw new Error("Invalid email recipient.");
+            if (type === "external" && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") {
+              throw new Error("Only internal One Connect mail is enabled in this environment.");
+            }
             const attachment = file ? await uploadEmailAttachment(sessionToken, recipient, file) : null;
             if (!canUseMailbox()) return;
             const send = type === "external" ? sendExternalEmail : sendInternalEmail;
