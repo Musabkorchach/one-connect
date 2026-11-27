@@ -734,12 +734,13 @@ test("Production runs existing account routes with separate data and sessions", 
     const incoming = expectSocketEvent(to, "call:incoming");
     const initiated = expectSocketEvent(from, "call:initiated");
     from.emit("call:verified-initiate", { callId, protocol: 1, kind, to: toName });
-    assert.deepEqual(await initiated, { callId, protocol: 1 });
-    assert.deepEqual(await incoming, { callId, protocol: 1, kind, from: fromName });
+    const parties = { caller: fromName, recipient: toName };
+    assert.deepEqual(await initiated, { callId, protocol: 1, parties });
+    assert.deepEqual(await incoming, { callId, protocol: 1, parties, kind, from: fromName });
     if (to === receiver) {
       const denied = expectSocketEvent(old, "call:error");
       old.emit("call:accept", { callId, challenge });
-      assert.equal((await denied).reason, "verification-failed");
+      assert.equal((await denied).reason, "call-signature-invalid");
     }
     const accepted = expectSocketEvent(from, "call:accepted");
     to.emit("call:accept", { callId, challenge });
@@ -750,7 +751,7 @@ test("Production runs existing account routes with separate data and sessions", 
     const delivered = (await offered).offer;
     assert.deepEqual(delivered, offer);
     if (untrusted) {
-      await assert.rejects(identity.verifyCallDescription(delivered, binding, "offer", fromPin), /identity verification failed/);
+      await assert.rejects(identity.verifyCallDescription(delivered, binding, "offer", fromPin), { reason: "call-peer-key-mismatch" });
     } else {
       assert.equal((await identity.verifyCallDescription(delivered, binding, "offer", fromPin)).sdp, offer.sdp);
       const answer = await identity.signCallDescription(toKey, binding, "answer", "production answer");

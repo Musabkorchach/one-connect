@@ -87,7 +87,7 @@ test("test safety settings distinguish self, code and storage failures and save 
     const state = ["", enteredPeer, code, confirmed, "", false, false];
     let index = 0;
     const { CallSafetySettings } = load("components/connect/call-safety-settings.tsx", {
-      react: { useState: () => {
+      react: { useEffect() {}, useRef: () => ({ current: null }), useState: () => {
         const slot = index++;
         return [state[slot], (value) => { state[slot] = value; }];
       } },
@@ -108,7 +108,7 @@ test("test safety settings distinguish self, code and storage failures and save 
     assert.equal(identity.validCallName("calltest-a"), true);
     assert.equal(identity.validCallName("calltest-b"), true);
     assert.match(submit("calltest-b", undefined, "calltest-b", code), /Enter a valid Pi username/);
-    assert.match(submit("calltest-b", "calltest-b", "", code), /Invalid test peer/);
+    assert.match(submit("calltest-b", "calltest-b", "", code), /Enter a valid Pi username/);
     assert.match(submit("calltest-b", "calltest-a", "", "ab"), /64-character/);
     assert.match(submit("calltest-b", "calltest-a", "", "z".repeat(64)), /hexadecimal/);
     assert.equal(submit("calltest-b", "calltest-a", "", code, false), "");
@@ -248,7 +248,7 @@ test("caller sends no tracks and displays no verified state before checking the 
   fixture.emit("call:connected");
   assert.equal(fixture.state().connected, 1);
   fixture.emit("call:answered", { answer });
-  await waitFor(() => fixture.state().ended === "verification-failed");
+  await waitFor(() => fixture.state().ended === "call-signature-invalid");
   assert.equal(fixture.state().remoteDescriptions, 1);
 });
 
@@ -256,7 +256,8 @@ test("an unpaired call never captures media and a tampered answer never reaches 
   const unpaired = await callFixture({ paired: false });
   await assert.rejects(unpaired.session.start());
   assert.equal(unpaired.state().captures, 0);
-  assert.equal(unpaired.state().ended, "verification-failed");
+  assert.equal(unpaired.state().ended, "call-peer-untrusted");
+  assert.equal(unpaired.sent.some(({ name }) => name === "call:verified-initiate"), false);
 
   const fixture = await callFixture();
   await fixture.session.start();
@@ -265,9 +266,39 @@ test("an unpaired call never captures media and a tampered answer never reaches 
   await waitFor(() => fixture.sent.some(({ name }) => name === "call:offer"));
   const answer = await identity.signCallDescription(fixture.bob, binding, "answer", sdp);
   fixture.emit("call:answered", { answer: { ...answer, sdp: sdp + "tampered" } });
-  await waitFor(() => fixture.state().ended === "verification-failed");
+  await waitFor(() => fixture.state().ended === "call-signature-invalid");
   assert.equal(fixture.state().remoteDescriptions, 0);
   assert.equal(fixture.sender.track, null);
+});
+
+test("an invite acknowledgement for different authenticated parties stops before ringing or media", async () => {
+  const fixture = await callFixture();
+  await fixture.session.start();
+  fixture.emit("call:initiated", { protocol: 1, parties: { caller: "alice", recipient: "charlie" } });
+  assert.equal(fixture.state().ended, "call-identity-mismatch");
+  assert.equal(fixture.state().ringing, 0);
+  assert.equal(fixture.state().captures, 0);
+});
+
+test("saved peer trust can be read again and is scoped to account and peer", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  } });
+  try {
+    const code = "a".repeat(64);
+    const peer = identity.normalizeCallName(" @Amar201910 ");
+    assert.equal(identity.getCallPin("alice", peer), null);
+    identity.setCallPin("alice", peer, code);
+    assert.equal(load("lib/connect/call-identity.ts").getCallPin("alice", peer), code);
+    assert.equal(identity.getCallPin("bob", peer), null);
+    assert.equal(identity.getCallPin("alice", "bob"), null);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else delete globalThis.localStorage;
+  }
 });
 
 test("callee rejects an old offer for the same call ID before applying SDP or attaching tracks", async () => {
@@ -278,7 +309,7 @@ test("callee rejects an old offer for the same call ID before applying SDP or at
   assert.notEqual(challenge, binding.challenge);
   const oldOffer = await identity.signCallDescription(fixture.alice, binding, "offer", sdp);
   fixture.emit("call:offer", { offer: oldOffer });
-  await waitFor(() => fixture.state().ended === "verification-failed");
+  await waitFor(() => fixture.state().ended === "call-signature-invalid");
   assert.equal(fixture.state().remoteDescriptions, 0);
   assert.equal(fixture.sender.track, null);
   assert.equal(fixture.sent.some(({ name }) => name === "call:answer"), false);

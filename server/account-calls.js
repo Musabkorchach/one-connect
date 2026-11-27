@@ -160,6 +160,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       let members;
       let groupRecord;
       let invitedSockets;
+      let parties;
       if (isGroup) {
         if (!validGroupId(data.groupId)) return reject("invalid");
         groupRecord = await group(data.groupId);
@@ -180,6 +181,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
             return reject("call-update-required");
           }
           invitedSockets = new Set(compatible.map((recipient) => recipient.id));
+          parties = { caller: username, recipient: result[0].username };
         }
         members = [id, peer];
       }
@@ -201,7 +203,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       } catch (error) { await finish(call, "server-error"); throw error; }
       if ((await binding(id))?.state !== "active" || !here() || live.get(call.id) !== call) return finish(call, "account-unavailable");
       arm(call, 45000, "no-answer");
-      const peerEvent = { callId: call.id, ...(verified && { protocol: VERIFIED_CALL_PROTOCOL }) };
+      const peerEvent = { callId: call.id, ...(verified && { protocol: VERIFIED_CALL_PROTOCOL, parties }) };
       socket.emit(isGroup ? "group-call:started" : "call:initiated", isGroup ? payloadForGroup(call) : peerEvent);
       for (const target of members) {
         if (target === id || !await canSignal(call, target)) continue;
@@ -220,7 +222,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
           !await canSignal(call, call.callerId, false)) return socket.emit(errorEvent, { callId: data.callId, reason: "unavailable" });
       if (call.invitedSockets && (!call.invitedSockets.has(socket.id) ||
           typeof data.challenge !== "string" || !/^[a-f0-9]{32}$/.test(data.challenge))) {
-        return socket.emit(errorEvent, { callId: data.callId, reason: "verification-failed" });
+        return socket.emit(errorEvent, { callId: data.callId, reason: "call-signature-invalid" });
       }
       if (call.participants.has(id) || (isGroup ? busy.has(id) || call.participants.size >= 6 : call.phase !== "ringing")) return;
       call.participants.set(id, participant());
@@ -260,7 +262,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       if (!["offer", "answer"].includes(type) || !desc || (!isGroup && call.phase !== "connecting")) return;
       if (call.invitedSockets) {
         const proof = data[kind];
-        if (!validCallProof(proof)) return finish(call, "verification-failed");
+        if (!validCallProof(proof)) return finish(call, "call-signature-invalid");
         Object.assign(desc, { publicKey: proof.publicKey, signature: proof.signature });
       }
       const pair = [id, target].sort().join(":");

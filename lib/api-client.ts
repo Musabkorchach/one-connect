@@ -28,12 +28,13 @@ let socket: ReturnType<typeof io> | null = null;
 export const VERIFIED_CALL_PROTOCOL = 1;
 export interface CallEventMap {
   "call:incoming": {
+    parties?: { caller: string; recipient: string };
     callId: string;
     from: string;
     kind: "voice" | "video";
     protocol: number;
   };
-  "call:initiated": { callId: string; protocol: number };
+  "call:initiated": { callId: string; protocol: number; parties?: { caller: string; recipient: string } };
   "call:update-required": { reason: "call-update-required" };
   "call:accepted": { callId: string; challenge: string };
   "call:offer": {

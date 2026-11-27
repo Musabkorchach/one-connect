@@ -39,6 +39,7 @@ function AppInner() {
   const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
   const accountTransport = useAccountCallTransport(production ? sessionToken : null);
   const [tab, setTab] = useState<TabId>("chats");
+  const [trustPeer, setTrustPeer] = useState<string>();
   const [openChat, setOpenChat] = useState<string | null>(null);
   const groupCallBusyRef = useRef(false);
   const pstnBusyRef = useRef<() => boolean>(() => false);
@@ -55,6 +56,11 @@ function AppInner() {
     CALL_CONFIGURATION,
     () => groupCallBusyRef.current || pstnBusyRef.current(),
     accountTransport,
+    (peer) => {
+      setTrustPeer(peer);
+      setOpenChat(null);
+      setTab("profile");
+    },
   );
 
   const {
@@ -126,9 +132,9 @@ pstnBusyRef.current = isPstnBusy;
       )}
       {tab === "emails" && <EmailsView />}
       {tab === "invoices" && <InvoicesView />}
-      {tab === "profile" && <ProfileView />}
+      {tab === "profile" && <ProfileView trustPeer={trustPeer} />}
 
-      <BottomNav tab={tab} onChange={setTab} />
+      <BottomNav tab={tab} onChange={(next) => { setTrustPeer(undefined); setTab(next); }} />
 
       {openChat && (
         <ConversationView

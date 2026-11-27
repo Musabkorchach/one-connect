@@ -18,6 +18,7 @@ import {
   newCallChallenge,
   signCallDescription,
   verifyCallDescription,
+  validCallParties,
   type CallBinding,
   type SignedCallDescription,
 } from "./call-identity";
@@ -83,6 +84,11 @@ export class CallSession {
           this.end("call-update-required");
           return;
         }
+        if (data.parties && (data.parties.caller !== this.options.ownUsername ||
+            data.parties.recipient !== this.options.username)) {
+          this.end("call-identity-mismatch");
+          return;
+        }
         this.protocolConfirmed = true;
         this.options.onRinging();
       }),
@@ -103,7 +109,7 @@ export class CallSession {
             return;
           }
           if (this.challenge || typeof data.challenge !== "string" || !/^[a-f0-9]{32}$/.test(data.challenge)) {
-            this.end("verification-failed");
+            this.end("call-signature-invalid");
             return;
           }
           this.challenge = data.challenge;
@@ -121,8 +127,8 @@ export class CallSession {
           return;
         }
 
-        void this.receiveOffer(data.offer).catch(() => {
-          this.end("verification-failed");
+        void this.receiveOffer(data.offer).catch((error) => {
+          this.end(error instanceof CallKeyError ? error.reason : "connection-failed");
         });
       }),
 
@@ -135,8 +141,8 @@ export class CallSession {
           return;
         }
 
-        void this.receiveAnswer(data.answer).catch(() => {
-          this.end("verification-failed");
+        void this.receiveAnswer(data.answer).catch((error) => {
+          this.end(error instanceof CallKeyError ? error.reason : "connection-failed");
         });
       }),
 
@@ -215,7 +221,7 @@ export class CallSession {
   }
 
   private async verify(description: SignedCallDescription, type: "offer" | "answer") {
-    if (this.descriptionReceived || !this.pin) throw new Error("Unexpected call description.");
+    if (this.descriptionReceived || !this.pin) throw new CallKeyError("call-signature-invalid");
     this.descriptionReceived = true;
     return verifyCallDescription(description, this.binding(), type, this.pin);
   }
@@ -297,12 +303,14 @@ export class CallSession {
       return;
     }
     this.openingMedia = true;
-    void this.publishMedia().catch(() => this.end("verification-failed"));
+    void this.publishMedia().catch((error) => {
+      this.end(error instanceof CallKeyError ? error.reason : "connection-failed");
+    });
   }
 
   private async publishMedia() {
     if (getCallPin(this.options.ownUsername, this.options.username) !== this.pin) {
-      throw new Error("Call trust changed during negotiation.");
+      throw new CallKeyError("call-peer-key-mismatch");
     }
     await Promise.all(this.pendingSenders.map(({ sender, track }) => sender.replaceTrack(track)));
     if (this.ended) return;
@@ -315,15 +323,13 @@ export class CallSession {
     if (this.started || this.ended) return;
     this.started = true;
 
-    let failureReason = "verification-failed";
+    let failureReason = "call-identity-unavailable";
 
     try {
-      try {
-        this.pin = getCallPin(this.options.ownUsername, this.options.username);
-      } catch {
-        throw new CallKeyError("call-storage-unavailable");
-      }
-      if (!this.pin) throw new Error("Verify the peer safety code before calling.");
+      const { ownUsername, username } = this.options;
+      if (!validCallParties(ownUsername, username)) throw new CallKeyError("call-identity-mismatch");
+      this.pin = getCallPin(ownUsername, username);
+      if (!this.pin) throw new CallKeyError("call-peer-untrusted");
       this.device = await getCallDevice(this.options.ownUsername);
       if (this.ended) return;
       if (this.options.direction === "outgoing") {

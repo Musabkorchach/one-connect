@@ -9,13 +9,19 @@ export const validCallName = (name: string) => /^[a-z0-9._-]{1,32}$/.test(name);
 export const validSafetyCode = (code: string) => /^[a-f0-9]{64}$/.test(code);
 export const newCallChallenge = () => hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
 
+export function validCallParties(own: string, peer: string) {
+  return validCallName(own) && validCallName(peer) && own !== peer;
+}
+
 function pinKey(own: string, peer: string) {
-  if (!validCallName(own) || !validCallName(peer) || own === peer) throw new Error("Invalid call identity.");
+  if (!validCallParties(own, peer)) throw new CallKeyError("call-identity-mismatch");
   return `oneconnect.call-peer.v1:${own}:${peer}`;
 }
 
 export function getCallPin(own: string, peer: string) {
-  const value = localStorage.getItem(pinKey(own, peer));
+  const key = pinKey(own, peer);
+  let value: string | null;
+  try { value = localStorage.getItem(key); } catch { throw storageError(); }
   return value && validSafetyCode(value) ? value : null;
 }
 
@@ -25,7 +31,8 @@ export function setCallPin(own: string, peer: string, code: string) {
 }
 
 export class CallKeyError extends Error {
-  constructor(readonly reason: "call-storage-unavailable" | "call-device-missing" | "call-identity-unavailable") {
+  constructor(readonly reason: "call-storage-unavailable" | "call-device-missing" | "call-identity-unavailable"
+    | "call-identity-mismatch" | "call-peer-untrusted" | "call-peer-key-mismatch" | "call-signature-invalid") {
     super(reason);
   }
 }
@@ -147,14 +154,20 @@ export async function signCallDescription(
 export async function verifyCallDescription(
   value: SignedCallDescription, binding: CallBinding, type: "offer" | "answer", pin: string,
 ): Promise<RTCSessionDescriptionInit> {
+  if (!validCallParties(binding.caller, binding.recipient)) throw new CallKeyError("call-identity-mismatch");
   if (value?.type !== type || typeof value.sdp !== "string" ||
       typeof value.publicKey !== "string" || !/^04[a-f0-9]{128}$/.test(value.publicKey) ||
       typeof value.signature !== "string" || !/^[a-f0-9]{128}$/.test(value.signature) ||
-      !validSafetyCode(pin)) throw new Error("Invalid signed call description.");
-  const key = await crypto.subtle.importKey("raw", unhex(value.publicKey), curve, true, ["verify"]);
-  if (await callSafetyCode(key) !== pin ||
-      !await crypto.subtle.verify(algorithm, key, unhex(value.signature), signedBytes(binding, type, value.sdp))) {
-    throw new Error("Call identity verification failed.");
+      !validSafetyCode(pin)) throw new CallKeyError("call-signature-invalid");
+  let code: string;
+  try {
+    const key = await crypto.subtle.importKey("raw", unhex(value.publicKey), curve, true, ["verify"]);
+    const valid = await crypto.subtle.verify(algorithm, key, unhex(value.signature), signedBytes(binding, type, value.sdp));
+    if (!valid) throw new CallKeyError("call-signature-invalid");
+    code = await callSafetyCode(key);
+  } catch {
+    throw new CallKeyError("call-signature-invalid");
   }
+  if (code !== pin) throw new CallKeyError("call-peer-key-mismatch");
   return { type, sdp: value.sdp };
 }
