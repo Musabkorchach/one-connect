@@ -13,6 +13,9 @@ function getDevice(): DeviceConstructor | undefined {
 }
 
 export function loadTwilioVoice(): Promise<DeviceConstructor> {
+  if (process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1") {
+    return Promise.reject(new Error("Phone calling is disabled in call integration mode."));
+  }
   if (typeof window === "undefined") {
     return Promise.reject(
       new Error("Phone calling requires Pi Browser."),

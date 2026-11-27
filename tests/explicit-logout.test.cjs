@@ -39,11 +39,12 @@ function mount({
   storage = new Map(),
   storageErrors = {},
   iframe = false,
+  callIntegrationMode = false,
   authenticate = async () => credentials,
   verify = async () => session("session"),
   onLegacyPurchaseRead = () => {},
 } = {}) {
-  const calls = { pi: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
+  const calls = { pi: 0, sdkLite: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
   const listeners = new Set();
   const state = [];
   let cursor = 0;
@@ -69,9 +70,10 @@ function mount({
     location: { origin: "https://example.test" },
     Pi: { init: async () => {}, authenticate: (...args) => { calls.pi++; return authenticate(...args); } },
     SDKLite: {
-      init: async () => ({
-        state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead },
-      }),
+      init: async () => {
+        calls.sdkLite++;
+        return { state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead } };
+      },
     },
     get sessionStorage() {
       if (storageErrors.unavailable) throw new Error("Storage unavailable");
@@ -97,6 +99,7 @@ function mount({
   win.top = iframe ? {} : win;
   win.parent = { postMessage: (message) => calls.messages.push(JSON.parse(message)) };
   const api = {
+    callIntegrationMode,
     verifyPiAuth: (token) => { calls.verified.push(token); return verify(token); },
     revokeSession: async (token) => { calls.revoked.push(token); },
     initSocket: (_userId, _username, token) => calls.sockets.push(token),
@@ -149,6 +152,23 @@ function mount({
     },
   };
 }
+
+test("call integration uses Pi username authentication without initializing the purchase SDK", async () => {
+  const app = mount({
+    callIntegrationMode: true,
+    authenticate: async (scopes) => {
+      assert.deepEqual(scopes, ["username"]);
+      return credentials;
+    },
+  });
+  await settle();
+  assert.equal(app.render().isAuthenticated, true);
+  assert.deepEqual(app.calls.verified, ["pi-token"]);
+  assert.deepEqual(app.calls.sockets, ["session"]);
+  assert.equal(app.calls.sdkLite, 0);
+  assert.equal(app.render().sdk, null);
+  app.unmount();
+});
 
 test("logout clears the local session and persists only the language marker", async () => {
   let legacyPurchaseReads = 0;
@@ -592,27 +612,32 @@ test("home renders scoped email per session and retains the previous routes for 
     "@/components/connect/account-private-chat": { AccountPrivateChat: "scoped-chat" },
     "@/components/connect/account-emails-view": { AccountEmailsView: "scoped-email" },
     "@/components/connect/connect-app": { ConnectApp: "legacy-app" },
+    "@/components/connect/call-test-app": { CallTestApp: "call-test-app" },
     "@/contexts/pi-auth-context": { usePiAuth: () => auth },
   };
   compile("app/page.tsx")((name) => {
     assert.ok(Object.hasOwn(modules, name), name);
     return modules[name];
   }, exportsPage);
+  const renderHome = () => {
+    const entry = exportsPage.default();
+    return entry.type(entry.props);
+  };
   auth = { emailSocketMode: "legacy", sessionToken: "legacy" };
-  assert.equal(exportsPage.default().type, "legacy-app");
+  assert.equal(renderHome().type, "legacy-app");
   auth = { ...auth, accountMigrationRequired: true };
-  assert.equal(exportsPage.default().type, "main");
+  assert.equal(renderHome().type, "main");
   auth = { ...auth, emailSocketMode: "account", sessionToken: "first", piUsername: "alice" };
-  assert.equal(exportsPage.default().type, "scoped-email");
-  assert.equal(exportsPage.default().key, "first");
+  assert.equal(renderHome().type, "scoped-email");
+  assert.equal(renderHome().key, "first");
   auth = { ...auth, sessionToken: "second", chatSocketMode: "account" };
-  assert.equal(exportsPage.default().key, "second");
-  assert.equal(exportsPage.default().type.name, "AccountCommunication");
-  assert.equal(exportsPage.default().props.groupsEnabled, false);
+  assert.equal(renderHome().key, "second");
+  assert.equal(renderHome().type.name, "AccountCommunication");
+  assert.equal(renderHome().props.groupsEnabled, false);
   auth = { ...auth, groupSocketMode: "account" };
-  assert.equal(exportsPage.default().props.groupsEnabled, true);
+  assert.equal(renderHome().props.groupsEnabled, true);
   auth = { ...auth, privateDataOwner: "account-fixture" };
-  assert.equal(exportsPage.default().props.privateDataEnabled, true);
+  assert.equal(renderHome().props.privateDataEnabled, true);
 });
 
 const oldConversation = "a".repeat(64);

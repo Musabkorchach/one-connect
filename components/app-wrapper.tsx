@@ -11,6 +11,7 @@ function AppContent({ children }: { children: ReactNode }) {
 }
 
 export function AppWrapper({ children }: { children: ReactNode }) {
+  if (process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1") return <>{children}</>;
   return (
     <PiAuthProvider>
       <AppContent>{children}</AppContent>
