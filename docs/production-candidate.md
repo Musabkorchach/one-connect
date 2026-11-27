@@ -5,9 +5,13 @@ Production uses two Render services from this repository: a Next.js frontend and
 | Service | Root | Build | Start |
 | --- | --- | --- | --- |
 | Production frontend | Repository root | `pnpm install --frozen-lockfile && pnpm build` | `pnpm start --hostname 0.0.0.0 --port $PORT` |
-| Production API and Socket.IO | `server` | `npm ci` | `npm start` |
+| Production API and Socket.IO | Repository root | `pnpm install --prod --frozen-lockfile && npm --prefix server ci --omit=dev` | `cd server && node server.js` |
 
-Frontend variables: `NEXT_PUBLIC_ONECONNECT_DEPLOYMENT=production-review`, `NEXT_PUBLIC_ONECONNECT_API_URL` and `NEXT_PUBLIC_ONECONNECT_WS_URL` set to the dedicated Production backend HTTPS origin, and `ONECONNECT_PRODUCTION_VALIDATION_KEY` set on the frontend service from the Production Console entry. Backend variables: `ONECONNECT_DEPLOYMENT=production`, `ONECONNECT_PRODUCTION_ORIGIN` set to the frontend's exact HTTPS origin, and `ONECONNECT_PRODUCTION_MONGODB_URI` set to credentials restricted to the Production database. Use a MongoDB deployment that supports transactions for group ownership and account deletion. Leave Testnet subscription, payment, external mail and PSTN credentials unset. If relay is required across networks, configure a dedicated TURN service using the existing TURN settings.
+The API build installs from both lockfiles. Startup loads `server/pstn-config.js`, which imports `lib/connect/pstn-phone.js`. That shared module resolves `libphonenumber-js` from the repository root even when PSTN routes are disabled. Starting with the `server` directory as the service root and running only `npm ci` omits the root dependency.
+
+Frontend variables: `NEXT_PUBLIC_ONECONNECT_DEPLOYMENT=production-review`, `NEXT_PUBLIC_ONECONNECT_API_URL` and `NEXT_PUBLIC_ONECONNECT_WS_URL` set to the dedicated Production backend HTTPS origin, and `ONECONNECT_PRODUCTION_VALIDATION_KEY` set on the frontend service from the Production Console entry. Backend variables: `NODE_ENV=production`, `ONECONNECT_DEPLOYMENT=production`, `ONECONNECT_PRODUCTION_ORIGIN` set to the frontend's exact HTTPS origin, and `ONECONNECT_PRODUCTION_MONGODB_URI` set to credentials restricted to the Production database. Render supplies `PORT`. Use a MongoDB deployment that supports transactions for group ownership and account deletion. Leave Testnet subscription, payment, external mail and PSTN credentials unset.
+
+To test TURN relay, set both `CLOUDFLARE_TURN_TOKEN_ID` and `CLOUDFLARE_TURN_API_TOKEN` on the API service using the dedicated TURN credential pair. The browser obtains short-lived ICE credentials through the authenticated API. Keep the provider token out of the frontend environment.
 
 Render Starter compute for both services starts at USD 14 per month (USD 7 per service), excluding MongoDB, potential TURN usage and any Render usage above included quotas. See [Render pricing](https://render.com/pricing). This is a deployment proposal, and no resources have been created.
 
