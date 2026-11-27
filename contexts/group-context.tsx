@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import {
   createContext,
   useContext,
@@ -97,7 +98,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (!token || !me || process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review") return;
+    if (!token || !me || PI_NETWORK_CONFIG.PRODUCTION_REVIEW) return;
 
     const controller = new AbortController();
     let disposed = false;

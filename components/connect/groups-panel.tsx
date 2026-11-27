@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { useGroups } from "@/contexts/group-context";
@@ -12,7 +13,7 @@ import { AccountGroupsView } from "./account-groups-view";
 
 export function GroupsPanel({ query = "" }: { query?: string }) {
   const { sessionToken } = usePiAuth();
-  if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && sessionToken) {
+  if (PI_NETWORK_CONFIG.PRODUCTION_REVIEW && sessionToken) {
     return <AccountGroupsView sessionToken={sessionToken} embedded query={query} />;
   }
   return <LegacyGroupsPanel query={query} />;

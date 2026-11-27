@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import {
   joinConversation,
   uploadChatImage,
@@ -57,7 +58,7 @@ export function ConversationView({
   } = useConnect();
 
   const { sessionToken } = usePiAuth();
-  const production = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review";
+  const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
   const [imageUploading, setImageUploading] = useState(false);
   const conv = getChat(username);
   const contact = contacts.find((c) => c.username === username);

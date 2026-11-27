@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, IconButton, Button, EmptyState, TextInput, TextArea, cx } from "./ui";
@@ -26,7 +27,7 @@ type MailboxViewProps = Pick<ReturnType<typeof useConnect>,
 
 export function EmailsView() {
   const mailbox = useConnect();
-  return <MailboxView mailbox={{ ...mailbox, internalOnly: process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" }} />;
+  return <MailboxView mailbox={{ ...mailbox, internalOnly: PI_NETWORK_CONFIG.PRODUCTION_REVIEW }} />;
 }
 
 export function MailboxView({ mailbox }: { mailbox: MailboxViewProps }) {

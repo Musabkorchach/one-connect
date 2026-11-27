@@ -1,19 +1,24 @@
 import io from "socket.io-client";
 import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 import type { SignedCallDescription } from "@/lib/connect/call-identity";
+import { isProductionFrontendOrigin, productionApiOrigin } from "@/lib/production-origins.mjs";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
-const callTestMode = process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1";
-export const callIntegrationMode = process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
+const productionBrowser = typeof window !== "undefined" && isProductionFrontendOrigin(window.location.origin);
+const callTestMode = !productionBrowser && process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1";
+export const callIntegrationMode = !productionBrowser && process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
 export const callTestBuildId = process.env.NEXT_PUBLIC_CALL_TEST_BUILD_ID;
-export const API_URL = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_API_URL! :
-  process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_API_URL! :
+export const API_URL = productionBrowser ? productionApiOrigin :
+  process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_API_URL! :
+  callIntegrationMode ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_API_URL! :
   callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_API_URL! :
   process.env.NEXT_PUBLIC_ONECONNECT_API_URL ||
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
-export const WS_URL = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_WS_URL! :
-  process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_WS_URL! :
+export const WS_URL = productionBrowser ? productionApiOrigin :
+  process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_WS_URL! :
+  callIntegrationMode ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_WS_URL! :
   callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_WS_URL! :
   process.env.NEXT_PUBLIC_ONECONNECT_WS_URL ||
   process.env.REACT_APP_WS_URL ||
@@ -175,7 +180,7 @@ export async function getAppState(
 
   const record: unknown = await response.json();
   if (record === null) return null;
-  if (process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" &&
+  if (PI_NETWORK_CONFIG.PRODUCTION_REVIEW &&
       record && typeof record === "object" && "blob" in record && record.blob === null &&
       "legacyHistory" in record && (record.legacyHistory as { code?: string } | null)?.code === "ACCOUNT_MIGRATION_REQUIRED") return null;
 

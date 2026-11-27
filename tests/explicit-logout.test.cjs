@@ -445,6 +445,8 @@ function mountAccountMailbox(mode = "email") {
   compile("lib/connect/data.ts")(() => { throw new Error("Unexpected import"); }, exportsData);
   compile("lib/api-client.ts")((name) => {
     if (name === "@/lib/connect/pstn-phone") return {};
+    if (name === "@/lib/production-origins.mjs") return {};
+    if (name === "@/lib/system-config") return config;
     assert.equal(name, "socket.io-client");
     return { default(url, options) {
       const socket = new EventEmitter();
@@ -600,8 +602,12 @@ for (const response of [
   });
 }
 
-test("home renders scoped email per session and retains the previous routes for other sessions", () => {
+test("home preserves account previews and loads the original app on both Production origins", async () => {
   const exportsPage = {};
+  const origins = await import("../lib/production-origins.mjs");
+  const browser = { location: { origin: "https://preview.example" } };
+  const systemConfig = {};
+  compile("lib/system-config.ts")(() => origins, systemConfig, browser);
   let auth;
   const jsx = (type, props, key) => ({ type, props, key });
   const modules = {
@@ -617,6 +623,7 @@ test("home renders scoped email per session and retains the previous routes for 
     "@/components/connect/call-safety-settings": { CallSafetySettings: "call-safety-settings" },
     "next/link": { default: "link" },
     "@/contexts/pi-auth-context": { usePiAuth: () => auth },
+    "@/lib/system-config": systemConfig,
   };
   compile("app/page.tsx")((name) => {
     assert.ok(Object.hasOwn(modules, name), name);
@@ -646,6 +653,20 @@ test("home renders scoped email per session and retains the previous routes for 
     process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = "production-review";
     assert.equal(renderHome().type, "legacy-app");
     assert.equal(renderHome().key, "second");
+    delete process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+    for (const origin of [origins.productionHostingOrigin, origins.productionPiNetOrigin]) {
+      browser.location.origin = origin;
+      assert.equal(renderHome().type, "legacy-app");
+      assert.equal(renderHome().key, "second");
+      const api = {};
+      compile("lib/api-client.ts")((name) =>
+        name === "@/lib/production-origins.mjs" ? origins :
+          name === "@/lib/system-config" ? systemConfig : {}, api, browser);
+      assert.equal(api.API_URL, origins.productionApiOrigin);
+      assert.equal(api.WS_URL, origins.productionApiOrigin);
+    }
+    browser.location.origin = "https://oneconnect5891.pinet.com.example";
+    assert.equal(renderHome().type.name, "AccountCommunication");
   } finally {
     if (originalMode === undefined) delete process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
     else process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = originalMode;
@@ -998,7 +1019,7 @@ test("private profile and contact requests cannot update a replacement session",
   const store = {};
   const requests = [];
   compile("lib/connect/data.ts")(() => { throw new Error("Unexpected import"); }, data);
-  compile("lib/api-client.ts")(() => ({}), api, undefined, undefined, (url, options) => {
+  compile("lib/api-client.ts")((name) => name === "@/lib/system-config" ? config : {}, api, undefined, undefined, (url, options) => {
     const result = deferred();
     requests.push({ url, options, ...result });
     return result.promise;

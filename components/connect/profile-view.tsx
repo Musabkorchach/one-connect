@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { useConnect } from "@/contexts/connect-context";
@@ -95,7 +96,7 @@ export function ProfileView() {
           </div>
           {copied ? <IconCheck className="h-5 w-5 text-success" /> : <IconCopy className="h-5 w-5 text-muted-foreground" />}
         </button>
-        {process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && (
+        {PI_NETWORK_CONFIG.PRODUCTION_REVIEW && (
           <Button variant="outline" className="mt-2 w-full" onClick={() => void shareApp()}>{shareLabel}</Button>
         )}
       </div>
@@ -142,7 +143,7 @@ export function ProfileView() {
         </button>
       </div>
 
-      {sessionToken && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review" && (
+      {sessionToken && !PI_NETWORK_CONFIG.PRODUCTION_REVIEW && (
         <div className="mt-4 px-4">
           <AccountSubscriptionStatus sessionToken={sessionToken} language={profile.language} />
         </div>
@@ -172,7 +173,7 @@ export function ProfileView() {
           <Link href="/privacy" className="text-accent underline underline-offset-4">{t.privacyPolicy}</Link>
           <Link href="/terms" className="text-accent underline underline-offset-4">{t.termsOfUse}</Link>
         </div>
-        {sessionToken && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" &&
+        {sessionToken && PI_NETWORK_CONFIG.PRODUCTION_REVIEW &&
           <AccountDeletionSettings sessionToken={sessionToken} language={profile.language} />}
         <Button variant="outline" className="w-full py-3 text-destructive border-destructive/50 hover:bg-destructive/10" onClick={logout}>
           <IconLogout className="h-4 w-4" />
