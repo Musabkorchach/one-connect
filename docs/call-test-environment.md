@@ -35,3 +35,16 @@ The test backend opens the explicitly named database and rejects normal-service 
 Follow [the Android and iPhone checklist](verified-peer-calls-review.md). Sign in with the two synthetic accounts, create the device keys and verify them out of band. Run ordinary voice and video first. Next, select **Force TURN relay** on both devices before dialing and use **Read ICE statistics** during the connected call. Verify that the chosen candidate pair contains a relay candidate and that the media flows in both directions. The display excludes addresses, candidate credentials and keys. If Pi Browser does not expose a selected pair, mark TURN evidence unavailable. Passing the local fixture does not establish compatibility on Android or iPhone.
 
 In the confirmed Android and iPhone round, the updated diagnostics showed the selected ICE pair as connected with relay candidates on both sides. The call worked across two different networks. Android sometimes needed **Play remote media** before audio started. See the [review](verified-peer-calls-review.md) for the full phone results and pending checks. Treat a nominated pair without a selected-pair reference as an unconfirmed hint.
+
+## Original-app integration with Pi sign-in
+
+This mode uses the original app and the regular server entry point. Use an existing, dedicated Pi Testnet app record whose verified HTTPS app URL matches the test frontend. Confirm that both testers can open it directly in Pi Browser. Until that record is confirmed, use the local fixture to verify isolation and leave the live Pi check pending.
+
+| Process | Settings |
+| --- | --- |
+| Frontend build | Set `NEXT_PUBLIC_CALL_INTEGRATION_MODE=1` and set both `NEXT_PUBLIC_CALL_INTEGRATION_API_URL` and `NEXT_PUBLIC_CALL_INTEGRATION_WS_URL` to the same explicit test API HTTP(S) origin. Omit `NEXT_PUBLIC_CALL_TEST_MODE`. |
+| Backend | Start `node server.js` with `ONECONNECT_CALL_INTEGRATION=1`, `CALL_TEST_FRONTEND_ORIGIN`, `CALL_TEST_DATABASE`, and `CALL_TEST_MONGODB_URI`. The URI must name the dedicated database. Omit `ONECONNECT_CALL_TEST`, `MONGODB_URI`, and both synthetic account codes. Use the existing credential scoped to the test database. |
+
+The build embeds both API destinations and rejects ordinary service origins. The API limits HTTP and Socket.IO to the configured frontend origin and checks the database name before connecting. `GET /health` identifies the integration mode without requiring a browser origin. Synthetic login, subscriptions and payments, PSTN, and external mail are unavailable. Pi sign-in requests username access and verifies the access token through the usual `/v2/me` path. Local tests substitute Pi's response and exercise the real local HTTP, Socket.IO and MongoDB paths.
+
+For the phone check, sign in with two real Pi accounts, open **Profile → Call safety codes**, exchange and save the device codes, then make a voice call. Confirm bidirectional audio and **Peer device verified**. Before any authorized temporary switch, record the currently deployed test revisions and settings. To revert, restore that frontend/backend pair and its settings, then verify the shared test build label. Keep the existing database credential and device keys.

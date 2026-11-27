@@ -109,7 +109,7 @@ pstnBusyRef.current = isPstnBusy;
       {tab === "calls" && (
         <CallsView
           onCall={startCall}
-          onPhoneCall={(phone) => void startPstnCall(phone)}
+          onPhoneCall={process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? undefined : (phone) => void startPstnCall(phone)}
           phoneCallDisabled={
             Boolean(callState) ||
             Boolean(groupCallState) ||

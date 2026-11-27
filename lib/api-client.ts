@@ -3,12 +3,15 @@ import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
 import type { SignedCallDescription } from "@/lib/connect/call-identity";
 
 const callTestMode = process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1";
+export const callIntegrationMode = process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
 export const callTestBuildId = process.env.NEXT_PUBLIC_CALL_TEST_BUILD_ID;
-export const API_URL = callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_API_URL! :
+export const API_URL = process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_API_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_API_URL! :
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
-const WS_URL = callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_WS_URL! :
+const WS_URL = process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_WS_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_WS_URL! :
   process.env.REACT_APP_WS_URL ||
   "https://one-connect.onrender.com";
 

@@ -39,11 +39,12 @@ function mount({
   storage = new Map(),
   storageErrors = {},
   iframe = false,
+  callIntegrationMode = false,
   authenticate = async () => credentials,
   verify = async () => session("session"),
   onLegacyPurchaseRead = () => {},
 } = {}) {
-  const calls = { pi: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
+  const calls = { pi: 0, sdkLite: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
   const listeners = new Set();
   const state = [];
   let cursor = 0;
@@ -69,9 +70,10 @@ function mount({
     location: { origin: "https://example.test" },
     Pi: { init: async () => {}, authenticate: (...args) => { calls.pi++; return authenticate(...args); } },
     SDKLite: {
-      init: async () => ({
-        state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead },
-      }),
+      init: async () => {
+        calls.sdkLite++;
+        return { state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead } };
+      },
     },
     get sessionStorage() {
       if (storageErrors.unavailable) throw new Error("Storage unavailable");
@@ -97,6 +99,7 @@ function mount({
   win.top = iframe ? {} : win;
   win.parent = { postMessage: (message) => calls.messages.push(JSON.parse(message)) };
   const api = {
+    callIntegrationMode,
     verifyPiAuth: (token) => { calls.verified.push(token); return verify(token); },
     revokeSession: async (token) => { calls.revoked.push(token); },
     initSocket: (_userId, _username, token) => calls.sockets.push(token),
@@ -149,6 +152,23 @@ function mount({
     },
   };
 }
+
+test("call integration uses Pi username authentication without initializing the purchase SDK", async () => {
+  const app = mount({
+    callIntegrationMode: true,
+    authenticate: async (scopes) => {
+      assert.deepEqual(scopes, ["username"]);
+      return credentials;
+    },
+  });
+  await settle();
+  assert.equal(app.render().isAuthenticated, true);
+  assert.deepEqual(app.calls.verified, ["pi-token"]);
+  assert.deepEqual(app.calls.sockets, ["session"]);
+  assert.equal(app.calls.sdkLite, 0);
+  assert.equal(app.render().sdk, null);
+  app.unmount();
+});
 
 test("logout clears the local session and persists only the language marker", async () => {
   let legacyPurchaseReads = 0;

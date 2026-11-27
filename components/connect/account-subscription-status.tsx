@@ -64,6 +64,7 @@ async function request<T>(token: string, path = "", body?: object, signal?: Abor
 
 export function AccountSubscriptionStatus({ sessionToken, language }: { sessionToken: string; language: LangId }) {
   const { isCurrentSession, piSdkReady } = usePiAuth();
+  if (process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1") return null;
   if (typeof window === "undefined" || !isCurrentSession(sessionToken)) return null;
   const serviceId = resolveTestnetSubscriptionServiceId(
     window.location.origin,

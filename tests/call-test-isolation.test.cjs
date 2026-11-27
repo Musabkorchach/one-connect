@@ -64,6 +64,22 @@ test("test frontend requires both explicit origins and rejects the existing API"
   assert.deepEqual(callTestBuildSettings(values), { api, socket: api.replace("https:", "wss:"), build });
 });
 
+test("ordinary integration builds require both dedicated destinations and exclude synthetic mode", async () => {
+  const { callIntegrationBuildSettings } = await import("../call-test-build.mjs");
+  const api = "https://oneconnect-verified-calls-api.onrender.com";
+  const values = {
+    NEXT_PUBLIC_CALL_INTEGRATION_MODE: "1", NEXT_PUBLIC_CALL_INTEGRATION_API_URL: api,
+    NEXT_PUBLIC_CALL_INTEGRATION_WS_URL: api,
+  };
+  assert.equal(callIntegrationBuildSettings({}), null);
+  assert.deepEqual(callIntegrationBuildSettings(values), { api, socket: api });
+  for (const field of ["NEXT_PUBLIC_CALL_INTEGRATION_API_URL", "NEXT_PUBLIC_CALL_INTEGRATION_WS_URL"]) {
+    assert.throws(() => callIntegrationBuildSettings({ ...values, [field]: undefined }));
+    assert.throws(() => callIntegrationBuildSettings({ ...values, [field]: "https://one-connect.onrender.com" }));
+  }
+  assert.throws(() => callIntegrationBuildSettings({ ...values, NEXT_PUBLIC_CALL_TEST_MODE: "1" }));
+});
+
 async function port() {
   const server = createServer();
   await new Promise((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));
@@ -90,28 +106,33 @@ function socketEvent(socket, name) {
   });
 }
 
+async function startMongoFixture(t) {
+  const serverPath = join(__dirname, "..", "server");
+  const { MongoClient } = createRequire(join(serverPath, "package.json"))("mongodb");
+  const directory = await mkdtemp(join(tmpdir(), "oneconnect-call-test-"));
+  const mongoPort = await port();
+  const uri = `mongodb://127.0.0.1:${mongoPort}/${database}?directConnection=true`;
+  const mongo = spawn(process.env.ONE_CONNECT_TEST_MONGOD, [
+    "--bind_ip", "127.0.0.1", "--port", String(mongoPort), "--dbpath", directory,
+    "--logpath", join(directory, "mongo.log"),
+  ], { stdio: "ignore", windowsHide: true });
+  t.after(() => mongo.kill());
+  await until(() => new Promise((resolve, reject) => {
+    const probe = createConnection(mongoPort, "127.0.0.1");
+    probe.once("error", reject);
+    probe.once("connect", () => { probe.destroy(); resolve(true); });
+  }), mongo);
+  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
+  t.after(() => client.close());
+  await client.connect();
+  assert.equal(Number((await client.db("admin").command({ serverStatus: 1 })).pid), mongo.pid);
+  return { serverPath, directory, client, uri };
+}
+
 test("isolated server rejects other origins, builds and sessions, and relays calls for the two test users",
   { skip: !process.env.ONE_CONNECT_TEST_MONGOD, timeout: 65000 }, async (t) => {
-    const serverPath = join(__dirname, "..", "server");
-    const { MongoClient } = createRequire(join(serverPath, "package.json"))("mongodb");
-    const directory = await mkdtemp(join(tmpdir(), "oneconnect-call-test-"));
-    const mongoPort = await port();
+    const { serverPath, directory, client, uri } = await startMongoFixture(t);
     const apiPort = await port();
-    const uri = `mongodb://127.0.0.1:${mongoPort}/${database}?directConnection=true`;
-    const mongo = spawn(process.env.ONE_CONNECT_TEST_MONGOD, [
-      "--bind_ip", "127.0.0.1", "--port", String(mongoPort), "--dbpath", directory,
-      "--logpath", join(directory, "mongo.log"),
-    ], { stdio: "ignore", windowsHide: true });
-    t.after(() => mongo.kill());
-    await until(() => new Promise((resolve, reject) => {
-      const probe = createConnection(mongoPort, "127.0.0.1");
-      probe.once("error", reject);
-      probe.once("connect", () => { probe.destroy(); resolve(true); });
-    }), mongo);
-    const client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
-    t.after(() => client.close());
-    await client.connect();
-    assert.equal(Number((await client.db("admin").command({ serverStatus: 1 })).pid), mongo.pid);
     const server = spawn(process.execPath, [join(serverPath, "call-test-server.js")], {
       cwd: directory, env: { SystemRoot: process.env.SystemRoot, ...env, PORT: String(apiPort), CALL_TEST_MONGODB_URI: uri },
       stdio: ["ignore", "ignore", "inherit"], windowsHide: true,
@@ -196,4 +217,91 @@ test("isolated server rejects other origins, builds and sessions, and relays cal
     caller.emit("call:end", { callId });
     await login("calltest-a", codeA);
     assert.equal((await ice(a.sessionToken)).status, 401);
+  });
+
+test("original-app integration verifies Pi identities and isolates HTTP, Socket.IO and MongoDB",
+  { skip: !process.env.ONE_CONNECT_TEST_MONGOD, timeout: 65000 }, async (t) => {
+    const { serverPath, directory, client, uri } = await startMongoFixture(t);
+    const { callIntegrationSettings } = await import("../server/call-test-settings.js");
+    const settings = {
+      ONECONNECT_CALL_INTEGRATION: "1", CALL_TEST_FRONTEND_ORIGIN: origin,
+      CALL_TEST_DATABASE: database, CALL_TEST_MONGODB_URI: uri,
+    };
+    assert.equal(callIntegrationSettings({}, false), null);
+    assert.throws(() => callIntegrationSettings(settings, true));
+    for (const extra of [{ ONECONNECT_CALL_TEST: "1" }, { MONGODB_URI: uri }, { CALL_TEST_CODE_A: codeA },
+      { CALL_TEST_DATABASE: "oneconnect" }, { CALL_TEST_FRONTEND_ORIGIN: "https://oneconnect1066.pinet.com" }]) {
+      assert.throws(() => callIntegrationSettings({ ...settings, ...extra }, false));
+    }
+    const wrongDatabase = spawn(process.execPath, [join(serverPath, "server.js")], {
+      cwd: directory, env: { SystemRoot: process.env.SystemRoot, ...settings,
+        CALL_TEST_MONGODB_URI: uri.replace("/" + database, "/oneconnect") },
+      stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
+    });
+    let error = "";
+    wrongDatabase.stderr.setEncoding("utf8").on("data", (chunk) => { error += chunk; });
+    t.after(() => wrongDatabase.kill());
+    assert.equal(await new Promise((resolve, reject) => {
+      wrongDatabase.once("error", reject).once("close", resolve);
+    }), 1);
+    assert.match(error, /MongoDB URI must name its assigned test database/);
+    const apiPort = await port();
+    const bootstrap = `
+      globalThis.fetch = async (url, options) => {
+        if (url !== "https://api.minepi.com/v2/me") throw new Error("Unexpected external request");
+        const token = options.headers.Authorization;
+        if (!["Bearer fixture-a", "Bearer fixture-b"].includes(token)) return new Response(null, { status: 401 });
+        const name = token.endsWith("-a") ? "pi-fixture-a" : "pi-fixture-b";
+        return Response.json({ uid: name + "-uid", username: name });
+      };
+    `;
+    const server = spawn(process.execPath, [
+      "--import", "data:text/javascript;base64," + Buffer.from(bootstrap).toString("base64"), join(serverPath, "server.js"),
+    ], {
+      cwd: directory, env: { SystemRoot: process.env.SystemRoot, ...settings, PORT: String(apiPort),
+        PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460" },
+      stdio: ["ignore", "ignore", "inherit"], windowsHide: true,
+    });
+    t.after(() => server.kill());
+    const base = `http://127.0.0.1:${apiPort}`;
+    const health = await until(() => fetch(base + "/health"), server);
+    assert.deepEqual(await health.json(), { mode: "call-integration", protocol: 1 });
+    const post = (path, accessToken, requestOrigin = origin) => fetch(base + path, {
+      method: "POST", headers: { Origin: requestOrigin, "Content-Type": "application/json" },
+      body: JSON.stringify({ accessToken }),
+    });
+    assert.equal((await post("/api/auth/verify", "fixture-a", "https://unrelated.test")).status, 403);
+    assert.equal((await post("/api/auth/verify", "invalid")).status, 401);
+    for (const path of ["/api/call-test/login", "/api/pi-testnet/subscription/prepare", "/api/calls/pstn/prepare",
+      "/api/emails/external", "/api/emails/external/inbound"]) {
+      assert.equal((await post(path, "fixture-a")).status, 404, path);
+    }
+    const sessions = [];
+    for (const token of ["fixture-a", "fixture-b"]) {
+      const response = await post("/api/auth/verify", token);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("access-control-allow-origin"), origin);
+      sessions.push(await response.json());
+    }
+    assert.equal(await client.db(database).collection("email_users").countDocuments(), 2);
+    assert.deepEqual(await client.db("oneconnect").listCollections().toArray(), []);
+    const connect = (sessionToken, requestOrigin) => {
+      const socket = io(base, { autoConnect: false, forceNew: true, reconnection: false,
+        extraHeaders: { Origin: requestOrigin }, auth: { sessionToken, verifiedCallProtocol: 1 } });
+      t.after(() => socket.disconnect());
+      return socket;
+    };
+    const [a, b] = sessions.map(({ sessionToken }) => connect(sessionToken, origin));
+    const foreignSocket = connect(sessions[0].sessionToken, "https://unrelated.test");
+    const rejected = socketEvent(foreignSocket, "connect_error");
+    foreignSocket.connect();
+    await rejected;
+    const ready = [a, b].map((socket) => socketEvent(socket, "connect"));
+    a.connect();
+    b.connect();
+    await Promise.all(ready);
+    const callId = randomBytes(16).toString("hex");
+    const incoming = socketEvent(b, "call:incoming");
+    a.emit("call:verified-initiate", { callId, protocol: 1, kind: "voice", to: "pi-fixture-b" });
+    assert.deepEqual(await incoming, { callId, protocol: 1, kind: "voice", from: "pi-fixture-a" });
   });

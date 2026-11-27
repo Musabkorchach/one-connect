@@ -32,7 +32,7 @@ import {
   createEmailAccess, emailAccountUnavailable, emailViewer, findEmailAccount, senderEmailKey,
 } from "./email-account-access.js";
 import { selectVerifiedCallSockets, VERIFIED_CALL_PROTOCOL } from "./verified-call-protocol.js";
-import { allowsCallTestEvent, allowsCallTestRoute, callTestSettings } from "./call-test-settings.js";
+import { allowsCallTestEvent, allowsCallTestRoute, callIntegrationSettings, callTestSettings } from "./call-test-settings.js";
 
 function validCallProof(description) {
   return typeof description.publicKey === "string" && /^04[a-f0-9]{128}$/.test(description.publicKey) &&
@@ -41,14 +41,16 @@ function validCallProof(description) {
 
 config();
 
-const callTest = callTestSettings(process.env,
-  resolve(process.argv[1] ?? "") === fileURLToPath(new URL("./call-test-server.js", import.meta.url)));
+const callTestEntry = resolve(process.argv[1] ?? "") === fileURLToPath(new URL("./call-test-server.js", import.meta.url));
+const callIntegration = callIntegrationSettings(process.env, callTestEntry);
+const callTest = callTestSettings(process.env, callTestEntry);
+const isolatedCalls = callTest ?? callIntegration;
 dns.setServers(["8.8.8.8"]);
 
-const bindAccounts = !callTest && isAccountBindingEnabled(process.env);
+const bindAccounts = !isolatedCalls && isAccountBindingEnabled(process.env);
 const useSubscriptionFixtures = subscriptionProofMode(process.env, bindAccounts);
-const mongoClient = new MongoClient(callTest ? callTest.uri : process.env.MONGODB_URI);
-if (callTest && mongoClient.options.dbName !== callTest.database) {
+const mongoClient = new MongoClient(isolatedCalls?.uri ?? process.env.MONGODB_URI);
+if (isolatedCalls && mongoClient.options.dbName !== isolatedCalls.database) {
   throw new Error("Call test MongoDB URI must name its assigned test database.");
 }
 if (bindAccounts) assertLocalAccountBindingDatabase(mongoClient.options);
@@ -56,7 +58,7 @@ if (bindAccounts) assertLocalAccountBindingDatabase(mongoClient.options);
 await mongoClient.connect();
 console.log("MongoDB connected successfully");
 
-const db = mongoClient.db(callTest?.database ?? "oneconnect");
+const db = mongoClient.db(isolatedCalls?.database ?? "oneconnect");
 const writeAccount = createAccountWriteFence(db, mongoClient);
 if (bindAccounts) await prepareScopedBuckets(db);
 const { requireEmailSession, findEmailRecipient, emailNotFound } =
@@ -192,7 +194,7 @@ const allowedStateKeys = new Set([
   "phone-contacts",
 ]);
 
-const allowedOrigins = callTest ? [callTest.origin] : [
+const allowedOrigins = isolatedCalls ? [isolatedCalls.origin] : [
   process.env.FRONTEND_URL,
   ...(process.env.CORS_EXTRA_ORIGINS || "")
     .split(",")
@@ -204,7 +206,7 @@ const allowedOrigins = callTest ? [callTest.origin] : [
   "https://demo-kzmpbl6a30a2bigtxrna.vusercontent.net",
   "http://localhost:3000",
 ].filter(Boolean);
-const testnetSubscriptionsEnabled = process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
+const testnetSubscriptionsEnabled = !isolatedCalls && process.env.PI_TESTNET_SUBSCRIPTION_SERVICE_ID === "460";
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -212,13 +214,18 @@ const io = new Server(httpServer, {
     origin: allowedOrigins,
     credentials: true,
   },
-  ...(callTest && { allowRequest: (req, callback) => callback(null, callTest.acceptsOrigin(req.headers.origin)) }),
+  ...(isolatedCalls && { allowRequest: (req, callback) => callback(null, isolatedCalls.acceptsOrigin(req.headers.origin)) }),
 });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Middleware
+if (callIntegration) app.use((req, res, next) => {
+  if (req.method === "GET" && req.path === "/health") return next();
+  if (!callIntegration.acceptsOrigin(req.headers.origin)) return res.sendStatus(403);
+  next();
+});
 app.use(cors({
   origin: allowedOrigins,
   credentials: true,
@@ -1555,7 +1562,7 @@ function emailForUser(record, username, accountId) {
   };
 }
 
-if (!callTest) await registerMailgunInboundRoutes({
+if (!isolatedCalls) await registerMailgunInboundRoutes({
   app,
   db,
   writeAccount,
@@ -1565,7 +1572,7 @@ if (!callTest) await registerMailgunInboundRoutes({
   emailAttachmentsBucket,
 });
 
-if (!callTest) await registerPstnRoutes({
+if (!isolatedCalls) await registerPstnRoutes({
   app,
   db,
   writeAccount,
@@ -1574,14 +1581,14 @@ if (!callTest) await registerPstnRoutes({
   normalizeMessagingUsername,
 });
 
-if (!callTest) registerPstnVoiceWebhook({
+if (!isolatedCalls) registerPstnVoiceWebhook({
   app,
   db,
   writeAccount,
   bindAccounts,
 });
 
-if (!callTest) registerExternalEmailRoutes({
+if (!isolatedCalls) registerExternalEmailRoutes({
   app,
   db,
   writeAccount,
@@ -2578,6 +2585,7 @@ app.get("/api/chat/images/:imageId", requireChatSession, async (req, res) => {
 // Routes
 app.get("/health", (req, res) => {
   if (callTest) return res.json({ mode: "call-test", build: callTest.build, protocol: VERIFIED_CALL_PROTOCOL });
+  if (callIntegration) return res.json({ mode: "call-integration", protocol: VERIFIED_CALL_PROTOCOL });
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
@@ -4212,7 +4220,7 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, callTest?.local ? "127.0.0.1" : undefined, () => {
+httpServer.listen(PORT, isolatedCalls?.local ? "127.0.0.1" : undefined, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Frontend URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}`);
 });
