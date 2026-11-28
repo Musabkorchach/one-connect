@@ -22,6 +22,10 @@ import { GroupCallScreen } from "./group-call-screen";
 import { GroupCallActionsProvider } from "@/contexts/group-call-actions-context";
 import { usePstnCallController } from "@/lib/connect/use-pstn-call-controller";
 import { PstnCallScreen } from "./pstn-call-screen";
+import { usePiAuth } from "@/contexts/pi-auth-context";
+import { disconnectedAccountTransport, useAccountCallTransport } from "./account-peer-calls";
+import type { ChangedCallKey } from "@/lib/connect/call-identity";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
 
 const CALL_CONFIGURATION: RTCConfiguration = {
@@ -32,7 +36,12 @@ const CALL_CONFIGURATION: RTCConfiguration = {
 
 function AppInner() {
   const { ready, profile, ensureChat, contacts, t } = useConnect();
+  const { sessionToken } = usePiAuth();
+  const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
+  const accountTransport = useAccountCallTransport(production ? sessionToken : null);
   const [tab, setTab] = useState<TabId>("chats");
+  const [trustPeer, setTrustPeer] = useState<{ owner: string; peer: string; change?: ChangedCallKey }>();
+  const currentTrustPeer = trustPeer?.owner === profile.username ? trustPeer : undefined;
   const [openChat, setOpenChat] = useState<string | null>(null);
   const groupCallBusyRef = useRef(false);
   const pstnBusyRef = useRef<() => boolean>(() => false);
@@ -48,6 +57,12 @@ function AppInner() {
     } = useCallController(
     CALL_CONFIGURATION,
     () => groupCallBusyRef.current || pstnBusyRef.current(),
+    production ? accountTransport ?? disconnectedAccountTransport : undefined,
+    (peer, change) => {
+      setTrustPeer({ owner: profile.username, peer, change });
+      setOpenChat(null);
+      setTab("profile");
+    },
   );
 
   const {
@@ -100,7 +115,7 @@ pstnBusyRef.current = isPstnBusy;
   };
 
     return (
-    <GroupCallActionsProvider value={startGroupCall}>
+    <GroupCallActionsProvider value={production ? null : startGroupCall}>
       <div className="relative mx-auto min-h-[100dvh] max-w-md bg-background">
       {tab === "chats" && <ChatsView onOpen={(u) => setOpenChat(u)} />}
       {tab === "contacts" && (
@@ -109,7 +124,7 @@ pstnBusyRef.current = isPstnBusy;
       {tab === "calls" && (
         <CallsView
           onCall={startCall}
-          onPhoneCall={(phone) => void startPstnCall(phone)}
+          onPhoneCall={production || process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1" ? undefined : (phone) => void startPstnCall(phone)}
           phoneCallDisabled={
             Boolean(callState) ||
             Boolean(groupCallState) ||
@@ -119,9 +134,9 @@ pstnBusyRef.current = isPstnBusy;
       )}
       {tab === "emails" && <EmailsView />}
       {tab === "invoices" && <InvoicesView />}
-      {tab === "profile" && <ProfileView />}
+      {tab === "profile" && <ProfileView trustPeer={currentTrustPeer?.peer} changedKey={currentTrustPeer?.change} />}
 
-      <BottomNav tab={tab} onChange={setTab} />
+      <BottomNav tab={tab} onChange={(next) => { setTrustPeer(undefined); setTab(next); }} />
 
       {openChat && (
         <ConversationView

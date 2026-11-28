@@ -1,6 +1,8 @@
 import type { LangId } from "./data";
 
 export interface Dict {
+  privacyPolicy: string;
+  termsOfUse: string;
   signedOut: string;
   signInWithPi: string;
   appName: string;
@@ -152,6 +154,8 @@ export interface Dict {
 }
 
 const en: Dict = {
+  privacyPolicy: "Privacy policy",
+  termsOfUse: "Terms of use",
   signedOut: "Signed out", signInWithPi: "Sign in with Pi",
   invoiceSeller: "Seller",
   invoiceBuyer: "Buyer",
@@ -284,6 +288,8 @@ const en: Dict = {
 };
 
 const zh: Partial<Dict> = {
+  privacyPolicy: "隐私政策",
+  termsOfUse: "使用条款",
   signedOut: "已退出登录", signInWithPi: "使用 Pi 登录",
   tagline: "你的 Pi 用户名，一个通用身份。",
   tabChats: "聊天", tabContacts: "联系人", tabCalls: "通话", tabEmails: "邮件", tabProfile: "我的",
@@ -298,6 +304,8 @@ const zh: Partial<Dict> = {
 };
 
 const es: Partial<Dict> = {
+  privacyPolicy: "Política de privacidad",
+  termsOfUse: "Condiciones de uso",
   signedOut: "Sesión cerrada", signInWithPi: "Iniciar sesión con Pi",
   tagline: "Tu nombre Pi. Una identidad universal.",
   tabChats: "Chats", tabContacts: "Contactos", tabCalls: "Llamadas", tabEmails: "Correos", tabProfile: "Perfil",
@@ -312,6 +320,8 @@ const es: Partial<Dict> = {
 };
 
 const fr: Partial<Dict> = {
+  privacyPolicy: "Politique de confidentialité",
+  termsOfUse: "Conditions d’utilisation",
   signedOut: "Vous êtes déconnecté", signInWithPi: "Se connecter avec Pi",
   invoiceSeller: "Vendeur",
   invoiceBuyer: "Acheteur",
@@ -362,6 +372,8 @@ const fr: Partial<Dict> = {
 };
 
 const ar: Partial<Dict> = {
+  privacyPolicy: "سياسة الخصوصية",
+  termsOfUse: "شروط الاستخدام",
   signedOut: "تم تسجيل الخروج", signInWithPi: "تسجيل الدخول باستخدام Pi",
   invoiceSeller: "البائع",
   invoiceBuyer: "المشتري",
@@ -412,6 +424,8 @@ const ar: Partial<Dict> = {
 };
 
 const hi: Partial<Dict> = {
+  privacyPolicy: "गोपनीयता नीति",
+  termsOfUse: "उपयोग की शर्तें",
   signedOut: "आप साइन आउट हो गए हैं", signInWithPi: "Pi से साइन इन करें",
   tagline: "आपकी Pi उपयोगकर्ता नाम। एक सार्वभौमिक ID।",
   tabChats: "चैट", tabContacts: "संपर्क", tabCalls: "कॉल", tabEmails: "ईमेल", tabProfile: "प्रोफ़ाइल",
@@ -426,6 +440,8 @@ const hi: Partial<Dict> = {
 };
 
 const ru: Partial<Dict> = {
+  privacyPolicy: "Политика конфиденциальности",
+  termsOfUse: "Условия использования",
   signedOut: "Вы вышли из аккаунта", signInWithPi: "Войти через Pi",
   tagline: "Ваше имя Pi. Один универсальный ID.",
   tabChats: "Сообщения", tabContacts: "Контакты", tabCalls: "Вызовы", tabEmails: "Электронная почта", tabProfile: "Профиль",
@@ -440,6 +456,8 @@ const ru: Partial<Dict> = {
 };
 
 const ja: Partial<Dict> = {
+  privacyPolicy: "プライバシーポリシー",
+  termsOfUse: "利用規約",
   signedOut: "ログアウトしました", signInWithPi: "Pi でログイン",
   tagline: "あなたのPi名。 1つの普遍的なID。",
   tabChats: "チャット", tabContacts: "連絡先", tabCalls: "通話", tabEmails: "メール", tabProfile: "プロフィール",
@@ -454,6 +472,8 @@ const ja: Partial<Dict> = {
 };
 
 const ko: Partial<Dict> = {
+  privacyPolicy: "개인정보 처리방침",
+  termsOfUse: "이용약관",
   signedOut: "로그아웃되었습니다", signInWithPi: "Pi로 로그인",
   tagline: "당신의 Pi 사용자 이름. 하나의 통합 ID.",
   tabChats: "채팅", tabContacts: "연락처", tabCalls: "통화", tabEmails: "이메일", tabProfile: "프로필",
@@ -468,6 +488,8 @@ const ko: Partial<Dict> = {
 };
 
 const pt: Partial<Dict> = {
+  privacyPolicy: "Política de privacidade",
+  termsOfUse: "Termos de uso",
   signedOut: "Sessão encerrada", signInWithPi: "Entrar com Pi",
   tagline: "Seu usuário Pi. Uma identidade universal.",
   tabChats: "Conversas", tabContacts: "Contatos", tabCalls: "Chamadas", tabEmails: "E-mails", tabProfile: "Perfil",
@@ -482,6 +504,8 @@ const pt: Partial<Dict> = {
 };
 
 const de: Partial<Dict> = {
+  privacyPolicy: "Datenschutzerklärung",
+  termsOfUse: "Nutzungsbedingungen",
   signedOut: "Abgemeldet", signInWithPi: "Mit Pi anmelden",
   tagline: "Dein Pi-Nutzername. Eine universelle ID.",
   tabChats: "Chats", tabContacts: "Kontakte", tabCalls: "Anrufe", tabEmails: "E-Mails", tabProfile: "Profil",
@@ -496,6 +520,8 @@ const de: Partial<Dict> = {
 };
 
 const it: Partial<Dict> = {
+  privacyPolicy: "Informativa sulla privacy",
+  termsOfUse: "Condizioni d’uso",
   signedOut: "Disconnessione effettuata", signInWithPi: "Accedi con Pi",
   tagline: "Il tuo nome Pi. Un'identità universale.",
   tabChats: "Chat", tabContacts: "Contatti", tabCalls: "Chiamate", tabEmails: "E-mail", tabProfile: "Profilo",
@@ -510,6 +536,8 @@ const it: Partial<Dict> = {
 };
 
 const tr: Partial<Dict> = {
+  privacyPolicy: "Gizlilik politikası",
+  termsOfUse: "Kullanım koşulları",
   signedOut: "Oturum kapatıldı", signInWithPi: "Pi ile giriş yap",
   tagline: "Pi kullanıcı adın. Tek evrensel kimlik.",
   tabChats: "Sohbetler", tabContacts: "Kişiler", tabCalls: "Aramalar", tabEmails: "E-posta", tabProfile: "Profil",
@@ -524,6 +552,8 @@ const tr: Partial<Dict> = {
 };
 
 const vi: Partial<Dict> = {
+  privacyPolicy: "Chính sách quyền riêng tư",
+  termsOfUse: "Điều khoản sử dụng",
   signedOut: "Đã đăng xuất", signInWithPi: "Đăng nhập bằng Pi",
   tagline: "Tên Pi của bạn. Một danh tính chung.",
   tabChats: "Trò chuyện", tabContacts: "Danh bạ", tabCalls: "Cuộc gọi", tabEmails: "Email", tabProfile: "Hồ sơ",
@@ -538,6 +568,8 @@ const vi: Partial<Dict> = {
 };
 
 const am: Partial<Dict> = {
+  privacyPolicy: "የግላዊነት ፖሊሲ",
+  termsOfUse: "የአጠቃቀም ውሎች",
   signedOut: "ወጥተዋል", signInWithPi: "በ Pi ይግቡ",
   tagline: "የእርስዎ Pi ስም። አንድ ሁሉን አቀፍ መለያ።",
   tabChats: "ውይይቶች", tabContacts: "እውቂያዎች", tabCalls: "ጥሪዎች", tabEmails: "ኢሜይሎች", tabProfile: "መገለጫ",
@@ -552,6 +584,8 @@ const am: Partial<Dict> = {
 };
 
 const ti: Partial<Dict> = {
+  privacyPolicy: "ፖሊሲ ብሕታዊነት",
+  termsOfUse: "ውዕላት ኣጠቓቕማ",
   signedOut: "ወጺእኩም", signInWithPi: "ብ Pi እቶ",
   tagline: "ናይ እርስኻ Pi ስም። ሓደ ዓለምለኻዊ መንነት።",
   tabChats: "ዕላል", tabContacts: "ተራኸብቲ", tabCalls: "ጻውዒት", tabEmails: "ኢመይል", tabProfile: "መግለጺ",
@@ -566,6 +600,8 @@ const ti: Partial<Dict> = {
 };
 
 const id: Partial<Dict> = {
+  privacyPolicy: "Kebijakan privasi",
+  termsOfUse: "Ketentuan penggunaan",
   signedOut: "Anda telah keluar", signInWithPi: "Masuk dengan Pi",
   tagline: "Nama Pi Anda. Satu identitas universal.",
   tabChats: "Obrolan", tabContacts: "Kontak", tabCalls: "Panggilan", tabEmails: "Email", tabProfile: "Profil",

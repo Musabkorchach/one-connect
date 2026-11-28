@@ -1,30 +1,51 @@
 import io from "socket.io-client";
 import { normalizePstnPhone } from "@/lib/connect/pstn-phone";
+import type { SignedCallDescription } from "@/lib/connect/call-identity";
+import { isProductionFrontendOrigin, productionApiOrigin } from "@/lib/production-origins.mjs";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
-export const API_URL =
+const productionBrowser = typeof window !== "undefined" && isProductionFrontendOrigin(window.location.origin);
+const callTestMode = !productionBrowser && process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1";
+export const callIntegrationMode = !productionBrowser && process.env.NEXT_PUBLIC_CALL_INTEGRATION_MODE === "1";
+export const callTestBuildId = process.env.NEXT_PUBLIC_CALL_TEST_BUILD_ID;
+export const API_URL = productionBrowser ? productionApiOrigin :
+  process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_API_URL! :
+  callIntegrationMode ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_API_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_API_URL! :
+  process.env.NEXT_PUBLIC_ONECONNECT_API_URL ||
   process.env.REACT_APP_API_URL ||
   "https://one-connect.onrender.com";
 
-const WS_URL =
+export const WS_URL = productionBrowser ? productionApiOrigin :
+  process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" ? process.env.NEXT_PUBLIC_ONECONNECT_WS_URL! :
+  callIntegrationMode ? process.env.NEXT_PUBLIC_CALL_INTEGRATION_WS_URL! :
+  callTestMode ? process.env.NEXT_PUBLIC_CALL_TEST_WS_URL! :
+  process.env.NEXT_PUBLIC_ONECONNECT_WS_URL ||
   process.env.REACT_APP_WS_URL ||
   "https://one-connect.onrender.com";
 
 let socket: ReturnType<typeof io> | null = null;
+export const VERIFIED_CALL_PROTOCOL = 1;
+export const ACCOUNT_CALL_PROTOCOL = 2;
 export interface CallEventMap {
   "call:incoming": {
+    invite?: import("@/lib/connect/call-identity").CallInvite;
+    parties?: { caller: string; recipient: string };
     callId: string;
     from: string;
     kind: "voice" | "video";
+    protocol: number;
   };
-  "call:initiated": { callId: string };
-  "call:accepted": { callId: string };
+  "call:initiated": { callId: string; protocol: number; parties?: { caller: string; recipient: string } };
+  "call:update-required": { reason: "call-update-required" };
+  "call:accepted": { callId: string; challenge: string; publicKey?: string };
   "call:offer": {
     callId: string;
-    offer: RTCSessionDescriptionInit;
+    offer: SignedCallDescription;
   };
   "call:answered": {
     callId: string;
-    answer: RTCSessionDescriptionInit;
+    answer: SignedCallDescription;
   };
   "call:ice-candidate": {
     callId: string;
@@ -162,6 +183,9 @@ export async function getAppState(
 
   const record: unknown = await response.json();
   if (record === null) return null;
+  if (PI_NETWORK_CONFIG.PRODUCTION_REVIEW &&
+      record && typeof record === "object" && "blob" in record && record.blob === null &&
+      "legacyHistory" in record && (record.legacyHistory as { code?: string } | null)?.code === "ACCOUNT_MIGRATION_REQUIRED") return null;
 
   if (
     typeof record !== "object" ||
@@ -206,7 +230,8 @@ export function initSocket(userId: string, piUsername: string, sessionToken: str
 if (socket) disconnectSocket();
 
   socket = io(WS_URL, {
-  auth: { sessionToken },
+    auth: { sessionToken, verifiedCallProtocol: VERIFIED_CALL_PROTOCOL,
+      ...(callTestMode && { callTestBuild: callTestBuildId }) },
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
@@ -655,16 +680,11 @@ export function onUserStatus(callback: (data: Record<string, unknown>) => void) 
   socket.on("user:status", callback);
 }
 
-export async function getCallConfiguration(): Promise<RTCConfiguration> {
+export async function getCallConfiguration(sessionToken?: string): Promise<RTCConfiguration> {
   const activeSocket = socket;
   const auth = activeSocket?.auth;
-
-  if (
-    !activeSocket?.connected ||
-    !auth ||
-    typeof auth !== "object" ||
-    typeof auth.sessionToken !== "string"
-  ) {
+  const token = sessionToken ?? (activeSocket?.connected && auth && typeof auth === "object" ? auth.sessionToken : undefined);
+  if (typeof token !== "string" || !token) {
     throw new Error("An active session is required for calls.");
   }
 
@@ -674,7 +694,7 @@ export async function getCallConfiguration(): Promise<RTCConfiguration> {
   try {
     const response = await fetch(`${API_URL}/api/calls/ice-servers`, {
       headers: {
-        Authorization: `Bearer ${auth.sessionToken}`,
+        Authorization: `Bearer ${token}`,
       },
       cache: "no-store",
       signal: controller.signal,
@@ -737,7 +757,7 @@ export async function getCallConfiguration(): Promise<RTCConfiguration> {
       iceServers.push(server);
     }
 
-    if (socket !== activeSocket || !activeSocket.connected) {
+    if (!sessionToken && (socket !== activeSocket || !activeSocket?.connected)) {
       throw new Error("The call session changed.");
     }
 
@@ -748,21 +768,24 @@ export async function getCallConfiguration(): Promise<RTCConfiguration> {
 }
 
 export interface CallCommandMap {
-  "call:initiate": {
+  "call:verified-initiate": {
+    signature?: string;
     callId: string;
     to: string;
     kind: "voice" | "video";
+    protocol: number;
   };
   "call:accept": {
     callId: string;
+    challenge: string;
   };
   "call:offer": {
     callId: string;
-    offer: RTCSessionDescriptionInit;
+    offer: SignedCallDescription;
   };
   "call:answer": {
     callId: string;
-    answer: RTCSessionDescriptionInit;
+    answer: SignedCallDescription;
   };
   "call:ice-candidate": {
     callId: string;

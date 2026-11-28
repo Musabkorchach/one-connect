@@ -242,5 +242,6 @@ export function startAccountGroups({ sessionToken, isCurrent, onLists, onSelecti
   socket.on("group:read", (data) => { if (id24(data?.groupId) && !revoked.has(data.groupId)) refresh(data.groupId); });
   socket.connect();
   refreshLists();
-  return { close, select, loadOlder, refresh, action, send, signalFor: (id: string) => selected?.id === id ? selected.abort.signal : undefined };
+  return { close, select, loadOlder, refresh, action, send, signal: lifetime.signal,
+    signalFor: (id: string) => selected?.id === id ? selected.abort.signal : undefined };
 }

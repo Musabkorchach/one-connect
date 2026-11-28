@@ -36,9 +36,17 @@ export function createPrivateConversations(db, messages, bindings, writeAccount)
         $or: [{ senderAccountId: accountId }, { recipientAccountId: accountId }],
         ...(visibleOnly ? { deletedForAccountIds: { $ne: accountId } } : {}),
       } },
+      ...(visibleOnly ? [{ $sort: { at: -1, _id: -1 } }] : []),
       { $group: {
         _id: { $cond: [{ $eq: ["$senderAccountId", accountId] }, "$recipientAccountId", "$senderAccountId"] },
         latestAt: { $max: "$at" },
+        ...(visibleOnly && {
+          last: { $first: {
+            id: { $toString: "$_id" }, kind: "$kind", text: "$text", fileName: "$fileName", at: "$at", status: "$status",
+            fromMe: { $eq: ["$senderAccountId", accountId] },
+          } },
+          unread: { $sum: { $cond: [{ $and: [{ $eq: ["$recipientAccountId", accountId] }, { $ne: ["$status", "read"] }] }, 1, 0] } },
+        }),
       } },
       { $match: { _id: { $type: "string", $ne: accountId } } },
       { $sort: { latestAt: -1, _id: 1 } },
@@ -75,9 +83,9 @@ export function createPrivateConversations(db, messages, bindings, writeAccount)
       { projection: { accountId: 1, username: 1, state: 1, privateDataErased: 1 } },
     ).toArray() : [];
     const byId = new Map(peers.map((peer) => [peer.accountId, peer]));
-    return entries.map(({ _id: peerId, latestAt }) => {
+    return entries.map(({ _id: peerId, latestAt, last, unread }) => {
       const peer = privatePeerForClient(byId.get(peerId));
-      return { conversationId: privateConversationId(accountId, peerId), peer, canSend: peer.state === "active", latestAt };
+      return { conversationId: privateConversationId(accountId, peerId), peer, canSend: peer.state === "active", latestAt, last, unread };
     });
   }
 

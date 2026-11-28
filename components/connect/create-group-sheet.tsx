@@ -8,9 +8,11 @@ import { Sheet } from "./feedback";
 export function CreateGroupSheet({
   onClose,
   onCreated,
+  create,
 }: {
   onClose: () => void;
   onCreated: (groupId: string) => void;
+  create?: (name: string, members: string[]) => Promise<{ id: string }>;
 }) {
   const { contacts, lang, t } = useConnect();
   const { createGroup } = useGroups();
@@ -46,7 +48,7 @@ export function CreateGroupSheet({
     setError(null);
 
     try {
-      const group = await createGroup(name.trim(), selected);
+      const group = await (create ?? createGroup)(name.trim(), selected);
       onCreated(group.id);
     } catch (error) {
       setError(

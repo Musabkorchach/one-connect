@@ -104,6 +104,8 @@ export interface Conversation {
   messages: Message[];
   updatedAt: number;
   unread: number;
+  readOnly?: boolean;
+  preview?: Message;
 }
 
 export interface CallLog {

@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { startAccountGroups, type AccountGroup, type AccountGroupHistory, type GroupInvitation, type GroupStatus } from "@/lib/account-groups";
-import type { GroupMediaKind } from "@/lib/api-client";
+import { requestAccountGroup, type GroupMediaKind } from "@/lib/api-client";
+import { useConnect } from "@/contexts/connect-context";
+import { CreateGroupSheet } from "./create-group-sheet";
+import { GroupAvatar } from "./group-avatar";
+import { Header, IconButton } from "./ui";
+import { IconBack } from "./icons";
 import { GroupMediaContent } from "./group-media";
 import { Sheet } from "./feedback";
 import { VoiceRecorder } from "./voice-recorder";
@@ -15,7 +20,7 @@ const statusText: Record<GroupStatus, string> = {
   migration, unavailable: "Groups are unavailable because this account is no longer active.",
 };
 
-export function AccountGroupsView({ sessionToken }: { sessionToken: string }) {
+export function AccountGroupsView({ sessionToken, embedded = false, query = "" }: { sessionToken: string; embedded?: boolean; query?: string }) {
   const { isCurrentSession, endLocalSession } = usePiAuth();
   const [status, setStatus] = useState<GroupStatus>("connecting");
   const [groups, setGroups] = useState<AccountGroup[] | null>(null);
@@ -25,6 +30,7 @@ export function AccountGroupsView({ sessionToken }: { sessionToken: string }) {
   const [notice, setNotice] = useState("");
   const connection = useRef<Groups | null>(null);
   const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
   const [pendingAction, setPendingAction] = useState(false);
   const pending = useRef(false);
 
@@ -62,6 +68,13 @@ export function AccountGroupsView({ sessionToken }: { sessionToken: string }) {
   const listed = groups?.find((group) => group.id === selected);
   const shown = open && listed && !listed.canWrite ? { ...open, group: listed } : open;
 
+  if (embedded) {
+    return <AccountGroupsPanel sessionToken={sessionToken} groups={groups} invitations={invitations} query={query}
+      shown={shown} selected={selected} connection={connection.current} loading={status === "connecting"}
+      notice={notice || (status !== "connected" && status !== "connecting" ? statusText[status] : "")}
+      creating={creating} setCreating={setCreating} pendingAction={pendingAction} act={act} />;
+  }
+
   return (
     <main className="mx-auto max-w-md space-y-3 p-4">
       <header className="flex justify-between">
@@ -69,7 +82,12 @@ export function AccountGroupsView({ sessionToken }: { sessionToken: string }) {
         <button type="button" className="underline" onClick={() => endLocalSession("en")}>Sign out</button>
       </header>
       {statusText[status] && <p role="status">{statusText[status]}</p>}
-      {!terminal && <p className="text-sm text-muted-foreground">{migration}</p>}
+      {process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT === "production-review" && (
+        <p className="text-sm text-muted-foreground">Group calls are unavailable. Start voice and video calls in a private chat.</p>
+      )}
+      {!terminal && process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT !== "production-review" && (
+        <p className="text-sm text-muted-foreground">{migration}</p>
+      )}
       {!terminal && notice && <p role="alert">{notice}</p>}
       {!terminal && selected === null && (
         <>
@@ -115,6 +133,61 @@ export function AccountGroupsView({ sessionToken }: { sessionToken: string }) {
       )}
     </main>
   );
+}
+
+function AccountGroupsPanel({ sessionToken, groups, invitations, query, shown, selected, connection, loading, notice,
+  creating, setCreating, pendingAction, act }: {
+  sessionToken: string; groups: AccountGroup[] | null; invitations: GroupInvitation[]; query: string;
+  shown: AccountGroupHistory | null; selected: string | null; connection: Groups | null; loading: boolean; notice: string;
+  creating: boolean; setCreating: (creating: boolean) => void; pendingAction: boolean;
+  act: (path: string) => Promise<boolean>;
+}) {
+  const { lang, t } = useConnect();
+  const arabic = lang === "ar";
+  const loadingText = arabic ? "جارٍ تحميل المجموعات…" : "Loading groups…";
+  const search = query.trim().toLowerCase();
+  const visibleGroups = groups?.filter((group) => !search || group.name.toLowerCase().includes(search) ||
+    group.members.some((member) => member.username?.includes(search)));
+  return <section className="px-2 pt-3">
+    <div className="flex items-center justify-between gap-3 px-3 pb-2">
+      <h2 className="text-sm font-bold text-muted-foreground">{arabic ? "المجموعات" : "Groups"}</h2>
+      <button type="button" onClick={() => setCreating(true)}
+        className="pc-press rounded-full bg-primary/15 px-4 py-2 text-sm font-semibold text-primary">
+        {arabic ? "+ إنشاء مجموعة" : "+ Create group"}
+      </button>
+    </div>
+    {loading && <p className="px-3 text-sm text-muted-foreground">{loadingText}</p>}
+    {notice && <p role="alert" className="px-3 text-sm text-destructive">{notice}</p>}
+    {invitations.map((invite) => <div key={invite.groupId} className="flex items-center gap-3 rounded-xl bg-card px-3 py-2">
+      <span className="flex-1">{invite.name}</span>
+      <button type="button" disabled={pendingAction} onClick={() => void act("/" + invite.groupId + "/invitations/accept")}>{t.accept}</button>
+      <button type="button" disabled={pendingAction} onClick={() => void act("/" + invite.groupId + "/invitations/decline")}>{t.decline}</button>
+    </div>)}
+    <ul>{visibleGroups?.map((group) => <li key={group.id}>
+      <button type="button" onClick={() => connection?.select(group.id)}
+        className="pc-press flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-start hover:bg-card/50">
+        <GroupAvatar name={group.name} groupId={group.id} size={52} />
+        <span className="min-w-0 flex-1"><span className="block truncate font-semibold">{group.name}</span>
+          <span className="block text-xs text-muted-foreground">{group.members.length} {arabic ? "أعضاء" : "members"}</span></span>
+      </button>
+    </li>)}</ul>
+    {creating && connection && <CreateGroupSheet onClose={() => setCreating(false)} onCreated={(id) => {
+      setCreating(false); connection.refresh(); connection.select(id);
+    }} create={async (name, members) => {
+      const result = await requestAccountGroup(sessionToken, connection.signal, "", "POST", { name, members });
+      const group = (result as { group?: { id?: string } }).group;
+      if (!group?.id || !/^[a-f0-9]{24}$/.test(group.id)) throw new Error("Invalid group response.");
+      return { id: group.id };
+    }} />}
+    {selected && <div className="fixed inset-0 z-40 flex flex-col overflow-y-auto bg-background">
+      <Header title={shown?.group.name ?? ""} left={<IconButton onClick={() => connection?.select(null)} aria-label={t.back}>
+        <IconBack className="h-5 w-5 rtl:rotate-180" /></IconButton>} />
+      <div className="space-y-3 px-3 py-4">
+        {shown && connection ? <ScopedGroupConversation key={selected} history={shown} connection={connection} /> :
+          <p role="status">{notice || loadingText}</p>}
+      </div>
+    </div>}
+  </section>;
 }
 
 export function ScopedGroupConversation({ history, connection }: { history: AccountGroupHistory; connection: Groups }) {

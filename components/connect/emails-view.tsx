@@ -1,5 +1,6 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, IconButton, Button, EmptyState, TextInput, TextArea, cx } from "./ui";
@@ -22,11 +23,11 @@ import { formatDate, timeAgo, type Email, type EmailFolder } from "@/lib/connect
 
 type MailboxViewProps = Pick<ReturnType<typeof useConnect>,
   "t" | "lang" | "emails" | "sendEmail" | "markEmailRead" | "deleteEmail" | "pushToast" | "contacts"
-> & { saveDraft?: ReturnType<typeof useConnect>["saveDraft"] };
+> & { saveDraft?: ReturnType<typeof useConnect>["saveDraft"]; internalOnly?: boolean };
 
 export function EmailsView() {
   const mailbox = useConnect();
-  return <MailboxView mailbox={mailbox} />;
+  return <MailboxView mailbox={{ ...mailbox, internalOnly: PI_NETWORK_CONFIG.PRODUCTION_REVIEW }} />;
 }
 
 export function MailboxView({ mailbox }: { mailbox: MailboxViewProps }) {
@@ -347,7 +348,7 @@ function ComposeEmail({
   onClose: () => void;
   replyTo: Email | null;
 }) {
-  const { t, sendEmail, saveDraft, pushToast, contacts } = mailbox;
+  const { t, sendEmail, saveDraft, pushToast, contacts, internalOnly } = mailbox;
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -395,6 +396,10 @@ function ComposeEmail({
     if (sendingRef.current) return;
 
     const recipient = to.trim().toLowerCase();
+    if (internalOnly && !/^@[a-z0-9._-]{1,32}$/.test(recipient)) {
+      pushToast("Enter an internal Pi username such as @username.", "error");
+      return;
+    }
 
     if (!recipient) {
       pushToast(
@@ -484,14 +489,14 @@ function ComposeEmail({
             <input
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              placeholder="@username or email@domain.com"
+              placeholder={internalOnly ? "@username" : "@username or email@domain.com"}
               list="contact-usernames"
               className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
             <p className="mt-1 text-[11px] text-muted-foreground">
-              {to.includes("@") && !to.startsWith("@") && "📧 External email"}
+              {!internalOnly && to.includes("@") && !to.startsWith("@") && "📧 External email"}
               {to.startsWith("@") && "👤 Internal Pi user"}
-              {!to && "Enter @ for internal or email for external"}
+              {internalOnly ? "Only internal Pi mail is available." : !to && "Enter @ for internal or email for external"}
             </p>
           </div>
           <datalist id="contact-usernames">

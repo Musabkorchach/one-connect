@@ -60,7 +60,7 @@ export function ChatsView({ onOpen }: { onOpen: (username: string) => void }) {
         <ul className="px-2 pt-2">
           {filtered.map((c, i) => (
             <li key={c.id} style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }} className="pc-fade-up">
-              <ChatRow conv={c} locale={lang} onOpen={() => { if (c.username) onOpen(c.username); }} t={t} />
+              <ChatRow conv={c} locale={lang} onOpen={() => onOpen(c.username ?? c.id)} t={t} />
             </li>
           ))}
         </ul>
@@ -80,7 +80,7 @@ function ChatRow({
   onOpen: () => void;
   t: ReturnType<typeof useConnect>["t"];
 }) {
-  const last = conv.messages[conv.messages.length - 1];
+  const last = conv.preview ?? conv.messages[conv.messages.length - 1];
   const preview = (() => {
     if (!last) return "";
     if (last.kind === "image") return t.photo;

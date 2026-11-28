@@ -3,7 +3,9 @@ import type { Message, MsgKind } from "@/lib/connect/data";
 
 export type ChatConnectionStatus = "connecting" | "connected" | "offline" | "deleting" | "inactive" | "migration";
 type Peer = { state: "active" | "deleting" | "deleted"; label: string; username: string | null };
-export type PrivateConversation = { conversationId: string; peer: Peer; canSend: boolean };
+export type PrivateConversation = {
+  conversationId: string; peer: Peer; canSend: boolean; latestAt?: number; last?: Message; unread?: number;
+};
 export type PrivateHistory = PrivateConversation & { messages: Message[] };
 
 const migration = "ACCOUNT_MIGRATION_REQUIRED";
@@ -20,7 +22,13 @@ function conversationFrom(data: unknown): PrivateConversation {
       (peer.state === "active" ? typeof peer.username !== "string" || !peer.username : peer.username !== null)) {
     throw new Error("Invalid conversation response.");
   }
-  return { conversationId: value.conversationId, peer, canSend: peer.state === "active" && value.canSend === true };
+  const { latestAt, last, unread } = value;
+  const validLast = last && validMessageId(last.id) && kinds.has(last.kind) && statuses.has(last.status) &&
+    typeof last.text === "string" && typeof last.fromMe === "boolean" && Number.isSafeInteger(last.at);
+  return { conversationId: value.conversationId, peer, canSend: peer.state === "active" && value.canSend === true,
+    ...(typeof latestAt === "number" && Number.isSafeInteger(latestAt) && { latestAt }),
+    ...(validLast && { last }),
+    ...(typeof unread === "number" && Number.isSafeInteger(unread) && unread >= 0 && { unread }) };
 }
 
 function scopedData(data: unknown) {

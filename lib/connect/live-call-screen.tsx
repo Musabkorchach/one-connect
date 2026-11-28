@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useConnect } from "@/contexts/connect-context";
 import type { CallViewState } from "@/lib/connect/use-call-controller";
+import type { getDict } from "@/lib/connect/i18n";
 import { formatDuration } from "@/lib/connect/data";
 import { Avatar } from "@/components/connect/ui";
 import { CallStream } from "./call-stream";
@@ -15,22 +16,33 @@ import {
   IconHangup,
 } from "@/components/connect/icons";
 
-export function LiveCallScreen({
-  call,
-  onAccept,
-  onEnd,
-  onMutedChange,
-  onVideoEnabledChange,
-  onSwitchCamera,
-}: {
+type CallScreenProps = {
   call: CallViewState;
   onAccept: () => void;
   onEnd: () => void;
   onMutedChange: (muted: boolean) => void;
   onVideoEnabledChange: (enabled: boolean) => void;
-    onSwitchCamera: () => Promise<void>;
-}) {
-  const { t } = useConnect();
+  onSwitchCamera: () => Promise<void>;
+};
+
+export function LiveCallScreen(props: CallScreenProps) {
+  const { t, profile } = useConnect();
+  return <LivePeerCallScreen {...props} t={t} language={profile.language} />;
+}
+
+export function LivePeerCallScreen({
+  call,
+  onAccept,
+  onEnd,
+  onMutedChange,
+  onVideoEnabledChange,
+  onSwitchCamera, t, language,
+}: CallScreenProps & { t: ReturnType<typeof getDict>; language?: string }) {
+  const [outputLabel, outputUnavailableLabel] = language === "ar"
+    ? ["مخرج الصوت", "الهاتف يحدّد مخرج صوت المكالمة."]
+    : language === "fr"
+      ? ["Sortie audio", "Le téléphone gère la sortie audio de l'appel."]
+      : ["Audio output", "Your phone manages the call audio output."];
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
@@ -76,7 +88,8 @@ export function LiveCallScreen({
       <CallStream
         stream={call.remoteStream}
         playbackLabel={t.unmute}
-        outputLabel={t.speaker}
+        outputLabel={outputLabel}
+        outputUnavailableLabel={outputUnavailableLabel}
         className={
           hasVideo
             ? "absolute inset-0 h-full w-full object-cover"
@@ -116,6 +129,7 @@ export function LiveCallScreen({
         <p className="mt-2 text-xs text-white/70">
           {call.kind === "video" ? t.videoCall : t.voiceCall}
         </p>
+        {call.phase === "active" && <p className="mt-1 text-xs text-white">{call.trust === "manual" ? "Peer device verified by safety code" : "Peer device linked to its Pi account by One Connect"}</p>}
       </div>
 
       <div className="pc-safe-bottom relative z-[5] px-6 pb-8">

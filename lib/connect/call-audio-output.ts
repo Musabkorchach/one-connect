@@ -6,6 +6,20 @@ type OutputMediaDevices = MediaDevices & {
   selectAudioOutput?: () => Promise<MediaDeviceInfo>;
 };
 
+export async function listCallAudioOutputs(
+  element: HTMLMediaElement,
+  devices: MediaDevices | undefined = navigator.mediaDevices,
+): Promise<MediaDeviceInfo[]> {
+  if (typeof (element as OutputMediaElement).setSinkId !== "function" || !devices?.enumerateDevices) return [];
+  const outputs = new Map<string, MediaDeviceInfo>();
+  for (const device of await devices.enumerateDevices()) {
+    // These aliases can point to the same physical device.
+    if (device.kind === "audiooutput" && device.deviceId && device.deviceId !== "default" &&
+        device.deviceId !== "communications") outputs.set(device.deviceId, device);
+  }
+  return outputs.size > 1 ? [...outputs.values()] : [];
+}
+
 export async function getCallAudioOutputs(
   element: HTMLMediaElement,
 ): Promise<MediaDeviceInfo[]> {
@@ -30,17 +44,8 @@ export async function getCallAudioOutputs(
     return [selected];
   }
 
-  const available = await devices.enumerateDevices();
-  const outputs = available.filter(
-    (device) => device.kind === "audiooutput",
-  );
-
-  if (outputs.length === 0) {
-    throw new Error(
-      "This browser does not expose any selectable audio outputs.",
-    );
-  }
-
+  const outputs = await listCallAudioOutputs(element, devices);
+  if (!outputs.length) throw new Error("This browser is not exposing a choice of audio outputs.");
   return outputs;
 }
 

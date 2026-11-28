@@ -3,6 +3,7 @@
 import React, {
   createContext,
   useContext,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -10,6 +11,10 @@ import React, {
 } from "react";
 import { usePiAuth } from "@/contexts/pi-auth-context";
 import { getDict, type Dict } from "@/lib/connect/i18n";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
+import { startPrivateChat, type PrivateConversation } from "@/lib/account-private-chat";
+import { startAccountMailbox } from "@/lib/account-mailbox";
+import { normalizeCallName } from "@/lib/connect/call-identity";
 import {
   emitMessage,
   joinConversation,
@@ -34,6 +39,7 @@ import {
   uploadEmailAttachment,
   deleteChatMessage,
   onMessageDeleted,
+  requestPrivateData,
 } from "@/lib/api-client";
 import {
   KEYS,
@@ -113,6 +119,7 @@ interface ConnectContextType {
   chats: Conversation[];
   getChat: (username: string) => Conversation | undefined;
   ensureChat: (c: Contact | ContactRequest) => void;
+  openChat: (target: string | null) => void;
   totalUnread: number;
     sendMessage: (
     username: string,
@@ -122,7 +129,7 @@ interface ConnectContextType {
     amount?: number,
     imageId?: string,
     attachmentId?: string
-  ) => void;
+  ) => void | Promise<boolean>;
   markChatRead: (username: string, messageIds?: string[]) => void;
   deleteMessage: (username: string, messageId: string) => Promise<boolean>;
   // calls
@@ -151,6 +158,7 @@ const ConnectContext = createContext<ConnectContextType | undefined>(undefined);
 
 export function ConnectProvider({ children }: { children: ReactNode }) {
   const { sdk, isAuthenticated, piUsername, sessionToken, endLocalSession, isCurrentSession } = usePiAuth();
+  const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
 
   const [ready, setReady] = useState(false);
   const [chatsLoaded, setChatsLoaded] = useState(false);
@@ -201,6 +209,15 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
   }
 
   const stateApi = useRef<StateApi | null>(null);
+  const accountChat = useRef<ReturnType<typeof startPrivateChat> | null>(null);
+  const accountMailbox = useRef<ReturnType<typeof startAccountMailbox> | null>(null);
+  const openChat = useCallback((target: string | null) => {
+    const connection = accountChat.current;
+    if (!connection) return;
+    const known = chatsRef.current.find((chat) => chat.id === target || chat.username === target);
+    if (!target || (known && /^[a-f0-9]{64}$/.test(known.id))) connection.select(target ? known!.id : null);
+    else void connection.start(target);
+  }, []);
 
   // ---- toasts ----
   const pushToast = (message: string, tone: Toast["tone"] = "default") => {
@@ -351,6 +368,91 @@ export function ConnectProvider({ children }: { children: ReactNode }) {
     };
     stateApi.current = api;
 
+    if (production) {
+      const abort = new AbortController();
+      const current = () => !abort.signal.aborted && isCurrentSession(sessionToken);
+      const owner = normalizeCallName(piUsername || "");
+      const placeChat = (entry: PrivateConversation): Conversation => {
+        const old = chatsRef.current.find((chat) => chat.id === entry.conversationId);
+        return {
+          id: entry.conversationId, username: entry.peer.username ?? undefined,
+          name: entry.peer.label, color: hueFromString(entry.peer.username ?? entry.conversationId),
+          isGroup: false, readOnly: !entry.canSend, messages: old?.messages ?? [],
+          preview: entry.last ?? old?.preview,
+          updatedAt: entry.latestAt ?? old?.updatedAt ?? 0, unread: entry.unread ?? old?.unread ?? 0,
+        };
+      };
+      const showChats = (next: Conversation[]) => {
+        chatsRef.current = next;
+        setChats(next);
+      };
+      let mailboxSnapshot: Email[] = [];
+      let draftsLoaded = false;
+      const showMailbox = () => {
+        emailsRef.current = [...emailsRef.current.filter((email) => email.folder === "drafts"), ...mailboxSnapshot];
+        setEmails(emailsRef.current);
+        if (draftsLoaded) setEmailsLoadedFor(sessionToken);
+      };
+      const chat = startPrivateChat({
+        sessionToken, isCurrent: current,
+        onList: (entries) => showChats(entries.map(placeChat)),
+        onSelection: () => {},
+        onHistory: (history) => {
+          const next = { ...placeChat(history), messages: history.messages,
+            unread: history.messages.filter((message) => !message.fromMe && message.status !== "read").length,
+            preview: history.messages.at(-1),
+            updatedAt: history.messages.at(-1)?.at ?? 0 };
+          showChats([next, ...chatsRef.current.filter((item) => item.id !== next.id)]
+            .sort((a, b) => b.updatedAt - a.updatedAt));
+        },
+        onStatus: (status) => { if (status === "deleting" || status === "inactive") endLocalSession(profileRef.current.language); },
+        onError: (error) => pushToast(error, "error"),
+      });
+      accountChat.current = chat;
+      const mailbox = startAccountMailbox({
+        sessionToken, username: owner, isCurrent: current,
+        onEmails: (next) => { mailboxSnapshot = next; showMailbox(); },
+        onStatus: (status) => { if (status === "deleting" || status === "inactive") endLocalSession(profileRef.current.language); },
+        onLoadError: () => setStorageNotice(true),
+      });
+      accountMailbox.current = mailbox;
+      void Promise.all([
+        requestPrivateData(sessionToken, abort.signal, "/profile").then(({ profile: blob }) => {
+          if (!current()) return;
+          const next = sanitizeProfile(blob);
+          if (blob && typeof blob === "object" && !("setupDone" in blob)) next.setupDone = Boolean(next.displayName);
+          profileRef.current = { ...next, username: owner, piUsername: owner };
+          setProfile(profileRef.current);
+          setReady(true);
+        }),
+        requestPrivateData(sessionToken, abort.signal, "/contacts").then(({ contacts: items }) => {
+          if (!current() || !Array.isArray(items)) return;
+          contactsRef.current = sanitizeContacts({ items: items.filter((item) => item?.state === "active") });
+          setContacts(contactsRef.current);
+        }),
+        api.get(KEYS.calls).then((record) => {
+          if (!current() || !record) return;
+          callsRef.current = sanitizeCalls(record.blob);
+          setCalls(callsRef.current);
+        }),
+        api.get(KEYS.emails).then((record) => {
+          if (!current()) return;
+          const drafts = record ? sanitizeEmails(record.blob).filter((email) => email.folder === "drafts") : [];
+          emailsRef.current = drafts;
+          draftsLoaded = true;
+          showMailbox();
+        }),
+      ]).catch(() => { if (current()) setStorageNotice(true); });
+      return () => {
+        abort.abort();
+        chat.close();
+        mailbox.close();
+        accountChat.current = null;
+        accountMailbox.current = null;
+        if (stateApi.current === api) stateApi.current = null;
+      };
+    }
+
     (async () => {
       try {
         const [pRec, cRec, rRec, chRec, clRec, emRec] = await Promise.all([
@@ -487,7 +589,7 @@ if (cRec) {
     })();
 
     return () => { cancelled = true; };
-  }, [sdk, isAuthenticated, piUsername, sessionToken]);
+  }, [sdk, isAuthenticated, piUsername, sessionToken, production, isCurrentSession]);
 
   useEffect(() => () => {
     stateApi.current = null;
@@ -538,7 +640,7 @@ if (cRec) {
   const commitChats = (next: Conversation[], immediate = false) => {
     chatsRef.current = next;
     setChats(next);
-    scheduleSave(KEYS.chats, chatsToBlob(next), immediate);
+    if (!production) scheduleSave(KEYS.chats, chatsToBlob(next), immediate);
   };
   const commitCalls = (next: CallLog[], immediate = false) => {
     callsRef.current = next;
@@ -1077,7 +1179,8 @@ useEffect(() => {
   // ---- profile actions ----
   const finishSetup = (displayName: string, avatar: string | null, providedPiUsername?: string) => {
     const name = cleanStr(displayName, 40) || "Pioneer";
-    const identity = canonicalPiUsername(providedPiUsername || piUsername || profileRef.current.piUsername || profileRef.current.username);
+    const identity = production ? normalizeCallName(piUsername || "") :
+      canonicalPiUsername(providedPiUsername || piUsername || profileRef.current.piUsername || profileRef.current.username);
     if (!identity) {
       pushToast("Your Pi username is not available yet. Please try again.", "error");
       return;
@@ -1147,6 +1250,19 @@ stateApi.current = null;
       statusText: "",
       addedAt: Date.now(),
     };
+    if (production && sessionToken) {
+      const previous = contactsRef.current;
+      contactsRef.current = [c, ...previous];
+      setContacts(contactsRef.current);
+      const signal = accountChat.current?.signal;
+      if (signal) void requestPrivateData(sessionToken, signal, "/contacts", "POST", { username, name: c.name }).catch(() => {
+        if (!isCurrentSession(sessionToken) || signal.aborted) return;
+        contactsRef.current = contactsRef.current.filter((contact) => contact !== c);
+        setContacts(contactsRef.current);
+        pushToast(t.addByUsername, "error");
+      });
+      return "added";
+    }
     commitContacts([c, ...contactsRef.current], true);
 
 if (sessionToken && piUsername) {
@@ -1201,9 +1317,10 @@ return "added";
 
   // ---- chats ----
   const getChat = (username: string) =>
-    chatsRef.current.find((c) => c.username === normalizeUsername(username));
+    chatsRef.current.find((c) => c.id === username || c.username === normalizeUsername(username));
 
   const ensureChat = (person: Contact | ContactRequest) => {
+    if (production) return;
     const username = person.username;
     if (getChat(username)) return;
     const conv: Conversation = {
@@ -1238,6 +1355,16 @@ return "added";
     attachmentId?: string,
   ) => {
     const uname = normalizeUsername(username);
+    if (production) {
+      const conversation = getChat(username);
+      const connection = accountChat.current;
+      if (!conversation || conversation.readOnly || !connection) return Promise.resolve(false);
+      return connection.send(conversation.id, { messageId: uid(), kind, text: cleanStr(text, 2000), imageId, attachmentId })
+        .then(() => !connection.signal.aborted, (error) => {
+          if (!connection.signal.aborted) pushToast(error.message, "error");
+          return false;
+        });
+    }
     let list = [...chatsRef.current];
     let conv = list.find((c) => c.username === uname);
     if (!conv) {
@@ -1313,6 +1440,19 @@ return "added";
       (item) => !item.isGroup && item.username === peer,
     );
     const message = chat?.messages.find((item) => item.id === messageId);
+    if (production) {
+      const conversation = getChat(username);
+      const connection = accountChat.current;
+      if (!conversation || !connection || !conversation.messages.some((item) => item.id === messageId)) return false;
+      try {
+        await deleteChatMessage(token, ownUsername, messageId, connection.signal);
+        connection.refresh(conversation.id);
+        return !connection.signal.aborted;
+      } catch (error) {
+        if (!connection.signal.aborted) pushToast(error instanceof Error ? error.message : "Message could not be deleted.", "error");
+        return false;
+      }
+    }
     if (!message) return true;
 
     const sender = message.fromMe ? ownUsername : peer;
@@ -1365,9 +1505,7 @@ return "added";
     }
 
     const uname = normalizeUsername(username);
-    const chat = chatsRef.current.find(
-      (item) => !item.isGroup && item.username === uname,
-    );
+    const chat = getChat(username);
     if (!chat) return;
 
     const requested = new Set(messageIds);
@@ -1375,6 +1513,10 @@ return "added";
       (message) => !message.fromMe && requested.has(message.id),
     );
     if (received.length === 0) return;
+    if (production) {
+      accountChat.current?.markRead(chat.id, received);
+      return;
+    }
 
     const emitted = acknowledgeMessages(
       uname,
@@ -1468,6 +1610,7 @@ return "added";
 
     const target = recipient.trim().toLowerCase();
     const emailType = validateEmailRecipient(target);
+    if (production && emailType !== "internal") return false;
 
     if (!emailType) {
       pushToast("Invalid email recipient.", "error");
@@ -1546,7 +1689,7 @@ return "added";
 
       if (emailSessionRef.current !== token) return false;
 
-      const email = parseInternalEmail(record, username);
+      const email = parseInternalEmail(record, username, production ? "account" : undefined);
 
       if (!email || !email.fromMe) {
         throw new Error("Invalid email response.");
@@ -1561,6 +1704,7 @@ return "added";
 
       emailsRef.current = next;
       setEmails(next);
+      if (production) accountMailbox.current?.refresh();
 
       pushToast(
         emailType === "external"
@@ -1721,7 +1865,7 @@ return "added";
     chats,
     getChat,
     ensureChat,
-    totalUnread,
+    totalUnread, openChat,
     sendMessage,
     markChatRead,
     deleteMessage,

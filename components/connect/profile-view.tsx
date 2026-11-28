@@ -1,6 +1,8 @@
 "use client";
 
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { useConnect } from "@/contexts/connect-context";
 import { Avatar, Header, Button, TextInput, cx } from "./ui";
 import { Sheet } from "./feedback";
@@ -17,11 +19,14 @@ import {
 import { LANGUAGES, fileToAvatar, type LangId, type UserStatus } from "@/lib/connect/data";
 import { IconLogout } from "./icons";
 import { usePiAuth } from "@/contexts/pi-auth-context";
+import { AccountDeletionSettings } from "./account-deletion-settings";
 import { AccountSubscriptionStatus } from "./account-subscription-status";
+import { CallSafetySettings } from "./call-safety-settings";
+import { productionPiNetOrigin } from "@/lib/production-origins.mjs";
 
-export function ProfileView() {
+export function ProfileView({ trustPeer, changedKey }: { trustPeer?: string; changedKey?: import("@/lib/connect/call-identity").ChangedCallKey } = {}) {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
-  const { sessionToken } = usePiAuth();
+  const { sessionToken, piUsername } = usePiAuth();
   const [editOpen, setEditOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
@@ -39,6 +44,24 @@ export function ProfileView() {
   };
 
   const currentLang = LANGUAGES.find((l) => l.id === profile.language);
+  const shareLabel = profile.language === "ar" ? "مشاركة One Connect" :
+    profile.language === "fr" ? "Partager One Connect" : "Share One Connect";
+  const shareApp = async () => {
+    if (typeof navigator.share === "function") {
+      try {
+        await navigator.share({ title: t.appName, url: productionPiNetOrigin });
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(productionPiNetOrigin);
+      pushToast(t.copied || "Copied to clipboard", "success");
+    } catch {
+      pushToast(productionPiNetOrigin, "default");
+    }
+  };
 
   return (
     <div className="pb-24">
@@ -73,6 +96,9 @@ export function ProfileView() {
           </div>
           {copied ? <IconCheck className="h-5 w-5 text-success" /> : <IconCopy className="h-5 w-5 text-muted-foreground" />}
         </button>
+        {PI_NETWORK_CONFIG.PRODUCTION_REVIEW && (
+          <Button variant="outline" className="mt-2 w-full" onClick={() => void shareApp()}>{shareLabel}</Button>
+        )}
       </div>
 
       {/* status */}
@@ -117,7 +143,7 @@ export function ProfileView() {
         </button>
       </div>
 
-      {sessionToken && (
+      {sessionToken && !PI_NETWORK_CONFIG.PRODUCTION_REVIEW && (
         <div className="mt-4 px-4">
           <AccountSubscriptionStatus sessionToken={sessionToken} language={profile.language} />
         </div>
@@ -140,6 +166,15 @@ export function ProfileView() {
 
       {/* logout */}
       <div className="mt-4 px-4 pb-4">
+        <div className="mb-4">
+          <CallSafetySettings key={JSON.stringify([piUsername || profile.username, trustPeer])} username={piUsername || profile.username} initialPeer={trustPeer} changedKey={changedKey} accountLinked={PI_NETWORK_CONFIG.PRODUCTION_REVIEW} language={profile.language} />
+        </div>
+        <div className="mb-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm">
+          <Link href="/privacy" className="text-accent underline underline-offset-4">{t.privacyPolicy}</Link>
+          <Link href="/terms" className="text-accent underline underline-offset-4">{t.termsOfUse}</Link>
+        </div>
+        {sessionToken && PI_NETWORK_CONFIG.PRODUCTION_REVIEW &&
+          <AccountDeletionSettings sessionToken={sessionToken} language={profile.language} />}
         <Button variant="outline" className="w-full py-3 text-destructive border-destructive/50 hover:bg-destructive/10" onClick={logout}>
           <IconLogout className="h-4 w-4" />
           {t.logout || "Logout"}

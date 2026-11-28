@@ -19,7 +19,7 @@ export function assertLocalAccountBindingDatabase(options) {
 
 export function createVerifyPiLogin({
   db, emailUsersCollection, users, userSessions,
-  normalizeMessagingUsername, bindAccounts, verifyFetch = fetch,
+  normalizeMessagingUsername, bindAccounts, production = false, verifyFetch = fetch,
 }) {
   return async (req, res) => {
     const { accessToken } = req.body;
@@ -44,7 +44,7 @@ export function createVerifyPiLogin({
         return res.status(401).json({ error: "Invalid Pi username" });
       }
 
-      const userId = `pi_${piUsername}`;
+      let userId = `pi_${piUsername}`;
       let accountId;
       if (bindAccounts) {
         if (typeof uid !== "string" || !uid || uid !== uid.trim()) {
@@ -58,6 +58,7 @@ export function createVerifyPiLogin({
           });
         }
         accountId = binding.accountId;
+        if (production) userId = accountId;
       } else {
         await emailUsersCollection.updateOne(
           { _id: messagingUsername },
@@ -102,9 +103,18 @@ export function createVerifyPiLogin({
       if (!userSessions.has(sessionToken)) return res.status(409).json({ code: "ACCOUNT_DELETING", error: "Account is no longer active" });
       res.json({
         sessionToken, userId, piUsername, message: "Authenticated",
-        ...(bindAccounts ? { accountDeletionSupported: true, subscriptionStatusSupported: true, accountDataStatus: migrationRequired.code, emailSocketMode: "account", chatSocketMode: "account", groupSocketMode: "account", callSocketMode: "account", privateDataOwner: privateDataOwnerKey(accountId) } : {}),
+        ...(bindAccounts ? {
+          accountDeletionSupported: true, subscriptionStatusSupported: !production,
+          ...(production ? {} : { accountDataStatus: migrationRequired.code }),
+          callSocketMode: "account",
+          emailSocketMode: "account", chatSocketMode: "account", groupSocketMode: "account",
+          privateDataOwner: privateDataOwnerKey(accountId),
+        } : {}),
       });
     } catch (error) {
+      if (production && error.code === 11000 && error.keyPattern?.username === 1) {
+        return res.status(409).json({ error: "This Pi username already belongs to a different account." });
+      }
       console.error("Auth error:", error);
       res.status(500).json({ error: "Authentication failed" });
     }

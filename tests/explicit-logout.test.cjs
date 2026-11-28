@@ -39,11 +39,12 @@ function mount({
   storage = new Map(),
   storageErrors = {},
   iframe = false,
+  callIntegrationMode = false,
   authenticate = async () => credentials,
   verify = async () => session("session"),
   onLegacyPurchaseRead = () => {},
 } = {}) {
-  const calls = { pi: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
+  const calls = { pi: 0, sdkLite: 0, verified: [], revoked: [], sockets: [], disconnects: 0, messages: [] };
   const listeners = new Set();
   const state = [];
   let cursor = 0;
@@ -69,9 +70,10 @@ function mount({
     location: { origin: "https://example.test" },
     Pi: { init: async () => {}, authenticate: (...args) => { calls.pi++; return authenticate(...args); } },
     SDKLite: {
-      init: async () => ({
-        state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead },
-      }),
+      init: async () => {
+        calls.sdkLite++;
+        return { state: { products: onLegacyPurchaseRead, restore: onLegacyPurchaseRead, get: onLegacyPurchaseRead } };
+      },
     },
     get sessionStorage() {
       if (storageErrors.unavailable) throw new Error("Storage unavailable");
@@ -97,6 +99,7 @@ function mount({
   win.top = iframe ? {} : win;
   win.parent = { postMessage: (message) => calls.messages.push(JSON.parse(message)) };
   const api = {
+    callIntegrationMode,
     verifyPiAuth: (token) => { calls.verified.push(token); return verify(token); },
     revokeSession: async (token) => { calls.revoked.push(token); },
     initSocket: (_userId, _username, token) => calls.sockets.push(token),
@@ -149,6 +152,23 @@ function mount({
     },
   };
 }
+
+test("call integration uses Pi username authentication without initializing the purchase SDK", async () => {
+  const app = mount({
+    callIntegrationMode: true,
+    authenticate: async (scopes) => {
+      assert.deepEqual(scopes, ["username"]);
+      return credentials;
+    },
+  });
+  await settle();
+  assert.equal(app.render().isAuthenticated, true);
+  assert.deepEqual(app.calls.verified, ["pi-token"]);
+  assert.deepEqual(app.calls.sockets, ["session"]);
+  assert.equal(app.calls.sdkLite, 0);
+  assert.equal(app.render().sdk, null);
+  app.unmount();
+});
 
 test("logout clears the local session and persists only the language marker", async () => {
   let legacyPurchaseReads = 0;
@@ -425,6 +445,8 @@ function mountAccountMailbox(mode = "email") {
   compile("lib/connect/data.ts")(() => { throw new Error("Unexpected import"); }, exportsData);
   compile("lib/api-client.ts")((name) => {
     if (name === "@/lib/connect/pstn-phone") return {};
+    if (name === "@/lib/production-origins.mjs") return {};
+    if (name === "@/lib/system-config") return config;
     assert.equal(name, "socket.io-client");
     return { default(url, options) {
       const socket = new EventEmitter();
@@ -580,8 +602,12 @@ for (const response of [
   });
 }
 
-test("home renders scoped email per session and retains the previous routes for other sessions", () => {
+test("home preserves account previews and loads the original app on both Production origins", async () => {
   const exportsPage = {};
+  const origins = await import("../lib/production-origins.mjs");
+  const browser = { location: { origin: "https://preview.example" } };
+  const systemConfig = {};
+  compile("lib/system-config.ts")(() => origins, systemConfig, browser);
   let auth;
   const jsx = (type, props, key) => ({ type, props, key });
   const modules = {
@@ -589,30 +615,62 @@ test("home renders scoped email per session and retains the previous routes for 
     react: {},
     "@/components/connect/account-private-data-view": { AccountPrivateDataView: "private-data" },
     "@/components/connect/account-groups-view": { AccountGroupsView: "scoped-groups" },
+    "@/components/connect/account-peer-calls": { AccountPeerCalls: "scoped-peer-calls" },
     "@/components/connect/account-private-chat": { AccountPrivateChat: "scoped-chat" },
     "@/components/connect/account-emails-view": { AccountEmailsView: "scoped-email" },
     "@/components/connect/connect-app": { ConnectApp: "legacy-app" },
+    "@/components/connect/call-test-app": { CallTestApp: "call-test-app" },
+    "@/components/connect/call-safety-settings": { CallSafetySettings: "call-safety-settings" },
+    "next/link": { default: "link" },
     "@/contexts/pi-auth-context": { usePiAuth: () => auth },
+    "@/lib/system-config": systemConfig,
   };
   compile("app/page.tsx")((name) => {
     assert.ok(Object.hasOwn(modules, name), name);
     return modules[name];
   }, exportsPage);
+  const renderHome = () => {
+    const entry = exportsPage.default();
+    return entry.type(entry.props);
+  };
   auth = { emailSocketMode: "legacy", sessionToken: "legacy" };
-  assert.equal(exportsPage.default().type, "legacy-app");
+  assert.equal(renderHome().type, "legacy-app");
   auth = { ...auth, accountMigrationRequired: true };
-  assert.equal(exportsPage.default().type, "main");
+  assert.equal(renderHome().type, "main");
   auth = { ...auth, emailSocketMode: "account", sessionToken: "first", piUsername: "alice" };
-  assert.equal(exportsPage.default().type, "scoped-email");
-  assert.equal(exportsPage.default().key, "first");
+  assert.equal(renderHome().type, "scoped-email");
+  assert.equal(renderHome().key, "first");
   auth = { ...auth, sessionToken: "second", chatSocketMode: "account" };
-  assert.equal(exportsPage.default().key, "second");
-  assert.equal(exportsPage.default().type.name, "AccountCommunication");
-  assert.equal(exportsPage.default().props.groupsEnabled, false);
+  assert.equal(renderHome().key, "second");
+  assert.equal(renderHome().type.name, "AccountCommunication");
+  assert.equal(renderHome().props.groupsEnabled, false);
   auth = { ...auth, groupSocketMode: "account" };
-  assert.equal(exportsPage.default().props.groupsEnabled, true);
+  assert.equal(renderHome().props.groupsEnabled, true);
   auth = { ...auth, privateDataOwner: "account-fixture" };
-  assert.equal(exportsPage.default().props.privateDataEnabled, true);
+  assert.equal(renderHome().props.privateDataEnabled, true);
+  const originalMode = process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+  try {
+    process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = "production-review";
+    assert.equal(renderHome().type, "legacy-app");
+    assert.equal(renderHome().key, "second");
+    delete process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+    for (const origin of [origins.productionHostingOrigin, origins.productionPiNetOrigin]) {
+      browser.location.origin = origin;
+      assert.equal(renderHome().type, "legacy-app");
+      assert.equal(renderHome().key, "second");
+      const api = {};
+      compile("lib/api-client.ts")((name) =>
+        name === "@/lib/production-origins.mjs" ? origins :
+          name === "@/lib/system-config" ? systemConfig : {}, api, browser);
+      assert.equal(api.API_URL, origins.productionApiOrigin);
+      assert.equal(api.WS_URL, origins.productionApiOrigin);
+    }
+    browser.location.origin = "https://oneconnect5891.pinet.com.example";
+    assert.equal(renderHome().type.name, "AccountCommunication");
+  } finally {
+    if (originalMode === undefined) delete process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT;
+    else process.env.NEXT_PUBLIC_ONECONNECT_DEPLOYMENT = originalMode;
+  }
 });
 
 const oldConversation = "a".repeat(64);
@@ -877,6 +935,12 @@ test("archived group renders its existing media viewer but blocks the composer a
     react: { useState: (initial) => [initial, () => {}], useRef: (value) => ({ current: value }) },
     "@/contexts/pi-auth-context": {},
     "@/lib/account-groups": {},
+    "@/lib/api-client": {},
+    "@/contexts/connect-context": {},
+    "./create-group-sheet": {},
+    "./group-avatar": {},
+    "./ui": {},
+    "./icons": {},
     "./group-media": { GroupMediaContent: "existing-group-media" },
     "./feedback": {},
     "./voice-recorder": {},
@@ -955,7 +1019,7 @@ test("private profile and contact requests cannot update a replacement session",
   const store = {};
   const requests = [];
   compile("lib/connect/data.ts")(() => { throw new Error("Unexpected import"); }, data);
-  compile("lib/api-client.ts")(() => ({}), api, undefined, undefined, (url, options) => {
+  compile("lib/api-client.ts")((name) => name === "@/lib/system-config" ? config : {}, api, undefined, undefined, (url, options) => {
     const result = deferred();
     requests.push({ url, options, ...result });
     return result.promise;

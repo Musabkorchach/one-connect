@@ -12,7 +12,7 @@ import React, {
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 import { LANGUAGES, type LangId } from "@/lib/connect/data";
 import { buildPiSdk, createSdk } from "@/lib/pi";
-import { verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
+import { callIntegrationMode, verifyPiAuth, initSocket, disconnectSocket, revokeSession } from "@/lib/api-client";
 import type {
   SDKLiteInstance,
 } from "@/lib/sdklite-types";
@@ -329,7 +329,8 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       // Probe for parent credentials (App Studio iframe environment).
       // When running inside App Studio's restore-preview iframe, SDKLite.login()
       // cannot complete outside the Pi CDN wrapper and would hang indefinitely.
-      const parentCredentials = await requestParentCredentials(signal);
+      const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
+      const parentCredentials = production || callIntegrationMode ? null : await requestParentCredentials(signal);
       if (signal.aborted) return;
       if (parentCredentials) {
         const authResult = await verifyPiAuth(
@@ -401,21 +402,23 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         sandbox: PI_NETWORK_CONFIG.SANDBOX,
       });
       if (signal.aborted) return;
-      setAuthMessage("Loading SDKLite...");
       setPiSdkReady(true);
-      await loadSDKLite();
-      if (signal.aborted) return;
-
-      setAuthMessage("Initializing SDKLite...");
-      const sdkLite = await window.SDKLite.init();
-      if (signal.aborted) return;
+      let sdkLite: SDKLiteInstance | null = null;
+      if (!production && !callIntegrationMode) {
+        setAuthMessage("Loading SDKLite...");
+        await loadSDKLite();
+        if (signal.aborted) return;
+        setAuthMessage("Initializing SDKLite...");
+        sdkLite = await window.SDKLite.init();
+        if (signal.aborted) return;
+      }
 
       // Auth + user-state are served by the @pi-sdk npm packages; SDKLite still backs
       // payments, ads, products and restore until those packages ship. The adapter keeps
       // the SDKLiteInstance surface so nothing downstream changes.
       setAuthMessage("Logging in...");
       const pi = buildPiSdk();
-      await pi.auth.login(undefined, signal);
+      await pi.auth.login(production || callIntegrationMode ? ["username"] : undefined, signal);
       const renderSession = pi.auth.getRenderSession();
       if (signal.aborted) {
         if (renderSession) revokeOneConnectSession(renderSession.sessionToken);
@@ -423,6 +426,12 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
       }
       if (!renderSession) {
         throw new Error("Render session unavailable after Pi login");
+      }
+      if (production && (renderSession.emailSocketMode !== "account" ||
+          renderSession.chatSocketMode !== "account" || renderSession.groupSocketMode !== "account" ||
+          !renderSession.privateDataOwner || renderSession.subscriptionStatusSupported === true)) {
+        revokeOneConnectSession(renderSession.sessionToken);
+        throw new Error("Production account services are unavailable.");
       }
 
       authSource.current = "pi";
@@ -449,8 +458,7 @@ export function PiAuthProvider({ children }: { children: ReactNode }) {
         renderSession.piUsername,
         renderSession.sessionToken,
       );
-      const sdkInstance = createSdk(sdkLite, pi);
-      setSdk(sdkInstance);
+      setSdk(sdkLite ? createSdk(sdkLite, pi) : null);
       setIsAuthenticated(true);
       if (explicit) writeSignedOutLanguage(null);
     } catch (err) {

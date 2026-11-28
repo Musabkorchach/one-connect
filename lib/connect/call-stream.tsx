@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   getCallAudioOutputs,
+  listCallAudioOutputs,
   setCallAudioOutput,
 } from "./call-audio-output";
 
@@ -12,18 +13,53 @@ export function CallStream({
   className,
   playbackLabel,
   outputLabel,
+  outputUnavailableLabel,
 }: {
   stream: MediaStream | null;
   muted?: boolean;
   className?: string;
   playbackLabel: string;
   outputLabel?: string;
+  outputUnavailableLabel?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [outputs, setOutputs] = useState<MediaDeviceInfo[]>([]);
+  const [canChooseOutput, setCanChooseOutput] = useState<boolean | null>(null);
   const [outputBusy, setOutputBusy] = useState(false);
   const [outputMessage, setOutputMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!stream || !element || muted || !outputLabel) return;
+    const devices = navigator.mediaDevices;
+    let revision = 0;
+
+    const refresh = async () => {
+      const attempt = ++revision;
+      if (!stream.getAudioTracks().some((track) => track.readyState === "live")) {
+        setCanChooseOutput(null);
+        setOutputs([]);
+        return;
+      }
+      const available = await listCallAudioOutputs(element, devices).catch(() => []);
+      if (revision !== attempt) return;
+      setCanChooseOutput(available.length > 0);
+      setOutputs([]);
+    };
+
+    setCanChooseOutput(null);
+    void refresh();
+    devices?.addEventListener("devicechange", refresh);
+    stream.addEventListener("addtrack", refresh);
+    stream.addEventListener("removetrack", refresh);
+    return () => {
+      revision++;
+      devices?.removeEventListener("devicechange", refresh);
+      stream.removeEventListener("addtrack", refresh);
+      stream.removeEventListener("removetrack", refresh);
+    };
+  }, [stream, muted, outputLabel]);
 
   const applyOutput = async (device: MediaDeviceInfo): Promise<void> => {
     const element = videoRef.current;
@@ -48,7 +84,7 @@ export function CallStream({
 
   const chooseOutput = async (): Promise<void> => {
     const element = videoRef.current;
-    if (!element || outputBusy) return;
+    if (!element || outputBusy || !canChooseOutput) return;
 
     if (outputs.length > 0) {
       setOutputs([]);
@@ -197,7 +233,12 @@ export function CallStream({
           {playbackLabel}
         </button>
       )}
-            {!muted && outputLabel && stream && (
+      {!muted && outputLabel && stream && canChooseOutput === false && outputUnavailableLabel && (
+        <p className="absolute right-4 top-16 z-20 max-w-56 rounded-xl bg-black/70 p-2 text-xs text-white">
+          {outputUnavailableLabel}
+        </p>
+      )}
+      {!muted && outputLabel && stream && canChooseOutput && (
         <div className="absolute right-4 top-16 z-20 max-w-64">
           <button
             type="button"

@@ -6,11 +6,21 @@ import { AccountGroupsView } from "@/components/connect/account-groups-view";
 import { AccountPrivateChat } from "@/components/connect/account-private-chat";
 import { AccountEmailsView } from "@/components/connect/account-emails-view";
 import { ConnectApp } from "@/components/connect/connect-app";
+import { CallTestApp } from "@/components/connect/call-test-app";
 
 import { usePiAuth } from "@/contexts/pi-auth-context";
+import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
 export default function HomePage() {
+  if (!PI_NETWORK_CONFIG.PRODUCTION_REVIEW && process.env.NEXT_PUBLIC_CALL_TEST_MODE === "1") return <CallTestApp />;
+  return <OneConnectHome />;
+}
+
+function OneConnectHome() {
   const { accountMigrationRequired, privateDataOwner, emailSocketMode, chatSocketMode, groupSocketMode, sessionToken, piUsername, endLocalSession } = usePiAuth();
+  if (PI_NETWORK_CONFIG.PRODUCTION_REVIEW) {
+    return <ConnectApp key={sessionToken} />;
+  }
   if ((chatSocketMode === "account" || groupSocketMode === "account" || privateDataOwner) && sessionToken) {
     return <AccountCommunication key={sessionToken} sessionToken={sessionToken} username={piUsername} emailEnabled={emailSocketMode === "account"} chatEnabled={chatSocketMode === "account"} groupsEnabled={groupSocketMode === "account"} privateDataEnabled={Boolean(privateDataOwner)} />;
   }

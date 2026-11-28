@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createHmac, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import ts from "typescript";
+import { productionHostingOrigin, productionPiNetOrigin } from "../lib/production-origins.mjs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +52,7 @@ before(async () => {
   mongo = spawn(binary, [
     "--bind_ip", "127.0.0.1", "--port", String(port), "--dbpath", dataPath,
     "--logpath", join(dataPath, "mongod.log"), "--replSet", "one-connect-fixture",
+    "--setParameter", "indexBuildMinAvailableDiskSpaceMB=32",
   ], { stdio: "ignore", windowsHide: true });
   await new Promise((resolve, reject) => {
     mongo.once("spawn", resolve);
@@ -473,6 +476,8 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
         const token = options.headers.Authorization.slice(7);
         if (token === "subscription-no-uid") return Response.json({ username: token });
         if (token === "delete-http-different-uid") return Response.json({ uid: "different-uid", username: "delete-http" });
+        if (token === "demo-reviewer-other") return Response.json({ uid: "demo-reviewer-other", username: "demo-reviewer" });
+        if (token === "demo-reviewer" || token === "demo-peer") return Response.json({ uid: token + "-uid", username: token });
         const username = ["group-audit-owner", "delete-restart-audit", "delete-http", "delete-http-peer", "delete-http-rate", "alice", "bob", "eve", "dan", "fran", "pat", "chat-a", "chat-b", "chat-c", "group-owner", "group-reader", "group-removed", "group-invite", "group-outsider", "owner-transfer", "owner-successor", "owner-reader", "priv-a", "priv-b", "priv-c", "priv-legacy", "call-a", "call-b", "call-c", "phone-a", "phone-b", "delete-fixture", "delete-peer"].includes(token) ? token : undefined;
         return username ? Response.json({ uid: token + "-uid", username }) : new Response(null, { status: 401 });
       }
@@ -532,7 +537,7 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
     child.once("close", (code) => { clearTimeout(timer); reject(new Error(`Email fixture exited ${code}: ${errors}`)); });
   });
 
-  async function request(path, { token, method = "GET", body, origin } = {}) {
+  async function request(path, { token, method = "GET", body, origin = fixtureEnv.ONECONNECT_PRODUCTION_ORIGIN } = {}) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     if (origin) headers.Origin = origin;
     if (body && !(body instanceof FormData)) {
@@ -567,6 +572,246 @@ async function startEmailTestServer(t, bindAccounts, fixtureEnv = {}) {
   }
   return { request, login, upload, webhook, child, origin: `http://127.0.0.1:${port}` };
 }
+
+test("Production runs existing account routes with separate data and sessions", async (t) => {
+  const localMongo = client.options.hosts[0].toString();
+  const legacy = await startEmailTestServer(t, true);
+  const production = await startEmailTestServer(t, false, {
+    NODE_ENV: "production",
+    ONECONNECT_DEPLOYMENT: "production",
+    ONECONNECT_PRODUCTION_ORIGIN: productionHostingOrigin,
+    ONECONNECT_PRODUCTION_MONGODB_URI: `mongodb://${localMongo}/oneconnect_production?directConnection=true`,
+    PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460",
+  });
+  assert.equal((await production.login("invalid")).status, 401);
+  const productionOrigin = productionHostingOrigin;
+  assert.equal((await production.request("/api/auth/verify", {
+    method: "POST", body: { accessToken: "invalid" }, origin: productionPiNetOrigin,
+  })).status, 401);
+  assert.equal((await production.request("/api/auth/verify", {
+    method: "POST", body: { accessToken: "demo-reviewer" }, origin: "https://testnet.example",
+  })).status, 403);
+  const getSession = async (server, token) => {
+    const result = await server.login(token);
+    assert.equal(result.status, 200);
+    return result.body;
+  };
+  const testnet = await getSession(legacy, "demo-reviewer");
+  const reviewer = await getSession(production, "demo-reviewer");
+  assert.equal((await production.login("demo-reviewer-other")).status, 409);
+  const peer = await getSession(production, "demo-peer");
+  const token = reviewer.sessionToken;
+  assert.equal(reviewer.piUsername, testnet.piUsername);
+  assert.notEqual(reviewer.userId, testnet.userId);
+  assert.equal(reviewer.subscriptionStatusSupported, false);
+  assert.equal(reviewer.accountDeletionSupported, true);
+  assert.equal((await legacy.request("/api/profile", { token, method: "GET" })).status, 401);
+  assert.equal((await production.request("/api/profile", { token: testnet.sessionToken })).status, 401);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken, method: "PUT", body: { displayName: "Testnet only" } })).status, 200);
+  assert.equal((await production.request("/api/profile", { token })).body.profile, null);
+  assert.equal((await production.request("/api/profile", { token, method: "PUT", body: { displayName: "Production only" } })).body.profile.displayName, "Production only");
+  assert.equal((await production.request("/api/profile", { token: peer.sessionToken })).body.profile, null);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken })).body.profile.displayName, "Testnet only");
+  assert.equal((await production.request("/api/contacts", { token, method: "POST", body: { username: "demo-peer" } })).status, 201);
+  assert.equal((await production.request("/api/contacts", { token })).body.contacts.length, 1);
+  const draftsPath = "/api/state/connect.invoice-drafts";
+  assert.equal((await production.request(draftsPath, { token })).body.revision, 0);
+  const drafts = { schemaVersion: "1.0", items: [] };
+  const savedDrafts = await production.request(draftsPath, { token, method: "PUT", body: { blob: drafts, expectedRevision: 0 } });
+  assert.deepEqual(savedDrafts.body, { revision: 1 });
+  assert.deepEqual((await production.request(draftsPath, { token })).body.blob, drafts);
+  assert.equal((await production.request(draftsPath, { token: peer.sessionToken })).body.blob, null);
+  for (const key of ["connect.calls", "connect.emails"]) {
+    const path = "/api/state/" + key;
+    const blob = { items: [{ id: "owner-only" }] };
+    assert.equal((await production.request(path, { token, method: "PUT", body: { blob } })).status, 204);
+    assert.deepEqual((await production.request(path, { token })).body.blob, blob);
+    assert.equal((await production.request(path, { token: peer.sessionToken })).body.blob, null);
+    assert.equal((await production.request(path, { token: testnet.sessionToken })).status, 401);
+  }
+
+  for (const [server, wrongToken] of [[legacy, token], [production, testnet.sessionToken]]) {
+    const { socket } = connectMailSocket(t, server.origin, wrongToken, "/chat", {}, server === production ? productionOrigin : undefined);
+    const rejected = expectSocketEvent(socket, "connect_error");
+    socket.connect();
+    await rejected;
+  }
+  const { socket } = connectMailSocket(t, production.origin, token, "/chat", {}, productionOrigin);
+  const connected = expectSocketEvent(socket, "connect");
+  socket.connect();
+  await connected;
+  const { socket: peerSocket } = connectMailSocket(t, production.origin, peer.sessionToken, "/chat", {}, productionOrigin);
+  const peerConnected = expectSocketEvent(peerSocket, "connect");
+  peerSocket.connect();
+  await peerConnected;
+  const conversation = await production.request("/api/chat/conversations", { token, method: "POST", body: { username: "demo-peer" } });
+  assert.equal(conversation.status, 200);
+  const conversationId = conversation.body.conversationId;
+  const received = expectSocketEvent(peerSocket, "message:new");
+  socket.emit("message:send", { conversationId, kind: "text", text: "Production chat", messageId: "prod-demo-message" });
+  await received;
+  const history = await production.request("/api/chat/conversations/" + conversationId, { token: peer.sessionToken });
+  assert.equal(history.status, 200);
+  assert.equal(history.body.messages[0].text, "Production chat");
+  const inbox = await production.request("/api/chat/conversations", { token: peer.sessionToken });
+  assert.equal(inbox.body.conversations[0].last.text, "Production chat");
+  assert.equal(inbox.body.conversations[0].unread, 1);
+  const group = await production.request("/api/groups", { token, method: "POST", body: { name: "Production group", members: ["demo-peer"] } });
+  assert.equal(group.status, 201);
+  assert.equal((await production.request("/api/groups", { token })).body.groups.length, 1);
+  const groupRoute = "/api/groups/" + group.body.group.id;
+  const groupApi = (who, path, method = "GET", body) => production.request(groupRoute + path, { token: who, method, body });
+  assert.equal((await groupApi(peer.sessionToken, "/messages")).status, 404);
+  assert.equal((await groupApi(peer.sessionToken, "/invitations/accept", "POST")).status, 200);
+  assert.equal((await groupApi(peer.sessionToken, "/invitations", "POST", { username: "demo-reviewer" })).status, 403);
+  const attachment = new FormData();
+  attachment.set("kind", "file");
+  attachment.set("file", new Blob(["production group file"]), "review.txt");
+  const file = await groupApi(token, "/media", "POST", attachment);
+  assert.equal(file.status, 201);
+  const mediaId = file.body.mediaId;
+  assert.equal((await groupApi(peer.sessionToken, "/media/" + mediaId)).status, 404);
+  assert.equal((await groupApi(token, "/messages", "POST", { id: "production-media", kind: "file", text: "", mediaId })).status, 201);
+  assert.equal((await groupApi(peer.sessionToken, "/media/" + mediaId)).body, "production group file");
+  const member = (await production.request("/api/groups", { token })).body.groups[0].members.find(item => item.username === "demo-peer");
+  const offer = await groupApi(token, "/ownership-offers", "POST", { memberId: member.id });
+  assert.equal(offer.status, 201);
+  assert.equal((await groupApi(peer.sessionToken, "/ownership-offers/" + offer.body.offerId + "/accept", "POST")).status, 200);
+  assert.equal((await production.request("/api/groups", { token: peer.sessionToken })).body.groups[0].isOwner, true);
+  assert.equal((await groupApi(token, "/invitations", "POST", { username: "demo-peer" })).status, 403);
+  const formerOwner = (await production.request("/api/groups", { token: peer.sessionToken })).body.groups[0].members.find(item => item.username === "demo-reviewer");
+  assert.equal((await groupApi(peer.sessionToken, "/members/" + formerOwner.id, "DELETE")).status, 200);
+  assert.equal((await groupApi(token, "/media/" + mediaId)).status, 404);
+  const mail = await production.request("/api/emails/internal", { token, method: "POST", body: {
+    id: "production-demo-mail", recipient: "@demo-peer", subject: "Production mail", body: "isolated",
+  } });
+  assert.equal(mail.status, 201);
+  assert.equal((await production.request("/api/emails", { token: peer.sessionToken })).body.emails[0].subject, "Production mail");
+  for (const [method, path] of [["GET", "/api/pi-testnet/subscription/plan"], ["GET", "/api/subscriptions/status"],
+    ["POST", "/api/emails/external"], ["POST", "/api/emails/external/inbound"], ["POST", "/api/calls/pstn/prepare"], ["POST", "/api/call-test/login"]]) {
+    assert.equal((await production.request(path, { token, method })).status, 404);
+  }
+  for (const [session, origin] of [[testnet.sessionToken, productionOrigin], [token, "https://testnet.example"]]) {
+    const { socket: rejected } = connectMailSocket(t, production.origin, session, "/calls", { verifiedCallProtocol: 1 }, origin);
+    const error = expectSocketEvent(rejected, "connect_error");
+    rejected.connect();
+    await error;
+  }
+  const { socket: caller } = await openMailSocket(t, production.origin, token, "/calls", { verifiedCallProtocol: 2 }, productionOrigin);
+  assert.equal((await production.request("/api/calls/ice-servers", { token })).status, 200);
+  const old = (await openMailSocket(t, production.origin, peer.sessionToken, "/calls", {}, productionOrigin)).socket;
+  const oldRings = [];
+  old.on("call:incoming", (data) => oldRings.push(data));
+  const protocolRejected = expectSocketEvent(old, "call:error");
+  old.emit("call:initiate", { callId: randomBytes(16).toString("hex"), kind: "voice", to: "demo-reviewer" });
+  assert.equal((await protocolRejected).reason, "call-update-required");
+  const identity = {};
+  const source = await readFile(new URL("../lib/connect/call-identity.ts", import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  new Function("exports", outputText)(identity);
+  const [callerKey, receiverKey, unknownKey] = await Promise.all(Array.from({ length: 3 }, () =>
+    crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])));
+  const callerPin = await identity.callSafetyCode(callerKey.publicKey);
+  const receiverPin = await identity.callSafetyCode(receiverKey.publicKey);
+  async function register(socket, name, pair) {
+    const { nonce } = await socket.timeout(3000).emitWithAck("call:device-challenge", {});
+    assert.match(nonce, /^[a-f0-9]{32}$/);
+    const publicKey = await identity.rawCallKey(pair);
+    const signature = await identity.signCallFields(pair, ["oneconnect/call-device/v1", name, nonce, publicKey]);
+    const registration = { nonce, publicKey, signature };
+    assert.deepEqual(await socket.timeout(3000).emitWithAck("call:register-device", registration), { registered: true });
+    assert.deepEqual(await socket.timeout(3000).emitWithAck("call:register-device", registration), {});
+    return { nonce, publicKey };
+  }
+  async function signedInvite(socket, name, to, pair, callId, kind) {
+    const { nonce, publicKey } = await register(socket, name, pair);
+    const signature = await identity.signCallFields(pair, ["oneconnect/call-invite/v1", callId, nonce, name, to, kind]);
+    return { nonce, publicKey, signature };
+  }
+  const foreign = await caller.timeout(3000).emitWithAck("call:device-challenge", {});
+  const callerPublic = await identity.rawCallKey(callerKey);
+  const impersonation = await identity.signCallFields(callerKey, ["oneconnect/call-device/v1", "demo-peer", foreign.nonce, callerPublic]);
+  assert.deepEqual(await caller.timeout(3000).emitWithAck("call:register-device", {
+    nonce: foreign.nonce, publicKey: callerPublic, signature: impersonation,
+  }), {});
+  const oldCallId = randomBytes(16).toString("hex");
+  const oldInvite = await signedInvite(caller, "demo-reviewer", "demo-peer", callerKey, oldCallId, "voice");
+  const newToOld = expectSocketEvent(caller, "call:error");
+  const update = expectSocketEvent(old, "call:update-required");
+  caller.emit("call:verified-initiate", { callId: oldCallId, signature: oldInvite.signature, protocol: 2, kind: "voice", to: "demo-peer" });
+  assert.equal((await newToOld).reason, "call-update-required");
+  await update;
+  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 2 }, productionPiNetOrigin);
+  const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
+  receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
+  assert.equal((await groupCallRejected).reason, "unavailable");
+  for (const [kind, untrusted] of [["voice", false], ["video", false], ["voice", true]]) {
+    const [from, to, fromKey, toKey, fromPin, toPin, fromName, toName] = kind === "video"
+      ? [receiver, caller, receiverKey, callerKey, receiverPin, callerPin, "demo-peer", "demo-reviewer"]
+      : [caller, receiver, callerKey, receiverKey, callerPin, receiverPin, "demo-reviewer", "demo-peer"];
+    const callId = randomBytes(16).toString("hex");
+    const challenge = randomBytes(16).toString("hex");
+    const binding = { callId, challenge, kind, caller: fromName, recipient: toName };
+    const invite = await signedInvite(from, fromName, toName, fromKey, callId, kind);
+    const recipient = await register(to, toName, toKey);
+    const incoming = expectSocketEvent(to, "call:incoming");
+    const initiated = expectSocketEvent(from, "call:initiated");
+    from.emit("call:verified-initiate", { callId, protocol: 2, kind, to: toName, signature: invite.signature });
+    const parties = { caller: fromName, recipient: toName };
+    assert.deepEqual(await initiated, { callId, protocol: 2, parties });
+    assert.deepEqual(await incoming, { callId, protocol: 2, parties, kind, from: fromName, invite });
+    assert.equal(await identity.verifyCallInvite(invite, [callId, fromName, toName, kind]), fromPin);
+    if (to === receiver) {
+      const denied = expectSocketEvent(old, "call:error");
+      old.emit("call:accept", { callId, challenge });
+      assert.equal((await denied).reason, "call-signature-invalid");
+    }
+    const accepted = expectSocketEvent(from, "call:accepted");
+    to.emit("call:accept", { callId, challenge });
+    assert.deepEqual(await accepted, { callId, challenge, publicKey: recipient.publicKey });
+    const offer = await identity.signCallDescription(untrusted ? unknownKey : fromKey, binding, "offer", "production fixture");
+    const offered = expectSocketEvent(to, untrusted ? "call:ended" : "call:offer");
+    from.emit("call:offer", { callId, offer });
+    if (untrusted) {
+      assert.equal((await offered).reason, "call-signature-invalid");
+    } else {
+      const delivered = (await offered).offer;
+      assert.deepEqual(delivered, offer);
+      assert.equal((await identity.verifyCallDescription(delivered, binding, "offer", fromPin)).sdp, offer.sdp);
+      const answer = await identity.signCallDescription(toKey, binding, "answer", "production answer");
+      const answered = expectSocketEvent(from, "call:answered");
+      to.emit("call:answer", { callId, answer });
+      assert.equal((await identity.verifyCallDescription((await answered).answer, binding, "answer", toPin)).sdp, answer.sdp);
+      const connected = [from, to].map(socket => expectSocketEvent(socket, "call:connected"));
+      from.emit("call:connected", { callId });
+      to.emit("call:connected", { callId });
+      await Promise.all(connected);
+    }
+    if (!untrusted) {
+      const ended = expectSocketEvent(from, "call:ended");
+      to.emit("call:end", { callId });
+      await ended;
+    }
+    const replay = expectSocketEvent(from, "call:error");
+    from.emit("call:verified-initiate", { callId, protocol: 2, kind, to: toName, signature: invite.signature });
+    assert.equal((await replay).reason, "call-device-registration-failed");
+  }
+  assert.deepEqual(oldRings, []);
+  const challenge = await production.request("/api/account/deletion/challenge", { token, method: "POST", body: {} });
+  assert.equal(challenge.status, 201);
+  const payload = { confirmationToken: challenge.body.confirmationToken, confirm: true };
+  const confirmDelete = (accessToken) => production.request("/api/account/deletion/confirm", {
+    token, method: "POST", body: { ...payload, accessToken },
+  });
+  assert.equal((await confirmDelete("demo-peer")).body.code, "PI_IDENTITY_MISMATCH");
+  const disconnected = expectSocketEvent(caller, "disconnect");
+  assert.equal((await confirmDelete("demo-reviewer")).status, 202);
+  await disconnected;
+  assert.equal((await production.request("/api/profile", { token })).status, 401);
+  assert.equal((await legacy.request("/api/profile", { token: testnet.sessionToken })).body.profile.displayName, "Testnet only");
+});
 
 test("all authorized subscription previews reach session checks independently of PiNet", async (t) => {
   const { request, login } = await startEmailTestServer(t, false, { PI_TESTNET_SUBSCRIPTION_SERVICE_ID: "460" });
@@ -835,13 +1080,14 @@ test("real HTTP email routes preserve legacy behavior with the flag disabled", a
   assert.equal((await webhook(scopedReplyToken, "scoped-disabled")).status, 406);
 });
 
-function connectMailSocket(t, origin, sessionToken, namespace = "/email", auth = {}) {
+function connectMailSocket(t, origin, sessionToken, namespace = "/email", auth = {}, frontendOrigin) {
   const socket = connectSocket(origin + namespace, {
     transports: ["websocket"],
     forceNew: true,
     reconnection: false,
     autoConnect: false,
     auth: { sessionToken, ...auth },
+    ...(frontendOrigin && { extraHeaders: { Origin: frontendOrigin } }),
   });
   const messages = [];
   socket.onAny((event, payload) => {
@@ -855,8 +1101,8 @@ function expectSocketEvent(socket, event) {
   return once(socket, event, { signal: AbortSignal.timeout(5000) }).then(([payload]) => payload);
 }
 
-async function openMailSocket(t, origin, sessionToken, namespace, auth) {
-  const client = connectMailSocket(t, origin, sessionToken, namespace, auth);
+async function openMailSocket(t, origin, sessionToken, namespace, auth, frontendOrigin) {
+  const client = connectMailSocket(t, origin, sessionToken, namespace, auth, frontendOrigin);
   const connected = expectSocketEvent(client.socket, "connect");
   client.socket.connect();
   await connected;
@@ -2479,7 +2725,7 @@ test("PSTN mock callbacks and service quotas stay tied to the original account a
   assert.equal((await usage.findOne({ _id: nextKey })).count, 1);
 });
 
-test("disabled account calls retain legacy signals and mock PSTN preparation", { timeout: 30000 }, async (t) => {
+test("the ordinary server supports verified calls and preserves mock PSTN preparation", { timeout: 30000 }, async (t) => {
   const { request, login, origin } = await startEmailTestServer(t, false, {
     PSTN_ENABLED: "true", PSTN_ALLOWED_USERS: "phone-b", TWILIO_ACCOUNT_SID: "AC" + "1".repeat(32),
     TWILIO_API_KEY_SID: "SK" + "2".repeat(32), TWILIO_API_KEY_SECRET: "fixture-only",
@@ -2490,14 +2736,16 @@ test("disabled account calls retain legacy signals and mock PSTN preparation", {
   for (const suffix of ["challenge", "confirm"]) {
     assert.equal((await request("/api/account/deletion/" + suffix, { token: a.sessionToken, method: "POST", body: {} })).status, 404);
   }
+  assert.equal((await request("/api/call-test/login", { method: "POST", body: {} })).status, 404);
   const [left, right] = (await Promise.all([a, b].map(({ sessionToken }) =>
-    openMailSocket(t, origin, sessionToken, "/")))).map(({ socket }) => socket);
+    openMailSocket(t, origin, sessionToken, "/", { verifiedCallProtocol: 1 })))).map(({ socket }) => socket);
   assert.equal((await rejectMailSocket(t, origin, a.sessionToken, "/calls")).message, "Invalid namespace");
+  const callId = "verified-call-fixture";
   const incoming = expectSocketEvent(right, "call:incoming");
-  left.emit("call:initiate", { callId: "legacy-call-fixture", to: "phone-b", kind: "voice" });
-  assert.equal((await incoming).from, "call-a");
+  left.emit("call:verified-initiate", { callId, to: "phone-b", kind: "voice", protocol: 1 });
+  assert.deepEqual(await incoming, { callId, from: "call-a", kind: "voice", protocol: 1 });
   const ending = expectSocketEvent(right, "call:ended");
-  left.emit("call:end", { callId: "legacy-call-fixture" });
+  left.emit("call:end", { callId });
   await ending;
   const prepare = await request("/api/calls/pstn/prepare", {
     token: b.sessionToken, method: "POST", body: { requestId: "legacy-phone-fixture", phone: "+33123456789" },
