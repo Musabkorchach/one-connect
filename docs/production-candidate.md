@@ -34,3 +34,12 @@ Both registered Production frontend origins select the original app, isolated ac
 Record device, network, candidate SHA and actual results. Local signaling tests do not certify audio/video capture, rendering or TURN traversal inside Pi Browser.
 
 See the [optional Testnet data migration proposal](production-data-migration.md) for eligibility and rehearsal requirements.
+
+
+## Production peer call trust
+
+Production uses protocol v2 on `/calls`. A device creates or reuses its local non-exportable key, proves possession with a short-lived, single-use server challenge, and registers its public key on the authenticated Pi session's socket. During setup, the server supplies each participant's registered public key to the other participant. The device association on the server lasts for that socket. Clients register again when needed, including after a reconnect. Invitations are signed and single-use. Offer and answer signatures bind the call ID, recipient challenge, both Pi usernames, role and media kind to the exact SDP.
+
+A first call does not require exchanging safety codes. The default trusts One Connect to bind the public key to the authenticated Pi account. It does not independently verify that binding. Browsers remember the verified key for the account and peer. A mismatch blocks the call and opens the profile's safety code settings. Accept the new account link explicitly or compare its code in person or over a separate trusted channel before saving it. Accepting a new account link clears the previous manual verification. The call screen distinguishes an account-linked device from a device whose code was checked manually.
+
+Deploy the server first and the UI immediately afterward. Previously loaded Production clients must reload the UI to use v2. Peer calling is temporarily unavailable to v1 clients once the server is updated. Roll back both services to the same previous revision if needed. The protocol on Testnet and the existing Production database, Pi settings and external service configuration require no changes.

@@ -697,7 +697,7 @@ test("Production runs existing account routes with separate data and sessions", 
     rejected.connect();
     await error;
   }
-  const { socket: caller } = await openMailSocket(t, production.origin, token, "/calls", { verifiedCallProtocol: 1 }, productionOrigin);
+  const { socket: caller } = await openMailSocket(t, production.origin, token, "/calls", { verifiedCallProtocol: 2 }, productionOrigin);
   assert.equal((await production.request("/api/calls/ice-servers", { token })).status, 200);
   const old = (await openMailSocket(t, production.origin, peer.sessionToken, "/calls", {}, productionOrigin)).socket;
   const oldRings = [];
@@ -705,15 +705,6 @@ test("Production runs existing account routes with separate data and sessions", 
   const protocolRejected = expectSocketEvent(old, "call:error");
   old.emit("call:initiate", { callId: randomBytes(16).toString("hex"), kind: "voice", to: "demo-reviewer" });
   assert.equal((await protocolRejected).reason, "call-update-required");
-  const newToOld = expectSocketEvent(caller, "call:error");
-  const update = expectSocketEvent(old, "call:update-required");
-  caller.emit("call:verified-initiate", { callId: randomBytes(16).toString("hex"), protocol: 1, kind: "voice", to: "demo-peer" });
-  assert.equal((await newToOld).reason, "call-update-required");
-  await update;
-  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 1 }, productionPiNetOrigin);
-  const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
-  receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
-  assert.equal((await groupCallRejected).reason, "unavailable");
   const identity = {};
   const source = await readFile(new URL("../lib/connect/call-identity.ts", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {
@@ -724,6 +715,38 @@ test("Production runs existing account routes with separate data and sessions", 
     crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])));
   const callerPin = await identity.callSafetyCode(callerKey.publicKey);
   const receiverPin = await identity.callSafetyCode(receiverKey.publicKey);
+  async function register(socket, name, pair) {
+    const { nonce } = await socket.timeout(3000).emitWithAck("call:device-challenge", {});
+    assert.match(nonce, /^[a-f0-9]{32}$/);
+    const publicKey = await identity.rawCallKey(pair);
+    const signature = await identity.signCallFields(pair, ["oneconnect/call-device/v1", name, nonce, publicKey]);
+    const registration = { nonce, publicKey, signature };
+    assert.deepEqual(await socket.timeout(3000).emitWithAck("call:register-device", registration), { registered: true });
+    assert.deepEqual(await socket.timeout(3000).emitWithAck("call:register-device", registration), {});
+    return { nonce, publicKey };
+  }
+  async function signedInvite(socket, name, to, pair, callId, kind) {
+    const { nonce, publicKey } = await register(socket, name, pair);
+    const signature = await identity.signCallFields(pair, ["oneconnect/call-invite/v1", callId, nonce, name, to, kind]);
+    return { nonce, publicKey, signature };
+  }
+  const foreign = await caller.timeout(3000).emitWithAck("call:device-challenge", {});
+  const callerPublic = await identity.rawCallKey(callerKey);
+  const impersonation = await identity.signCallFields(callerKey, ["oneconnect/call-device/v1", "demo-peer", foreign.nonce, callerPublic]);
+  assert.deepEqual(await caller.timeout(3000).emitWithAck("call:register-device", {
+    nonce: foreign.nonce, publicKey: callerPublic, signature: impersonation,
+  }), {});
+  const oldCallId = randomBytes(16).toString("hex");
+  const oldInvite = await signedInvite(caller, "demo-reviewer", "demo-peer", callerKey, oldCallId, "voice");
+  const newToOld = expectSocketEvent(caller, "call:error");
+  const update = expectSocketEvent(old, "call:update-required");
+  caller.emit("call:verified-initiate", { callId: oldCallId, signature: oldInvite.signature, protocol: 2, kind: "voice", to: "demo-peer" });
+  assert.equal((await newToOld).reason, "call-update-required");
+  await update;
+  const { socket: receiver } = await openMailSocket(t, production.origin, peer.sessionToken, "/calls", { verifiedCallProtocol: 2 }, productionPiNetOrigin);
+  const groupCallRejected = expectSocketEvent(receiver, "group-call:error");
+  receiver.emit("group-call:start", { groupId: group.body.group.id, callId: "production-group-call", kind: "voice" });
+  assert.equal((await groupCallRejected).reason, "unavailable");
   for (const [kind, untrusted] of [["voice", false], ["video", false], ["voice", true]]) {
     const [from, to, fromKey, toKey, fromPin, toPin, fromName, toName] = kind === "video"
       ? [receiver, caller, receiverKey, callerKey, receiverPin, callerPin, "demo-peer", "demo-reviewer"]
@@ -731,12 +754,15 @@ test("Production runs existing account routes with separate data and sessions", 
     const callId = randomBytes(16).toString("hex");
     const challenge = randomBytes(16).toString("hex");
     const binding = { callId, challenge, kind, caller: fromName, recipient: toName };
+    const invite = await signedInvite(from, fromName, toName, fromKey, callId, kind);
+    const recipient = await register(to, toName, toKey);
     const incoming = expectSocketEvent(to, "call:incoming");
     const initiated = expectSocketEvent(from, "call:initiated");
-    from.emit("call:verified-initiate", { callId, protocol: 1, kind, to: toName });
+    from.emit("call:verified-initiate", { callId, protocol: 2, kind, to: toName, signature: invite.signature });
     const parties = { caller: fromName, recipient: toName };
-    assert.deepEqual(await initiated, { callId, protocol: 1, parties });
-    assert.deepEqual(await incoming, { callId, protocol: 1, parties, kind, from: fromName });
+    assert.deepEqual(await initiated, { callId, protocol: 2, parties });
+    assert.deepEqual(await incoming, { callId, protocol: 2, parties, kind, from: fromName, invite });
+    assert.equal(await identity.verifyCallInvite(invite, [callId, fromName, toName, kind]), fromPin);
     if (to === receiver) {
       const denied = expectSocketEvent(old, "call:error");
       old.emit("call:accept", { callId, challenge });
@@ -744,15 +770,15 @@ test("Production runs existing account routes with separate data and sessions", 
     }
     const accepted = expectSocketEvent(from, "call:accepted");
     to.emit("call:accept", { callId, challenge });
-    assert.deepEqual(await accepted, { callId, challenge });
+    assert.deepEqual(await accepted, { callId, challenge, publicKey: recipient.publicKey });
     const offer = await identity.signCallDescription(untrusted ? unknownKey : fromKey, binding, "offer", "production fixture");
-    const offered = expectSocketEvent(to, "call:offer");
+    const offered = expectSocketEvent(to, untrusted ? "call:ended" : "call:offer");
     from.emit("call:offer", { callId, offer });
-    const delivered = (await offered).offer;
-    assert.deepEqual(delivered, offer);
     if (untrusted) {
-      await assert.rejects(identity.verifyCallDescription(delivered, binding, "offer", fromPin), { reason: "call-peer-key-mismatch" });
+      assert.equal((await offered).reason, "call-signature-invalid");
     } else {
+      const delivered = (await offered).offer;
+      assert.deepEqual(delivered, offer);
       assert.equal((await identity.verifyCallDescription(delivered, binding, "offer", fromPin)).sdp, offer.sdp);
       const answer = await identity.signCallDescription(toKey, binding, "answer", "production answer");
       const answered = expectSocketEvent(from, "call:answered");
@@ -763,9 +789,14 @@ test("Production runs existing account routes with separate data and sessions", 
       to.emit("call:connected", { callId });
       await Promise.all(connected);
     }
-    const ended = expectSocketEvent(from, "call:ended");
-    to.emit("call:end", { callId });
-    await ended;
+    if (!untrusted) {
+      const ended = expectSocketEvent(from, "call:ended");
+      to.emit("call:end", { callId });
+      await ended;
+    }
+    const replay = expectSocketEvent(from, "call:error");
+    from.emit("call:verified-initiate", { callId, protocol: 2, kind, to: toName, signature: invite.signature });
+    assert.equal((await replay).reason, "call-device-registration-failed");
   }
   assert.deepEqual(oldRings, []);
   const challenge = await production.request("/api/account/deletion/challenge", { token, method: "POST", body: {} });

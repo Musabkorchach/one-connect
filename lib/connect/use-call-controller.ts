@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CallSession, type PeerCallTransport } from "@/lib/connect/call-session";
-import { normalizeCallName, validCallParties } from "@/lib/connect/call-identity";
+import { normalizeCallName, validCallParties, type ChangedCallKey } from "@/lib/connect/call-identity";
 import { useConnect } from "@/contexts/connect-context";
 import { getSocket, getCallConfiguration, onCallEvent, sendCallEvent, VERIFIED_CALL_PROTOCOL } from "@/lib/api-client";
 
@@ -15,6 +15,7 @@ export interface CallDetails {
   color: number;
   kind: "voice" | "video";
   direction: "incoming" | "outgoing";
+  invite?: import("./call-identity").CallInvite;
 }
 
 export interface CallViewState extends CallDetails {
@@ -22,6 +23,7 @@ export interface CallViewState extends CallDetails {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   connectedAt: number | null;
+  trust?: "manual" | "account-linked";
   muted: boolean;
   videoEnabled: boolean;
   cameraFacingMode: "user" | "environment";
@@ -32,7 +34,7 @@ export function useCallController(
   configuration: RTCConfiguration,
   isOtherCallActive: () => boolean = () => false,
   transport = legacyTransport,
-  onTrustSetup?: (peer: string) => void,
+  onTrustSetup?: (peer: string, change?: ChangedCallKey) => void,
 ) {
   return usePeerCallController({ ...useConnect(), onTrustSetup }, configuration, transport, isOtherCallActive);
 }
@@ -44,7 +46,7 @@ const legacyTransport: PeerCallTransport = {
 };
 
 type CallContext = Pick<ReturnType<typeof useConnect>, "ready" | "pushToast" | "logCall"> & {
-  onTrustSetup?: (peer: string) => void;
+  onTrustSetup?: (peer: string, change?: ChangedCallKey) => void;
   profile: Pick<ReturnType<typeof useConnect>["profile"], "username" | "setupDone">;
   contacts: Pick<ReturnType<typeof useConnect>["contacts"][number], "username" | "name" | "color">[];
 };
@@ -95,7 +97,7 @@ export function usePeerCallController(
       onRinging: () => {
         updateState({ phase: "ringing" });
       },
-      onConnected: () => {
+      onConnected: (trust) => {
         const current = sessionRef.current;
 
         if (
@@ -109,10 +111,11 @@ export function usePeerCallController(
 
         updateState({
           phase: "active",
+          trust,
           connectedAt: current.connectedAt,
         });
       },
-      onEnd: (reason) => {
+      onEnd: (reason, change) => {
         const current = sessionRef.current;
         if (current?.details.callId !== details.callId) return;
 
@@ -135,7 +138,8 @@ export function usePeerCallController(
           "connection-failed": "Unable to connect the call.",
           "verification-failed": "The call ended during verification.",
           "call-peer-untrusted": `No safety code is saved for @${details.username} in this browser. Open Call safety codes in your profile to verify their device.`,
-          "call-peer-key-mismatch": `The device calling as @${details.username} differs from the saved device. Compare codes before replacing trust.`,
+          "call-peer-key-mismatch": `The device for @${details.username} has changed. This call was blocked. Review the new device in Call safety codes before calling again.`,
+          "call-device-registration-failed": "Unable to link the call key to your Pi session. Reconnect and try again.",
           "call-signature-invalid": "The call proof is invalid. The call was blocked.",
           "call-identity-mismatch": "The signed-in Pi accounts do not match the call participants. The call was blocked.",
           "call-identity-unavailable": "Unable to load or use this device?s call key. Open One Connect over HTTPS in Pi Browser and check Call safety codes.",
@@ -147,7 +151,7 @@ export function usePeerCallController(
         };
 
         if (["call-peer-untrusted", "call-peer-key-mismatch", "call-device-missing"].includes(reason)) {
-          connectRef.current.onTrustSetup?.(details.username);
+          connectRef.current.onTrustSetup?.(details.username, change);
         }
         const message = messages[reason];
 
@@ -212,7 +216,7 @@ export function usePeerCallController(
       if (existing?.details.callId === data.callId) return;
 
       const current = connectRef.current;
-      if (data.protocol !== VERIFIED_CALL_PROTOCOL) {
+      if (data.protocol !== (transport.protocol ?? VERIFIED_CALL_PROTOCOL)) {
         current.pushToast(updateMessage, "error");
         transport.send("call:end", { callId: data.callId });
         return;
@@ -229,7 +233,7 @@ export function usePeerCallController(
       }
 
       const own = normalizeCallName(current.profile.username);
-      if (!validCallParties(own, data.from) || (data.parties &&
+      if (!validCallParties(own, data.from) || (transport.registerDevice && !data.parties) || (data.parties &&
           (data.parties.caller !== data.from || data.parties.recipient !== own))) {
         current.pushToast("The signed-in Pi accounts do not match the call participants. The call was blocked.", "error");
         transport.send("call:end", { callId: data.callId });
@@ -246,6 +250,7 @@ export function usePeerCallController(
         name: contact?.name || data.from,
         color: contact?.color ?? 200,
         kind: data.kind,
+        invite: data.invite,
         direction: "incoming",
       });
     });

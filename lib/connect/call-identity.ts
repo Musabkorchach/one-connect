@@ -30,9 +30,72 @@ export function setCallPin(own: string, peer: string, code: string) {
   localStorage.setItem(pinKey(own, peer), code);
 }
 
+function linkedPinKey(own: string, peer: string) {
+  return pinKey(own, peer).replace("call-peer.v1:", "call-linked-peer.v1:");
+}
+
+export interface ChangedCallKey { previous: string; code: string }
+
+export function approveLinkedCallKey(own: string, peer: string, change: ChangedCallKey) {
+  const manual = getCallPin(own, peer);
+  const previous = manual ?? getLinkedCallPin(own, peer);
+  if (previous !== change.previous || !validSafetyCode(change.code) || previous === change.code) {
+    throw new CallKeyError("call-peer-key-mismatch");
+  }
+  localStorage.setItem(linkedPinKey(own, peer), change.code);
+  if (manual) localStorage.removeItem(pinKey(own, peer));
+}
+
+export function getLinkedCallPin(own: string, peer: string) {
+  const key = linkedPinKey(own, peer);
+  try { return localStorage.getItem(key); } catch { throw storageError(); }
+}
+
+export function rememberLinkedCallPin(own: string, peer: string, code: string) {
+  if (!validSafetyCode(code)) throw new CallKeyError("call-signature-invalid");
+  const manual = getCallPin(own, peer);
+  const previous = getLinkedCallPin(own, peer);
+  if ((manual ?? previous ?? code) !== code) throw new CallKeyError("call-peer-key-mismatch");
+  if (previous === code) return;
+  const key = linkedPinKey(own, peer);
+  try { localStorage.setItem(key, code); } catch { throw storageError(); }
+}
+
+export async function registeredKeyCode(publicKey: string) {
+  if (!/^04[a-f0-9]{128}$/.test(publicKey)) throw new CallKeyError("call-signature-invalid");
+  return hex(await crypto.subtle.digest("SHA-256", unhex(publicKey)));
+}
+
+export const rawCallKey = async (pair: CryptoKeyPair) => hex(await crypto.subtle.exportKey("raw", pair.publicKey));
+
+export async function signCallFields(pair: CryptoKeyPair, fields: unknown[]) {
+  try {
+    return hex(await crypto.subtle.sign(algorithm, pair.privateKey, new TextEncoder().encode(JSON.stringify(fields))));
+  } catch {
+    throw new CallKeyError("call-identity-unavailable");
+  }
+}
+
+export interface CallInvite { nonce: string; publicKey: string; signature: string }
+
+export async function verifyCallInvite(invite: CallInvite | undefined, fields: string[]) {
+  if (!invite || !/^[a-f0-9]{32}$/.test(invite.nonce) || !/^[a-f0-9]{128}$/.test(invite.signature)) {
+    throw new CallKeyError("call-signature-invalid");
+  }
+  const code = await registeredKeyCode(invite.publicKey);
+  try {
+    const key = await crypto.subtle.importKey("raw", unhex(invite.publicKey), curve, false, ["verify"]);
+    const bytes = new TextEncoder().encode(JSON.stringify(["oneconnect/call-invite/v1", fields[0], invite.nonce, ...fields.slice(1)]));
+    if (await crypto.subtle.verify(algorithm, key, unhex(invite.signature), bytes)) return code;
+  } catch {
+    // Invalid key or proof.
+  }
+  throw new CallKeyError("call-signature-invalid");
+}
+
 export class CallKeyError extends Error {
   constructor(readonly reason: "call-storage-unavailable" | "call-device-missing" | "call-identity-unavailable"
-    | "call-identity-mismatch" | "call-peer-untrusted" | "call-peer-key-mismatch" | "call-signature-invalid") {
+    | "call-device-registration-failed" | "call-identity-mismatch" | "call-peer-untrusted" | "call-peer-key-mismatch" | "call-signature-invalid") {
     super(reason);
   }
 }

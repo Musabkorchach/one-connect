@@ -84,7 +84,7 @@ test("test safety settings distinguish self, code and storage failures and save 
     }
   }
   function submit(username, testPeer, enteredPeer, code, confirmed = true) {
-    const state = ["", enteredPeer, code, confirmed, "", false, false];
+    const state = ["", enteredPeer, code, confirmed, "", false, null, false, false];
     let index = 0;
     const { CallSafetySettings } = load("components/connect/call-safety-settings.tsx", {
       react: { useEffect() {}, useRef: () => ({ current: null }), useState: () => {
@@ -150,7 +150,7 @@ test("peer proof binds exact SDP, call, recipient challenge, participants, role 
   ), { type: "offer", sdp });
 });
 
-async function callFixture({ paired = true, direction = "outgoing", keyError } = {}) {
+async function callFixture({ paired = true, direction = "outgoing", keyError, linked = false, previousKey, manualKey } = {}) {
   const alice = await keyPair();
   const bob = await keyPair();
   const handlers = new Map();
@@ -163,6 +163,8 @@ async function callFixture({ paired = true, direction = "outgoing", keyError } =
   let ringing = 0;
   let ended;
   let onConnectionState;
+  let trust;
+  let remembered;
   const sender = {
     track: null,
     async replaceTrack(next) { this.track = next; },
@@ -178,12 +180,20 @@ async function callFixture({ paired = true, direction = "outgoing", keyError } =
   };
   const outgoing = direction === "outgoing";
   const pin = paired ? await identity.callSafetyCode((outgoing ? bob : alice).publicKey) : null;
+  const registerDevice = async () => "c".repeat(32);
+  const transport = linked ? {
+    protocol: 2, registerDevice, configuration: async () => ({}),
+    on(name, handler) { handlers.set(name, handler); return () => handlers.delete(name); },
+    send(name, data) { sent.push({ name, data }); return true; },
+  } : undefined;
   const { CallSession } = load("lib/connect/call-session.ts", {
     "./call-ice-statistics": load("lib/connect/call-ice-statistics.ts"),
     "./call-identity": { ...identity, getCallDevice: async () => {
       if (keyError) throw new identity.CallKeyError(keyError);
       return outgoing ? alice : bob;
-    }, getCallPin: () => pin },
+    }, getCallPin: () => linked ? manualKey ?? null : pin,
+    getLinkedCallPin: () => previousKey ?? null,
+    rememberLinkedCallPin: (_own, _peer, code) => { remembered = code; } },
     "@/lib/api-client": {
       VERIFIED_CALL_PROTOCOL: 1,
       getCallConfiguration: async () => ({}),
@@ -204,15 +214,15 @@ async function callFixture({ paired = true, direction = "outgoing", keyError } =
     },
   });
   const session = new CallSession({
-    callId: binding.callId, ownUsername: outgoing ? "alice" : "bob",
+    transport, callId: binding.callId, ownUsername: outgoing ? "alice" : "bob",
     username: outgoing ? "bob" : "alice", direction,
     kind: "video", configuration: {},
-    onConnecting() {}, onRinging() { ringing++; }, onConnected() { connected++; }, onLocalStream() {}, onRemoteStream() {},
+    onConnecting() {}, onRinging() { ringing++; }, onConnected(value) { connected++; trust = value; }, onLocalStream() {}, onRemoteStream() {},
     onEnd(reason) { ended = reason; },
   });
   return {
     session, sent, sender, track, alice, bob,
-    state: () => ({ captures, remoteDescriptions, connected, ended, ringing }),
+    state: () => ({ captures, remoteDescriptions, connected, ended, ringing, trust, remembered }),
     emit: (name, data) => handlers.get(name)?.({ callId: binding.callId, ...data }),
     connect() { peer.connectionState = "connected"; onConnectionState("connected"); },
   };
@@ -295,6 +305,71 @@ test("saved peer trust can be read again and is scoped to account and peer", () 
     assert.equal(load("lib/connect/call-identity.ts").getCallPin("alice", peer), code);
     assert.equal(identity.getCallPin("bob", peer), null);
     assert.equal(identity.getCallPin("alice", "bob"), null);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else delete globalThis.localStorage;
+  }
+});
+
+test("an account-linked outgoing session connects with no manual trust and remembers only the signed key", async () => {
+  const fixture = await callFixture({ linked: true, paired: false });
+  const publicKey = await identity.rawCallKey(fixture.bob);
+  await fixture.session.start();
+  const invite = fixture.sent.find(({ name }) => name === "call:verified-initiate").data;
+  assert.equal(invite.protocol, 2);
+  const ownKey = await identity.rawCallKey(fixture.alice);
+  assert.equal(await identity.verifyCallInvite({ nonce: "c".repeat(32), publicKey: ownKey, signature: invite.signature },
+    [binding.callId, "alice", "bob", binding.kind]), await identity.callSafetyCode(fixture.alice.publicKey));
+  fixture.emit("call:initiated", { protocol: 2, parties: { caller: "alice", recipient: "bob" } });
+  fixture.emit("call:accepted", { challenge: binding.challenge, publicKey });
+  await waitFor(() => fixture.sent.some(({ name }) => name === "call:offer"));
+  assert.equal(fixture.state().remembered, undefined);
+  fixture.emit("call:answered", { answer: await identity.signCallDescription(fixture.bob, binding, "answer", sdp) });
+  await waitFor(() => fixture.state().remoteDescriptions === 1);
+  fixture.connect();
+  await waitFor(() => fixture.sent.some(({ name }) => name === "call:connected"));
+  fixture.emit("call:connected");
+  assert.equal(fixture.state().trust, "account-linked");
+  assert.equal(fixture.state().remembered, await identity.callSafetyCode(fixture.bob.publicKey));
+  fixture.session.end();
+});
+
+test("a changed account-linked device is blocked before media and the saved key is preserved", async () => {
+  const fixture = await callFixture({ linked: true, previousKey: "a".repeat(64) });
+  await fixture.session.start();
+  fixture.emit("call:initiated", { protocol: 2, parties: { caller: "alice", recipient: "bob" } });
+  fixture.emit("call:accepted", { challenge: binding.challenge, publicKey: await identity.rawCallKey(fixture.bob) });
+  await waitFor(() => fixture.state().ended === "call-peer-key-mismatch");
+  assert.equal(fixture.state().captures, 0);
+  assert.equal(fixture.state().remembered, undefined);
+});
+
+test("account-linked trust remembers the first proven key and requires confirmation before replacement", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  } });
+  try {
+    const first = "a".repeat(64);
+    const second = "b".repeat(64);
+    assert.equal(identity.getCallPin("alice", "bob"), null);
+    identity.rememberLinkedCallPin("alice", "bob", first);
+    assert.equal(identity.getCallPin("alice", "bob"), null);
+    assert.equal(load("lib/connect/call-identity.ts").getLinkedCallPin("alice", "bob"), first);
+    assert.throws(() => identity.rememberLinkedCallPin("alice", "bob", second), { reason: "call-peer-key-mismatch" });
+    assert.equal(identity.getLinkedCallPin("alice", "bob"), first);
+    identity.setCallPin("alice", "bob", second);
+    assert.throws(() => identity.rememberLinkedCallPin("alice", "bob", first), { reason: "call-peer-key-mismatch" });
+    identity.rememberLinkedCallPin("alice", "bob", second);
+    assert.equal(identity.getLinkedCallPin("alice", "bob"), second);
+    assert.throws(() => identity.approveLinkedCallKey("alice", "bob", { previous: first, code: "c".repeat(64) }),
+      { reason: "call-peer-key-mismatch" });
+    identity.approveLinkedCallKey("alice", "bob", { previous: second, code: first });
+    assert.equal(identity.getCallPin("alice", "bob"), null);
+    assert.equal(identity.getLinkedCallPin("alice", "bob"), first);
   } finally {
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
     else delete globalThis.localStorage;

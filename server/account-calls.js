@@ -1,10 +1,10 @@
 import { accountWrites } from "./account-write-fence.js";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { migrationRequired } from "./pi-login.js";
 import { accountBinding, terminateAccountPstn } from "./pstn-account.js";
 import { identityBindingsCollection } from "./account-identity.js";
-import { selectVerifiedCallSockets, validCallProof, VERIFIED_CALL_PROTOCOL } from "./verified-call-protocol.js";
+import { validCallProof, ACCOUNT_CALL_PROTOCOL } from "./verified-call-protocol.js";
 
 const callRoom = (id) => "calls:account:" + id;
 const peerKey = (callId, accountId) => createHash("sha256").update(JSON.stringify([callId, accountId])).digest("hex");
@@ -21,6 +21,20 @@ function ice(value) {
       (value.usernameFragment != null && (typeof value.usernameFragment !== "string" || value.usernameFragment.length > 256))) return null;
   return { candidate: value.candidate, sdpMid: value.sdpMid ?? null, sdpMLineIndex: value.sdpMLineIndex ?? null,
     ...(value.usernameFragment != null ? { usernameFragment: value.usernameFragment } : {}) };
+}
+
+function verifyDeviceProof(publicKey, signature, fields) {
+  if (!validCallProof({ publicKey, signature })) return false;
+  try {
+    const raw = Buffer.from(publicKey, "hex");
+    const key = createPublicKey({ format: "jwk", key: {
+      kty: "EC", crv: "P-256",
+      x: raw.subarray(1, 33).toString("base64url"), y: raw.subarray(33).toString("base64url"),
+    } });
+    return verify("sha256", Buffer.from(JSON.stringify(fields)), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "hex"));
+  } catch {
+    return false;
+  }
 }
 
 export async function createAccountCalls({ app, io, db, writeAccount, userSessions, authenticateSession, normalizeMessagingUsername, allowGroupCalls = true, verifiedPeerCalls = false }) {
@@ -118,7 +132,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
     const session = userSessions.get(token);
     if (!session?.accountId || session.expiresAt <= Date.now()) return socket.disconnect();
     const id = session.accountId;
-    const username = session.piUsername;
+    const username = normalizeMessagingUsername(session.piUsername);
     const here = () => socket.connected && userSessions.get(token) === session && session.expiresAt > Date.now();
     const participant = () => ({ socketId: socket.id, username });
     socket.join(callRoom(id));
@@ -135,6 +149,34 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
         }
         if (here() && data && typeof data === "object") await handler(data);
       } catch (error) { report(error); }
+    });
+    let registrationChallenge;
+    let deviceKey;
+    let inviteNonce;
+    function deviceEvent(event, handle) {
+      socket.on(event, async (data, reply) => {
+        if (typeof reply !== "function") return;
+        try {
+          if (!verifiedPeerCalls || socket.handshake.auth?.verifiedCallProtocol !== ACCOUNT_CALL_PROTOCOL ||
+              !here() || !username || (await binding(id))?.state !== "active" || !here()) return reply({});
+          reply(handle(data) ?? {});
+        } catch (error) { report(error); reply({}); }
+      });
+    }
+    deviceEvent("call:device-challenge", () => {
+      inviteNonce = null;
+      registrationChallenge = { nonce: randomBytes(16).toString("hex"), expires: Date.now() + 30000 };
+      return { nonce: registrationChallenge.nonce };
+    });
+    deviceEvent("call:register-device", (data) => {
+      const challenge = registrationChallenge;
+      registrationChallenge = null;
+      if (!challenge || challenge.expires <= Date.now() || challenge.nonce !== data?.nonce ||
+          (deviceKey && deviceKey !== data.publicKey) ||
+          !verifyDeviceProof(data.publicKey, data.signature, ["oneconnect/call-device/v1", username, challenge.nonce, data.publicKey])) return;
+      deviceKey = data.publicKey;
+      inviteNonce = challenge;
+      return { registered: true };
     });
     async function canSignal(call, target, requiredSocket = true) {
       if (!call || !call.audience.has(id) || (requiredSocket && call.participants.get(id)?.socketId !== socket.id)) return false;
@@ -153,7 +195,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       const verified = !isGroup && verifiedPeerCalls;
       if (isGroup && !allowGroupCalls) return reject("unavailable");
       if (!validCallId(data.callId) || !["voice", "video"].includes(data.kind)) return reject("invalid");
-      if (verified && !selectVerifiedCallSockets(!verifiedEvent, data.protocol, socket.handshake.auth?.verifiedCallProtocol, [])) {
+      if (verified && (!verifiedEvent || data.protocol !== ACCOUNT_CALL_PROTOCOL || socket.handshake.auth?.verifiedCallProtocol !== ACCOUNT_CALL_PROTOCOL)) {
         return reject("call-update-required");
       }
       if (verified && !/^[a-f0-9]{32}$/.test(data.callId)) return reject("invalid");
@@ -161,6 +203,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       let groupRecord;
       let invitedSockets;
       let parties;
+      let invite;
       if (isGroup) {
         if (!validGroupId(data.groupId)) return reject("invalid");
         groupRecord = await group(data.groupId);
@@ -169,13 +212,22 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       } else {
         const target = normalizeMessagingUsername(data.to);
         if (!target) return reject("invalid");
+        if (verified) {
+          const challenge = inviteNonce;
+          inviteNonce = null;
+          if (!deviceKey || !challenge || challenge.expires <= Date.now()) return reject("call-device-registration-failed");
+          if (!verifyDeviceProof(deviceKey, data.signature, ["oneconnect/call-invite/v1", data.callId, challenge.nonce, username, target, data.kind])) {
+            return reject("call-signature-invalid");
+          }
+          invite = { nonce: challenge.nonce, publicKey: deviceKey, signature: data.signature };
+        }
         const result = await bindings.find({ username: target, state: "active" }).limit(2).toArray();
         const peer = result.length === 1 ? result[0].accountId : null;
         const room = peer && namespace.adapter.rooms.get(callRoom(peer));
         if (!peer || peer === id || !room?.size) return reject("offline");
         if (verified) {
           const recipients = [...room].map((socketId) => namespace.sockets.get(socketId)).filter(Boolean);
-          const compatible = selectVerifiedCallSockets(false, data.protocol, socket.handshake.auth?.verifiedCallProtocol, recipients);
+          const compatible = recipients.filter((peerSocket) => peerSocket.handshake.auth?.verifiedCallProtocol === ACCOUNT_CALL_PROTOCOL);
           if (!compatible.length) {
             for (const recipient of recipients) recipient.emit("call:update-required", { reason: "call-update-required" });
             return reject("call-update-required");
@@ -191,7 +243,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
         : members.some((member) => busy.has(member)))) return reject("busy");
       const call = { id: data.callId, logId: new ObjectId(), callerId: id, kind: data.kind,
         audience: new Set(members), participants: new Map([[id, participant()]]), phase: "ringing",
-        links: new Map(), connected: new Set(), invitedSockets,
+        links: new Map(), connected: new Set(), invitedSockets, parties, invite,
         ...(isGroup ? { groupId: data.groupId, groupName: groupRecord.name } : {}) };
       live.set(call.id, call);
       for (const member of isGroup ? [id] : members) busy.set(member, call.id);
@@ -203,12 +255,12 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       } catch (error) { await finish(call, "server-error"); throw error; }
       if ((await binding(id))?.state !== "active" || !here() || live.get(call.id) !== call) return finish(call, "account-unavailable");
       arm(call, 45000, "no-answer");
-      const peerEvent = { callId: call.id, ...(verified && { protocol: VERIFIED_CALL_PROTOCOL, parties }) };
+      const peerEvent = { callId: call.id, ...(verified && { protocol: ACCOUNT_CALL_PROTOCOL, parties }) };
       socket.emit(isGroup ? "group-call:started" : "call:initiated", isGroup ? payloadForGroup(call) : peerEvent);
       for (const target of members) {
         if (target === id || !await canSignal(call, target)) continue;
         deliver(call, target, isGroup ? "group-call:incoming" : "call:incoming",
-          isGroup ? payloadForGroup(call) : { ...peerEvent, from: username, kind: call.kind });
+          isGroup ? payloadForGroup(call) : { ...peerEvent, from: username, kind: call.kind, ...(verified && { invite }) });
       }
     }
     on("call:initiate", (data) => initiate(data, false));
@@ -224,8 +276,12 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
           typeof data.challenge !== "string" || !/^[a-f0-9]{32}$/.test(data.challenge))) {
         return socket.emit(errorEvent, { callId: data.callId, reason: "call-signature-invalid" });
       }
+      if (call.invitedSockets && !deviceKey) {
+        return socket.emit(errorEvent, { callId: data.callId, reason: "call-device-registration-failed" });
+      }
       if (call.participants.has(id) || (isGroup ? busy.has(id) || call.participants.size >= 6 : call.phase !== "ringing")) return;
       call.participants.set(id, participant());
+      if (call.invite) call.challenge = data.challenge;
       busy.set(id, call.id);
       call.phase = "connecting";
       if (isGroup) {
@@ -238,7 +294,7 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
         arm(call, 30000, "connection-timeout");
         socket.to(call.invitedSockets ? [...call.invitedSockets] : callRoom(id))
           .emit("call:ended", { callId: call.id, reason: "answered-elsewhere" });
-        const accepted = { callId: call.id, ...(call.invitedSockets && { challenge: data.challenge }) };
+        const accepted = { callId: call.id, ...(call.invitedSockets && { challenge: data.challenge, publicKey: deviceKey }) };
         deliver(call, call.callerId, "call:accepted", accepted, true);
         if (!call.invitedSockets) socket.emit("call:accepted", accepted);
       }
@@ -262,7 +318,10 @@ export async function createAccountCalls({ app, io, db, writeAccount, userSessio
       if (!["offer", "answer"].includes(type) || !desc || (!isGroup && call.phase !== "connecting")) return;
       if (call.invitedSockets) {
         const proof = data[kind];
-        if (!validCallProof(proof)) return finish(call, "call-signature-invalid");
+        if (proof?.publicKey !== deviceKey || !verifyDeviceProof(deviceKey, proof?.signature,
+          ["oneconnect/call-sdp/v1", call.id, call.challenge, call.parties.caller, call.parties.recipient, call.kind, type, desc.sdp])) {
+          return finish(call, "call-signature-invalid");
+        }
         Object.assign(desc, { publicKey: proof.publicKey, signature: proof.signature });
       }
       const pair = [id, target].sort().join(":");

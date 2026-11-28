@@ -9,3 +9,5 @@ export function selectVerifiedCallSockets(legacyEvent, protocol, callerVersion, 
   if (legacyEvent || protocol !== VERIFIED_CALL_PROTOCOL || callerVersion !== VERIFIED_CALL_PROTOCOL) return null;
   return recipients.filter((socket) => socket.handshake.auth?.verifiedCallProtocol === VERIFIED_CALL_PROTOCOL);
 }
+
+export const ACCOUNT_CALL_PROTOCOL = 2;

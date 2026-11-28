@@ -24,7 +24,7 @@ import { AccountSubscriptionStatus } from "./account-subscription-status";
 import { CallSafetySettings } from "./call-safety-settings";
 import { productionPiNetOrigin } from "@/lib/production-origins.mjs";
 
-export function ProfileView({ trustPeer }: { trustPeer?: string } = {}) {
+export function ProfileView({ trustPeer, changedKey }: { trustPeer?: string; changedKey?: import("@/lib/connect/call-identity").ChangedCallKey } = {}) {
   const { t, profile, setLanguage, pushToast, logout, updateProfile } = useConnect();
   const { sessionToken, piUsername } = usePiAuth();
   const [editOpen, setEditOpen] = useState(false);
@@ -167,7 +167,7 @@ export function ProfileView({ trustPeer }: { trustPeer?: string } = {}) {
       {/* logout */}
       <div className="mt-4 px-4 pb-4">
         <div className="mb-4">
-          <CallSafetySettings key={JSON.stringify([piUsername || profile.username, trustPeer])} username={piUsername || profile.username} initialPeer={trustPeer} language={profile.language} />
+          <CallSafetySettings key={JSON.stringify([piUsername || profile.username, trustPeer])} username={piUsername || profile.username} initialPeer={trustPeer} changedKey={changedKey} accountLinked={PI_NETWORK_CONFIG.PRODUCTION_REVIEW} language={profile.language} />
         </div>
         <div className="mb-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm">
           <Link href="/privacy" className="text-accent underline underline-offset-4">{t.privacyPolicy}</Link>

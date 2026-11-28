@@ -23,7 +23,8 @@ import { GroupCallActionsProvider } from "@/contexts/group-call-actions-context"
 import { usePstnCallController } from "@/lib/connect/use-pstn-call-controller";
 import { PstnCallScreen } from "./pstn-call-screen";
 import { usePiAuth } from "@/contexts/pi-auth-context";
-import { useAccountCallTransport } from "./account-peer-calls";
+import { disconnectedAccountTransport, useAccountCallTransport } from "./account-peer-calls";
+import type { ChangedCallKey } from "@/lib/connect/call-identity";
 import { PI_NETWORK_CONFIG } from "@/lib/system-config";
 
 
@@ -39,7 +40,8 @@ function AppInner() {
   const production = PI_NETWORK_CONFIG.PRODUCTION_REVIEW;
   const accountTransport = useAccountCallTransport(production ? sessionToken : null);
   const [tab, setTab] = useState<TabId>("chats");
-  const [trustPeer, setTrustPeer] = useState<string>();
+  const [trustPeer, setTrustPeer] = useState<{ owner: string; peer: string; change?: ChangedCallKey }>();
+  const currentTrustPeer = trustPeer?.owner === profile.username ? trustPeer : undefined;
   const [openChat, setOpenChat] = useState<string | null>(null);
   const groupCallBusyRef = useRef(false);
   const pstnBusyRef = useRef<() => boolean>(() => false);
@@ -55,9 +57,9 @@ function AppInner() {
     } = useCallController(
     CALL_CONFIGURATION,
     () => groupCallBusyRef.current || pstnBusyRef.current(),
-    accountTransport,
-    (peer) => {
-      setTrustPeer(peer);
+    production ? accountTransport ?? disconnectedAccountTransport : undefined,
+    (peer, change) => {
+      setTrustPeer({ owner: profile.username, peer, change });
       setOpenChat(null);
       setTab("profile");
     },
@@ -132,7 +134,7 @@ pstnBusyRef.current = isPstnBusy;
       )}
       {tab === "emails" && <EmailsView />}
       {tab === "invoices" && <InvoicesView />}
-      {tab === "profile" && <ProfileView trustPeer={trustPeer} />}
+      {tab === "profile" && <ProfileView trustPeer={currentTrustPeer?.peer} changedKey={currentTrustPeer?.change} />}
 
       <BottomNav tab={tab} onChange={(next) => { setTrustPeer(undefined); setTab(next); }} />
 

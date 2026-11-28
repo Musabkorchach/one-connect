@@ -19,12 +19,21 @@ import {
   signCallDescription,
   verifyCallDescription,
   validCallParties,
+  registeredKeyCode,
+  rememberLinkedCallPin,
+  getLinkedCallPin,
+  verifyCallInvite,
+  signCallFields,
+  type CallInvite,
+  type ChangedCallKey,
   type CallBinding,
   type SignedCallDescription,
 } from "./call-identity";
 import { readIceStatistics } from "./call-ice-statistics";
 
 export interface PeerCallTransport {
+  protocol?: number;
+  registerDevice?: (username: string, pair: CryptoKeyPair) => Promise<string>;
   on: typeof onCallEvent;
   send: typeof sendCallEvent;
   configuration: () => Promise<RTCConfiguration>;
@@ -33,6 +42,7 @@ export interface PeerCallTransport {
 
 export interface CallSessionOptions {
   transport?: PeerCallTransport;
+  invite?: CallInvite;
   callId: string;
   username: string;
   ownUsername: string;
@@ -44,12 +54,12 @@ export interface CallSessionOptions {
   onRemoteStream: (stream: MediaStream) => void;
   onConnecting: () => void;
   onRinging: () => void;
-  onConnected: () => void;
-  onEnd: (reason: string) => void;
+  onConnected: (trust: "manual" | "account-linked") => void;
+  onEnd: (reason: string, change?: ChangedCallKey) => void;
 }
 
 export class CallSession {
-  private readonly transport: Pick<PeerCallTransport, "on" | "send" | "configuration">;
+  private readonly transport: Pick<PeerCallTransport, "on" | "send" | "configuration" | "protocol" | "registerDevice">;
   private ended = false;
   private started = false;
   private cameraFacingMode: "user" | "environment" = "user";
@@ -61,6 +71,9 @@ export class CallSession {
   private challenge = "";
   private device: CryptoKeyPair | null = null;
   private pin: string | null = null;
+  private changedKey?: ChangedCallKey;
+  private expectedKey: string | null = null;
+  private trust: "manual" | "account-linked" = "manual";
   private descriptionReceived = false;
   private openingMedia = false;
   private mediaReady = false;
@@ -80,12 +93,12 @@ export class CallSession {
         if (this.ended || !this.protocolTimer || data?.callId !== this.options.callId) return;
         clearTimeout(this.protocolTimer);
         this.protocolTimer = null;
-        if (data.protocol !== VERIFIED_CALL_PROTOCOL) {
+        if (data.protocol !== (this.transport.protocol ?? VERIFIED_CALL_PROTOCOL)) {
           this.end("call-update-required");
           return;
         }
-        if (data.parties && (data.parties.caller !== this.options.ownUsername ||
-            data.parties.recipient !== this.options.username)) {
+        if ((this.transport.registerDevice && !data.parties) || (data.parties &&
+            (data.parties.caller !== this.options.ownUsername || data.parties.recipient !== this.options.username))) {
           this.end("call-identity-mismatch");
           return;
         }
@@ -112,9 +125,14 @@ export class CallSession {
             this.end("call-signature-invalid");
             return;
           }
+          if (this.transport.registerDevice && !data.publicKey) {
+            this.end("call-device-registration-failed");
+            return;
+          }
+          this.expectedKey = data.publicKey ?? null;
           this.challenge = data.challenge;
-          void this.prepareOutgoing().catch(() => {
-            this.end("connection-failed");
+          void this.prepareOutgoing().catch((error) => {
+            this.end(error instanceof CallKeyError ? error.reason : "connection-failed");
           });
         }
       }),
@@ -188,13 +206,15 @@ export class CallSession {
           return;
         }
 
-        this.options.onConnected();
+        this.options.onConnected(this.trust);
       }),
     );
   }
 
   private async prepareOutgoing() {
     const configuration = await this.transport.configuration();
+    if (this.ended) return;
+    if (this.expectedKey) this.checkPeerTrust(await registeredKeyCode(this.expectedKey));
     if (this.ended) return;
     await this.prepare(this.withRelayPolicy(configuration));
     if (!this.ended) await this.sendOffer();
@@ -220,8 +240,21 @@ export class CallSession {
     };
   }
 
+  private checkPeerTrust(code: string) {
+    const { ownUsername, username } = this.options;
+    const manual = getCallPin(ownUsername, username);
+    const previous = getLinkedCallPin(ownUsername, username);
+    const trusted = manual ?? previous;
+    if (trusted && trusted !== code) {
+      this.changedKey = { previous: trusted, code };
+      throw new CallKeyError("call-peer-key-mismatch");
+    }
+    this.pin = code;
+    this.trust = manual === code ? "manual" : "account-linked";
+  }
+
   private async verify(description: SignedCallDescription, type: "offer" | "answer") {
-    if (this.descriptionReceived || !this.pin) throw new CallKeyError("call-signature-invalid");
+    if (this.descriptionReceived || !this.pin || (this.expectedKey && description?.publicKey !== this.expectedKey)) throw new CallKeyError("call-signature-invalid");
     this.descriptionReceived = true;
     return verifyCallDescription(description, this.binding(), type, this.pin);
   }
@@ -309,7 +342,10 @@ export class CallSession {
   }
 
   private async publishMedia() {
-    if (getCallPin(this.options.ownUsername, this.options.username) !== this.pin) {
+    if (this.expectedKey && this.pin) {
+      this.checkPeerTrust(this.pin);
+      rememberLinkedCallPin(this.options.ownUsername, this.options.username, this.pin);
+    } else if (getCallPin(this.options.ownUsername, this.options.username) !== this.pin) {
       throw new CallKeyError("call-peer-key-mismatch");
     }
     await Promise.all(this.pendingSenders.map(({ sender, track }) => sender.replaceTrack(track)));
@@ -328,15 +364,30 @@ export class CallSession {
     try {
       const { ownUsername, username } = this.options;
       if (!validCallParties(ownUsername, username)) throw new CallKeyError("call-identity-mismatch");
-      this.pin = getCallPin(ownUsername, username);
-      if (!this.pin) throw new CallKeyError("call-peer-untrusted");
-      this.device = await getCallDevice(this.options.ownUsername);
+      const register = this.transport.registerDevice;
+      if (register && this.options.direction === "incoming") {
+        const invite = this.options.invite;
+        if (!invite) throw new CallKeyError("call-signature-invalid");
+        const code = await verifyCallInvite(invite, [this.options.callId, username, ownUsername, this.options.kind]);
+        this.checkPeerTrust(code);
+        this.expectedKey = invite.publicKey;
+      } else if (!register) {
+        this.pin = getCallPin(ownUsername, username);
+        if (!this.pin) throw new CallKeyError("call-peer-untrusted");
+      }
+      if (this.ended) return;
+      this.device = await getCallDevice(ownUsername, Boolean(register));
+      if (this.ended) return;
+      const nonce = register && await register(ownUsername, this.device);
+      const signature = nonce && this.options.direction === "outgoing" ? await signCallFields(this.device,
+        ["oneconnect/call-invite/v1", this.options.callId, nonce, ownUsername, username, this.options.kind]) : undefined;
       if (this.ended) return;
       if (this.options.direction === "outgoing") {
         this.protocolTimer = setTimeout(() => this.end("call-update-required"), 5000);
         if (!this.transport.send("call:verified-initiate", {
           callId: this.options.callId, to: this.options.username, kind: this.options.kind,
-          protocol: VERIFIED_CALL_PROTOCOL,
+          protocol: this.transport.protocol ?? VERIFIED_CALL_PROTOCOL,
+          ...(signature && { signature }),
         })) this.end("disconnected", false);
         return;
       }
@@ -559,6 +610,6 @@ export class CallSession {
       this.transport.send("call:end", { callId: this.options.callId });
     }
 
-    this.options.onEnd(reason);
+    this.options.onEnd(reason, this.changedKey);
   }
 }

@@ -26,8 +26,10 @@ export const WS_URL = productionBrowser ? productionApiOrigin :
 
 let socket: ReturnType<typeof io> | null = null;
 export const VERIFIED_CALL_PROTOCOL = 1;
+export const ACCOUNT_CALL_PROTOCOL = 2;
 export interface CallEventMap {
   "call:incoming": {
+    invite?: import("@/lib/connect/call-identity").CallInvite;
     parties?: { caller: string; recipient: string };
     callId: string;
     from: string;
@@ -36,7 +38,7 @@ export interface CallEventMap {
   };
   "call:initiated": { callId: string; protocol: number; parties?: { caller: string; recipient: string } };
   "call:update-required": { reason: "call-update-required" };
-  "call:accepted": { callId: string; challenge: string };
+  "call:accepted": { callId: string; challenge: string; publicKey?: string };
   "call:offer": {
     callId: string;
     offer: SignedCallDescription;
@@ -767,6 +769,7 @@ export async function getCallConfiguration(sessionToken?: string): Promise<RTCCo
 
 export interface CallCommandMap {
   "call:verified-initiate": {
+    signature?: string;
     callId: string;
     to: string;
     kind: "voice" | "video";

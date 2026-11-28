@@ -123,7 +123,7 @@ export function LivePeerCallScreen({
         <p className="mt-2 text-xs text-white/70">
           {call.kind === "video" ? t.videoCall : t.voiceCall}
         </p>
-        {call.phase === "active" && <p className="mt-1 text-xs text-white">Peer device verified</p>}
+        {call.phase === "active" && <p className="mt-1 text-xs text-white">{call.trust === "manual" ? "Peer device verified by safety code" : "Peer device linked to its Pi account by One Connect"}</p>}
       </div>
 
       <div className="pc-safe-bottom relative z-[5] px-6 pb-8">
