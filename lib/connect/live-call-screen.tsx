@@ -26,8 +26,8 @@ type CallScreenProps = {
 };
 
 export function LiveCallScreen(props: CallScreenProps) {
-  const { t } = useConnect();
-  return <LivePeerCallScreen {...props} t={t} />;
+  const { t, profile } = useConnect();
+  return <LivePeerCallScreen {...props} t={t} language={profile.language} />;
 }
 
 export function LivePeerCallScreen({
@@ -36,8 +36,13 @@ export function LivePeerCallScreen({
   onEnd,
   onMutedChange,
   onVideoEnabledChange,
-  onSwitchCamera, t,
-}: CallScreenProps & { t: ReturnType<typeof getDict> }) {
+  onSwitchCamera, t, language,
+}: CallScreenProps & { t: ReturnType<typeof getDict>; language?: string }) {
+  const [outputLabel, outputUnavailableLabel] = language === "ar"
+    ? ["مخرج الصوت", "الهاتف يحدّد مخرج صوت المكالمة."]
+    : language === "fr"
+      ? ["Sortie audio", "Le téléphone gère la sortie audio de l'appel."]
+      : ["Audio output", "Your phone manages the call audio output."];
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
@@ -83,7 +88,8 @@ export function LivePeerCallScreen({
       <CallStream
         stream={call.remoteStream}
         playbackLabel={t.unmute}
-        outputLabel={t.speaker}
+        outputLabel={outputLabel}
+        outputUnavailableLabel={outputUnavailableLabel}
         className={
           hasVideo
             ? "absolute inset-0 h-full w-full object-cover"

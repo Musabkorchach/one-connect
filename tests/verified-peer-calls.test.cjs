@@ -542,3 +542,20 @@ test("server rejects legacy callers and invites only compatible recipient socket
   assert.deepEqual(selectVerifiedCallSockets(false, 1, 1, [old]), []);
   assert.deepEqual(selectVerifiedCallSockets(false, 1, 1, [old, current]), [current]);
 });
+
+test("the audio output control requires multiple distinct browser-exposed sinks", async () => {
+  const { listCallAudioOutputs, setCallAudioOutput } = load("lib/connect/call-audio-output.ts");
+  const sink = (deviceId, kind = "audiooutput") => ({ deviceId, kind });
+  const first = sink("built-in");
+  const second = sink("headset");
+  const devices = (...outputs) => ({ enumerateDevices: async () => outputs });
+  const chosen = [];
+  const element = { setSinkId: async (id) => { chosen.push(id); } };
+  assert.deepEqual(await listCallAudioOutputs({}, devices(first, second)), []);
+  assert.deepEqual(await listCallAudioOutputs(element, devices(sink("default"), sink("communications"), first, first, sink("mic", "audioinput"))), []);
+  assert.deepEqual(await listCallAudioOutputs(element, devices(sink(""), sink("default"))), []);
+  assert.deepEqual(await listCallAudioOutputs(element, devices(sink("default"), first, second)), [first, second]);
+  assert.deepEqual(chosen, []);
+  await setCallAudioOutput(element, second.deviceId);
+  assert.deepEqual(chosen, ["headset"]);
+});
